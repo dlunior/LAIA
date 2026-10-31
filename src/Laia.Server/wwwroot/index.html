@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LAIA Server</title>
+<link rel="icon" href="/logo.png">
+<style>
+  :root{--bg:#0b1020;--panel:#121a2e;--panel2:#18223a;--line:#24314f;--text:#e8eefc;--muted:#8d9bbb;--accent:#38bdf8;--ok:#34d399;--warn:#fbbf24;--bad:#f87171}
+  *{box-sizing:border-box}
+  body{margin:0;background:radial-gradient(1200px 600px at 10% -10%,#1b2b55 0,transparent 60%),var(--bg);color:var(--text);font:15px/1.5 "Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;min-height:100vh}
+  header{display:flex;align-items:center;gap:14px;padding:24px 32px}
+  header img{width:44px;height:44px;border-radius:11px}
+  header h1{font-size:22px;margin:0;font-weight:600}
+  header .sub{color:var(--muted);font-size:13px}
+  main{max-width:1100px;margin:0 auto;padding:0 32px 48px;display:grid;gap:18px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
+  .card{background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:14px;padding:20px 22px}
+  .card h2{font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:0 0 12px;font-weight:600}
+  .big{font-size:22px;font-weight:600;display:flex;align-items:center;gap:10px}
+  .dot{width:12px;height:12px;border-radius:50%;background:var(--muted);box-shadow:0 0 0 4px rgba(141,155,187,.15)}
+  .dot.ok{background:var(--ok);box-shadow:0 0 0 4px rgba(52,211,153,.18)}
+  .dot.warn{background:var(--warn);box-shadow:0 0 0 4px rgba(251,191,36,.18)}
+  .dot.bad{background:var(--bad);box-shadow:0 0 0 4px rgba(248,113,113,.18)}
+  .muted{color:var(--muted)}
+  dl{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;margin:14px 0 0}
+  dt{color:var(--muted)} dd{margin:0}
+  .wide{grid-column:1/-1}
+  .log{max-height:360px;overflow:auto;display:flex;flex-direction:column;gap:10px}
+  .ex{border:1px solid var(--line);border-radius:10px;padding:10px 14px;background:rgba(255,255,255,.02)}
+  .ex .who{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+  .ex .pilot{color:#cbd5f5} .ex .atc{color:var(--accent);font-weight:500}
+  form{display:flex;gap:10px;margin-top:6px}
+  input{flex:1;background:#0d1426;border:1px solid var(--line);border-radius:10px;color:var(--text);padding:10px 12px;font:inherit}
+  button{background:linear-gradient(180deg,#3cc4ff,#1e9bdc);border:0;color:#04121f;font-weight:600;border-radius:10px;padding:10px 16px;cursor:pointer;font:inherit;font-weight:600}
+  button:disabled{opacity:.4;cursor:default}
+  .empty{color:var(--muted);font-style:italic}
+</style>
+</head>
+<body>
+<header>
+  <img src="/logo.png" alt="">
+  <div><h1>LAIA Server</h1><div class="sub" id="machine">Connecting…</div></div>
+</header>
+<main>
+  <section class="card">
+    <h2>Speech engine</h2>
+    <div class="big"><span class="dot" id="sdot"></span><span id="stext">Checking…</span></div>
+    <div class="muted" id="sdetail"></div>
+    <dl id="sinfo"></dl>
+  </section>
+  <section class="card">
+    <h2>Flight sim PC</h2>
+    <div class="big"><span class="dot" id="pdot"></span><span id="ptext">Not connected yet</span></div>
+    <div class="muted" id="pdetail">Install LAIA Sim on your flight sim PC. It finds this server on its own.</div>
+  </section>
+  <section class="card">
+    <h2>Test the controller voice</h2>
+    <form id="say"><input id="sayText" value="Delta twelve thirty-four, LaGuardia Ground, runway one three, taxi via Bravo, hold short of runway four." aria-label="Text to speak"><button id="sayBtn">Speak</button></form>
+    <div class="muted" id="sayMsg" style="margin-top:8px"></div>
+  </section>
+  <section class="card wide">
+    <h2>Radio log</h2>
+    <div class="log" id="log"><div class="empty">Nothing yet. Hold your push-to-talk button in the sim and call the controller.</div></div>
+  </section>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+function esc(s){return (s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
+function dur(s){if(s<60)return s+"s";if(s<3600)return Math.floor(s/60)+" min";return Math.floor(s/3600)+" h "+Math.floor(s%3600/60)+" min"}
+async function poll(){
+  try{
+    const r=await fetch("/api/status");const s=await r.json();
+    $("machine").textContent=`${s.machine} · version ${s.version} · up ${dur(s.uptimeSeconds)}`;
+    const st=s.speech.status;const map={ready:["ok","Ready"],loading:["warn","Warming up"],starting:["warn","Starting"],error:["bad","Problem"]};
+    const [cls,label]=map[st]||["","Unknown"];$("sdot").className="dot "+cls;$("stext").textContent=label;
+    $("sdetail").textContent=s.speech.detail||"";
+    const h=s.speech.health||{};const rows=[];
+    if(h.whisper_model)rows.push(["Listening",`Whisper ${h.whisper_model} on ${h.whisper_device==="cuda"?"graphics card":"processor"}`]);
+    if(h.tts)rows.push(["Voice",h.tts]);
+    if(h.last_ms)rows.push(["Last reply",`${Math.round(h.last_ms)} ms`]);
+    $("sinfo").innerHTML=rows.map(([a,b])=>`<dt>${esc(a)}</dt><dd>${esc(b)}</dd>`).join("");
+    $("sayBtn").disabled=st!=="ready";
+    if(s.sim){const fresh=s.sim.lastSeenSeconds<90;$("pdot").className="dot "+(fresh?"ok":"warn");
+      $("ptext").textContent=fresh?"Connected":"Last seen "+dur(s.sim.lastSeenSeconds)+" ago";
+      $("pdetail").textContent=(s.sim.name||"Sim PC")+" at "+s.sim.address;}
+    const t=s.transcript||[];
+    if(t.length){$("log").innerHTML=t.map(e=>`<div class="ex"><div class="who">${new Date(e.time).toLocaleTimeString()} · ${Math.round(e.ms)} ms</div><div class="pilot">You: ${esc(e.heard)||"<i>(nothing heard)</i>"}</div><div class="atc">ATC: ${esc(e.reply)}</div></div>`).join("");}
+  }catch(e){$("machine").textContent="Can't reach the LAIA service. Is it running?";}
+}
+$("say").addEventListener("submit",async e=>{
+  e.preventDefault();$("sayMsg").textContent="Speaking…";
+  try{const r=await fetch("/api/say",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text:$("sayText").value,radio:true})});
+    if(!r.ok){$("sayMsg").textContent=(await r.json()).error||"Failed";return}
+    const url=URL.createObjectURL(await r.blob());new Audio(url).play();$("sayMsg").textContent="";
+  }catch(err){$("sayMsg").textContent="Failed: "+err}
+});
+poll();setInterval(poll,2000);
+</script>
+</body>
+</html>

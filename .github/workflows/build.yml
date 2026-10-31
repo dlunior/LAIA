@@ -1,0 +1,106 @@
+name: Build installers
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "docs/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 75
+    env:
+      VERSION: 0.1.${{ github.run_number }}
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_NOLOGO: "1"
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Cache portable Python
+        id: pycache
+        uses: actions/cache@v4
+        with:
+          path: out/python
+          key: python-3.12.10-${{ hashFiles('speech/requirements.txt', 'build/make-python.ps1') }}
+
+      - name: Build portable Python with speech packages
+        if: steps.pycache.outputs.cache-hit != 'true'
+        run: ./build/make-python.ps1 -Out out/python
+
+      - name: Publish apps and pack installers
+        run: ./build/pack.ps1 -Version $env:VERSION -PythonDir out/python
+
+      - name: Render installer screenshots
+        continue-on-error: true
+        run: |
+          $dir = "$pwd\out\screenshots"
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          foreach ($stub in @("out\setup-server\LAIA-Server-Setup.exe", "out\setup-sim\LAIA-Sim-Setup.exe")) {
+            $p = Start-Process $stub -ArgumentList "/screenshots `"$dir`"" -PassThru
+            if (-not $p.WaitForExit(120000)) { $p.Kill(); Write-Host "timed out: $stub" }
+          }
+          Get-ChildItem $dir
+
+      - name: End-to-end test (install, voice round trip, uninstall)
+        id: smoke
+        env:
+          SMOKE_OUT: ${{ github.workspace }}\out\screenshots
+        run: ./build/smoke-test.ps1 -Dist out\dist
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: LAIA-installers-${{ env.VERSION }}
+          path: out/dist/*.exe
+          compression-level: 0
+
+      - name: Publish release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $notes = @"
+          Two installers:
+
+          - **LAIA-Server-Setup.exe** - run on the ATC PC (the one with the graphics card).
+          - **LAIA-Sim-Setup.exe** - run on the flight simulator PC.
+
+          Build step 1: voice round trip. Hold push-to-talk in the sim, call ATC, hear the reply.
+          Passed the automated end-to-end test (install, discovery, speech round trip, uninstall).
+          "@
+          gh release create "v$env:VERSION" out/dist/LAIA-Server-Setup.exe out/dist/LAIA-Sim-Setup.exe `
+            --title "LAIA $env:VERSION" --notes $notes --prerelease --target $env:GITHUB_SHA
+
+      - name: Share screenshots and logs on the ci-screenshots branch
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "shots"
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          if (Test-Path out\screenshots) { Copy-Item out\screenshots\* $dir -ErrorAction SilentlyContinue }
+          Copy-Item (Join-Path $env:TEMP "LAIA-Setup.log") $dir -ErrorAction SilentlyContinue
+          Copy-Item "C:\ProgramData\LAIA\logs\server.log" $dir -ErrorAction SilentlyContinue
+          "run ${{ github.run_number }} commit ${{ github.sha }} smoke=${{ steps.smoke.outcome }}" | Set-Content "$dir\RUN.txt"
+          Set-Location $dir
+          git init -q -b ci-screenshots
+          git config user.name "laia-ci"
+          git config user.email "laia-ci@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Screenshots for run ${{ github.run_number }}"
+          git push -f -q "https://x-access-token:$env:GH_TOKEN@github.com/${{ github.repository }}.git" ci-screenshots

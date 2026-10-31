@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <RootNamespace>Laia.Setup.Common</RootNamespace>
+    <AssemblyName>Laia.Setup.Common</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <Resource Include="Assets\logo.png" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Laia.Common\Laia.Common.csproj" />
+  </ItemGroup>
+</Project>
