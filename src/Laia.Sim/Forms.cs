@@ -47,6 +47,7 @@ internal sealed class PttSetupForm : Form
 
         Controls.AddRange(new Control[] { title, body, card, _save, cancel });
 
+        Theme.Done(this);
         Shown += (_, _) => { _baseline = Input.Snapshot(); _poll.Start(); Activate(); };
         _poll.Tick += (_, _) => Poll();
         FormClosed += (_, _) => _poll.Dispose();
@@ -77,9 +78,7 @@ internal sealed class RadioLogForm : Form
         Text = "LAIA - Radio";
         Icon = Theme.AppIcon(32);
         StartPosition = FormStartPosition.Manual;
-        var wa = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1280, 720);
         Size = new Size(520, 300);
-        Location = new Point(wa.Right - Width - 24, wa.Bottom - Height - 24);
         TopMost = true;
         ShowInTaskbar = false;
         MinimumSize = new Size(320, 160);
@@ -91,6 +90,16 @@ internal sealed class RadioLogForm : Form
         var pad = new Panel { Dock = DockStyle.Fill, Padding = new Padding(14, 10, 8, 10), BackColor = Theme.Bg };
         pad.Controls.Add(_box);
         Controls.Add(pad);
+        Theme.DarkScroll(_box);
+        Theme.Done(this);
+        var placed = false;
+        Shown += (_, _) =>
+        {
+            if (placed) return;
+            placed = true;
+            var wa = Screen.FromControl(this).WorkingArea;
+            Location = new Point(wa.Right - Width - 24, wa.Bottom - Height - 24);
+        };
         FormClosing += (_, e) => { if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); } };
     }
 

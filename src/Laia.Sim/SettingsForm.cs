@@ -19,7 +19,7 @@ internal sealed class SettingsForm : Form
     private readonly Func<Task>? _rediscover;
     private readonly string _speech;
     private readonly Panel _content = new() { Dock = DockStyle.Fill, BackColor = Theme.Bg, Padding = new Padding(32, 24, 32, 12) };
-    private readonly Panel _nav = new() { Dock = DockStyle.Left, Width = 210, BackColor = Color.FromArgb(9, 13, 24), Padding = new Padding(12, 20, 12, 12) };
+    private readonly FlowLayoutPanel _nav = new() { Dock = DockStyle.Left, Width = 210, BackColor = Color.FromArgb(9, 13, 24), Padding = new Padding(10, 18, 10, 12), FlowDirection = FlowDirection.TopDown, WrapContents = false };
     private readonly Dictionary<string, Control> _pages = new();
     private readonly Dictionary<string, NavItem> _navItems = new();
     private readonly MicMonitor _mic = new();
@@ -53,10 +53,11 @@ internal sealed class SettingsForm : Form
         Theme.Apply(this);
         Text = "LAIA Sim - Settings";
         Icon = Theme.AppIcon(32);
-        FormBorderStyle = FormBorderStyle.FixedSingle;
-        MaximizeBox = false;
+        FormBorderStyle = FormBorderStyle.Sizable;
+        MaximizeBox = true;
         StartPosition = FormStartPosition.CenterScreen;
         ClientSize = new Size(900, 600);
+        MinimumSize = new Size(720, 480);
 
         var footer = new Panel { Dock = DockStyle.Bottom, Height = 64, BackColor = Theme.Bg };
         footer.Paint += (_, e) => { using var p = new Pen(Theme.Line); e.Graphics.DrawLine(p, 0, 0, footer.Width, 0); };
@@ -88,6 +89,7 @@ internal sealed class SettingsForm : Form
         AddPage("Connection", "", BuildConnection());
         AddPage("About", "", BuildAbout());
         ShowPage("Audio");
+        Theme.Done(this);
 
         _meterTimer.Tick += (_, _) => { _meter.Level = _mic.Level; _meter.Invalidate(); };
         Shown += async (_, _) =>
@@ -104,13 +106,13 @@ internal sealed class SettingsForm : Form
 
     private void BuildNav()
     {
-        var title = new Label { Text = "Settings", Font = new Font("Segoe UI Semibold", 15f), ForeColor = Theme.Text, AutoSize = true, Location = new Point(18, 18) };
+        var title = new Label { Text = "Settings", Font = new Font("Segoe UI Semibold", 15f), ForeColor = Theme.Text, AutoSize = true, Margin = new Padding(8, 0, 0, 22) };
         _nav.Controls.Add(title);
     }
 
     private void AddPage(string name, string glyph, Control page)
     {
-        var item = new NavItem(name, glyph) { Location = new Point(10, 70 + _navItems.Count * 44), Width = 188 };
+        var item = new NavItem(name, glyph) { Width = 190, Height = 40, Margin = new Padding(0, 0, 0, 4) };
         item.Click += (_, _) => ShowPage(name);
         _nav.Controls.Add(item);
         _navItems[name] = item;
@@ -131,9 +133,32 @@ internal sealed class SettingsForm : Form
     private static FlowLayoutPanel Page(string title, string subtitle)
     {
         var f = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoScroll = true, BackColor = Theme.Bg };
+        Theme.DarkScroll(f);
+        f.Resize += (_, _) => FitWidths(f);
+        f.VisibleChanged += (_, _) => FitWidths(f);
         f.Controls.Add(new Label { Text = title, Font = new Font("Segoe UI Semibold", 18f), ForeColor = Theme.Text, AutoSize = true, Margin = new Padding(0, 0, 0, 4) });
         f.Controls.Add(Hint(subtitle, 600, 0, 14));
         return f;
+    }
+
+    /// <summary>Keeps text wrapped and fields inside the window at any size, so there is never a sideways scrollbar.</summary>
+    private static void FitWidths(FlowLayoutPanel f)
+    {
+        var avail = f.ClientSize.Width - SystemInformation.VerticalScrollBarWidth - (int)(8 * Theme.Scale(f));
+        if (avail < 100) return;
+        f.SuspendLayout();
+        foreach (Control c in f.Controls)
+        {
+            if (c is Label { AutoSize: true } l) l.MaximumSize = new Size(avail, 0);
+            else if (c.Tag is int want) c.Width = Math.Min((int)(want * Theme.Scale(f)), avail);
+            else if (c is FlowLayoutPanel row)
+            {
+                var others = row.Controls.Cast<Control>().Where(x => x.Tag is not int).Sum(x => x.Width + x.Margin.Horizontal);
+                foreach (Control x in row.Controls)
+                    if (x.Tag is int w) x.Width = Math.Max((int)(160 * Theme.Scale(f)), Math.Min((int)(w * Theme.Scale(f)), avail - others - x.Margin.Horizontal));
+            }
+        }
+        f.ResumeLayout(true);
     }
 
     private static Label Hint(string text, int width = 600, int top = 4, int bottom = 0) => new()
@@ -149,7 +174,7 @@ internal sealed class SettingsForm : Form
 
     private static TextBox Input(bool secret = false) => new()
     {
-        Width = 360, BackColor = Theme.Panel, ForeColor = Theme.Text, BorderStyle = BorderStyle.FixedSingle, Font = new Font("Segoe UI", 11f),
+        Width = 360, Tag = 360, BackColor = Theme.Panel, ForeColor = Theme.Text, BorderStyle = BorderStyle.FixedSingle, Font = new Font("Segoe UI", 11f),
         UseSystemPasswordChar = secret, Margin = new Padding(0, 0, 10, 0),
     };
 
@@ -177,19 +202,20 @@ internal sealed class SettingsForm : Form
         _micBox = new DarkCombo(AudioDevices.List(DataFlow.Capture), _s.MicDeviceId);
         _micBox.SelectedIndexChanged += (_, _) => _mic.Start(SelectedId(_micBox));
         p.Controls.Add(_micBox);
-        _meter = new LevelMeter { Width = 420, Height = 10, Margin = new Padding(0, 10, 0, 0) };
+        _micBox.Tag = 420;
+        _meter = new LevelMeter { Width = 420, Height = 10, Margin = new Padding(0, 10, 0, 0), Tag = 420 };
         p.Controls.Add(_meter);
         p.Controls.Add(Hint("Talk normally: the bar should reach the middle. If it barely moves, LAIA may not hear you."));
 
         p.Controls.Add(FieldTitle("ATC voice plays on"));
-        _spkBox = new DarkCombo(AudioDevices.List(DataFlow.Render), _s.SpeakerDeviceId);
+        _spkBox = new DarkCombo(AudioDevices.List(DataFlow.Render), _s.SpeakerDeviceId) { Tag = 420 };
         var test = Theme.SecondaryButton("Play test");
         test.Margin = new Padding(10, 0, 0, 0);
         test.Click += async (_, _) => await PlayTestAsync();
         p.Controls.Add(Row(_spkBox, test));
 
         p.Controls.Add(FieldTitle("ATC volume"));
-        _volume = new Slider { Width = 420, Height = 28, Value = _s.Volume };
+        _volume = new Slider { Width = 420, Height = 28, Value = _s.Volume, Tag = 420 };
         p.Controls.Add(_volume);
 
         _clicks = Check("Play a radio click when I press and release push-to-talk", _s.RadioClicks);
@@ -490,21 +516,23 @@ internal sealed class SettingsForm : Form
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics;
+            var k = Theme.Scale(this);
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.Clear(Parent?.BackColor ?? Theme.Bg);
             if (Selected || _hover)
             {
-                using var path = Rounded(new Rectangle(0, 0, Width - 1, Height - 1), 8);
+                using var path = Rounded(new Rectangle(0, 0, Width - 1, Height - 1), (int)(8 * k));
                 using var b = new SolidBrush(Selected ? Color.FromArgb(28, 40, 66) : Color.FromArgb(18, 26, 44));
                 g.FillPath(b, path);
             }
-            if (Selected) { using var a = new SolidBrush(Theme.Accent); g.FillRectangle(a, 0, 10, 3, Height - 20); }
+            if (Selected) { using var a = new SolidBrush(Theme.Accent); g.FillRectangle(a, 0, Height / 4, Math.Max(2, (int)(3 * k)), Height / 2); }
             using var icon = new Font("Segoe Fluent Icons", 11f);
             using var iconFallback = new Font("Segoe MDL2 Assets", 11f);
             var f = icon.Name == "Segoe Fluent Icons" ? icon : iconFallback;
-            TextRenderer.DrawText(g, _glyph, f, new Point(14, 11), Selected ? Theme.Accent : Theme.Muted);
+            const TextFormatFlags mid = TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding;
+            TextRenderer.DrawText(g, _glyph, f, new Rectangle((int)(14 * k), 0, (int)(24 * k), Height), Selected ? Theme.Accent : Theme.Muted, mid | TextFormatFlags.HorizontalCenter);
             using var font = new Font("Segoe UI", 10.5f, Selected ? FontStyle.Bold : FontStyle.Regular);
-            TextRenderer.DrawText(g, Text, font, new Point(42, 9), Selected ? Theme.Text : Theme.Muted);
+            TextRenderer.DrawText(g, Text, font, new Rectangle((int)(46 * k), 0, Width - (int)(46 * k), Height), Selected ? Theme.Text : Theme.Muted, mid | TextFormatFlags.EndEllipsis);
         }
     }
 
@@ -518,7 +546,7 @@ internal sealed class SettingsForm : Form
             BackColor = Theme.Panel;
             ForeColor = Theme.Text;
             Font = new Font("Segoe UI", 10.5f);
-            ItemHeight = 24;
+            ItemHeight = TextRenderer.MeasureText("Ag", Font).Height + 8;
             Width = 420;
             Margin = new Padding(0);
             foreach (var i in items) Items.Add(i);
@@ -571,20 +599,26 @@ internal sealed class SettingsForm : Form
             MouseMove += (_, e) => { if (e.Button == MouseButtons.Left) Set(e.X); };
         }
 
-        private void Set(int x) => Value = (int)Math.Round((x - 9) * 100.0 / Math.Max(1, Width - 60));
+        private int Inset => (int)(9 * Theme.Scale(this));
+        private int TrackW => Width - (int)(60 * Theme.Scale(this));
+        private void Set(int x) => Value = (int)Math.Round((x - Inset) * 100.0 / Math.Max(1, TrackW));
 
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.Clear(Parent?.BackColor ?? Theme.Bg);
-            var trackW = Width - 60;
+            var k = Theme.Scale(this);
+            var trackW = TrackW;
             var y = Height / 2;
-            using (var t = new SolidBrush(Color.FromArgb(28, 39, 66))) g.FillRectangle(t, 9, y - 2, trackW, 4);
-            var x = 9 + trackW * Value / 100;
-            using (var a = new SolidBrush(Theme.Accent)) g.FillRectangle(a, 9, y - 2, x - 9, 4);
-            using (var th = new SolidBrush(Theme.Text)) g.FillEllipse(th, x - 8, y - 8, 16, 16);
-            TextRenderer.DrawText(g, $"{Value}%", new Font("Segoe UI", 10f), new Point(Width - 44, y - 9), Theme.Muted);
+            var h = Math.Max(3, (int)(4 * k));
+            var r = (int)(8 * k);
+            using (var t = new SolidBrush(Color.FromArgb(28, 39, 66))) g.FillRectangle(t, Inset, y - h / 2, trackW, h);
+            var x = Inset + trackW * Value / 100;
+            using (var a = new SolidBrush(Theme.Accent)) g.FillRectangle(a, Inset, y - h / 2, x - Inset, h);
+            using (var th = new SolidBrush(Theme.Text)) g.FillEllipse(th, x - r, y - r, r * 2, r * 2);
+            using var vf = new Font("Segoe UI", 10f);
+            TextRenderer.DrawText(g, $"{Value}%", vf, new Rectangle(Width - (int)(46 * k), 0, (int)(46 * k), Height), Theme.Muted, TextFormatFlags.VerticalCenter | TextFormatFlags.Right);
         }
     }
 

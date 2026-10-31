@@ -16,9 +16,20 @@ internal static class Theme
     public static readonly Color Bad = Color.FromArgb(248, 113, 113);
 
     [DllImport("dwmapi.dll")] private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+    [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)] private static extern int SetWindowTheme(IntPtr hwnd, string? app, string? idList);
 
+    /// <summary>Dark scrollbars on Windows 10/11.</summary>
+    public static void DarkScroll(Control c) => c.HandleCreated += (_, _) => { try { SetWindowTheme(c.Handle, "DarkMode_Explorer", null); } catch { } };
+
+    /// <summary>
+    /// Call first in a form's constructor; all sizes are then written for 100% display scaling and
+    /// Windows scales them for the user's display. Finish the constructor with <see cref="Done"/>.
+    /// </summary>
     public static void Apply(Form f)
     {
+        f.SuspendLayout();
+        f.AutoScaleDimensions = new SizeF(96F, 96F);
+        f.AutoScaleMode = AutoScaleMode.Dpi;
         f.BackColor = Bg;
         f.ForeColor = Text;
         f.Font = new Font("Segoe UI", 10f);
@@ -30,6 +41,15 @@ internal static class Theme
             DwmSetWindowAttribute(f.Handle, 33, ref round, sizeof(int)); // rounded corners (Win 11)
         };
     }
+
+    public static void Done(Form f)
+    {
+        f.ResumeLayout(false);
+        f.PerformLayout();
+    }
+
+    /// <summary>Scale factor for custom-painted controls (1.0 at 100%, 1.5 at 150%).</summary>
+    public static float Scale(Control c) => c.DeviceDpi / 96f;
 
     public static Button PrimaryButton(string text) => MakeButton(text, Accent, Color.FromArgb(4, 18, 31));
     public static Button SecondaryButton(string text) => MakeButton(text, Panel, Text);
