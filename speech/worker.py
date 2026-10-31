@@ -38,6 +38,22 @@ WHISPER_PROMPT = (
 )
 
 
+# Phrases Whisper is known to invent from silence, noise or a click.
+PHANTOMS = {
+    "thank you", "thanks", "thank you very much", "thanks for watching", "thank you for watching",
+    "bye", "bye bye", "you", "okay", "ok", "so", "uh", "um", "hmm", "please subscribe",
+    "subscribe", "music", "applause", "silence", "the end",
+}
+
+
+def is_phantom(text, seconds):
+    t = "".join(ch for ch in text.lower() if ch.isalnum() or ch == " ").strip()
+    t = " ".join(t.split())
+    if not t:
+        return True
+    return t in PHANTOMS and seconds < 3.5
+
+
 def data_dir():
     return os.environ.get("LAIA_DATA") or os.path.join(os.environ.get("PROGRAMDATA", HERE), "LAIA")
 
@@ -198,12 +214,26 @@ class Engine:
     # ---- operations
 
     def transcribe(self, audio):
-        if audio.size < 1600:
+        """Returns what the pilot said, or "" for a stray key-up / silence / Whisper phantom phrase."""
+        if audio.size < 4800:  # under 0.3 s
+            return ""
+        rms = float(np.sqrt(np.mean(np.square(audio))))
+        if rms < 0.004:  # essentially silence: Whisper would invent "Thank you."
+            log(f"ignored near-silent transmission (rms {rms:.4f})")
             return ""
         segs, _ = self.whisper.transcribe(
             audio, language="en", beam_size=5, vad_filter=True, initial_prompt=WHISPER_PROMPT,
             condition_on_previous_text=False, without_timestamps=True)
-        return " ".join(s.text.strip() for s in segs).strip()
+        kept = []
+        for s in segs:
+            if s.no_speech_prob > 0.6 and s.avg_logprob < -0.8:
+                continue
+            kept.append(s.text.strip())
+        text = " ".join(kept).strip()
+        if is_phantom(text, audio.size / 16000.0):
+            log(f"ignored phantom phrase {text!r}")
+            return ""
+        return text
 
     def speak(self, text, radio=True):
         samples, sr = None, None
@@ -277,6 +307,9 @@ class Handler(BaseHTTPRequestHandler):
                 audio = read_wav(self._body())
                 with ENGINE.lock:
                     heard = ENGINE.transcribe(audio)
+                    if not heard:
+                        # Nothing real was said (stray key-up): stay quiet like a real controller.
+                        return self._send(204, b"", "text/plain", {"X-LAIA-Heard": "", "X-LAIA-Reply": ""})
                     reply = build_reply(heard)
                     wav = ENGINE.speak(reply)
                 ENGINE.last_ms = (time.time() - t0) * 1000

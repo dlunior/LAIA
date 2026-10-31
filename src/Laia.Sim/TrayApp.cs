@@ -40,7 +40,7 @@ internal sealed class TrayApp : ApplicationContext
         };
 
         _statusItem = new ToolStripMenuItem("Looking for LAIA Server…") { Enabled = false };
-        _pttItem = new ToolStripMenuItem("Set push-to-talk button…", null, (_, _) => SetupPtt());
+        _pttItem = new ToolStripMenuItem("Settings…", null, async (_, _) => await OpenSettingsAsync()) { Font = new Font("Segoe UI", 10f, FontStyle.Bold) };
         _logItem = new ToolStripMenuItem("Show radio transcript", null, (_, _) => ToggleLog()) { Checked = _settings.ShowTranscript };
         var menu = new ContextMenuStrip { ShowImageMargin = false, Font = new Font("Segoe UI", 10f) };
         menu.Items.Add(_statusItem);
@@ -48,7 +48,6 @@ internal sealed class TrayApp : ApplicationContext
         menu.Items.Add(_pttItem);
         menu.Items.Add(_logItem);
         menu.Items.Add(new ToolStripMenuItem("Open ATC control page", null, (_, _) => OpenControlPage()));
-        menu.Items.Add(new ToolStripMenuItem("Search for the server again", null, async (_, _) => { _server = null; await DiscoverAsync(); }));
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(new ToolStripMenuItem("Exit LAIA Sim", null, (_, _) => ExitThread()));
 
@@ -61,6 +60,7 @@ internal sealed class TrayApp : ApplicationContext
         };
         _tray.DoubleClick += (_, _) => ToggleLog(forceShow: true);
 
+        ApplyAudioSettings();
         _ptt.Binding = _settings.Ptt;
         _ptt.Pressed += OnPttPressed;
         _ptt.Released += OnPttReleased;
@@ -164,7 +164,7 @@ internal sealed class TrayApp : ApplicationContext
         }
         try
         {
-            _ = Player.PlayAsync(Player.Click(false));
+            if (_settings.RadioClicks) _ = Player.PlayAsync(Player.Click(false));
             _recorder.Start();
             SetState(Light.Talking, "Transmitting…");
         }
@@ -182,10 +182,11 @@ internal sealed class TrayApp : ApplicationContext
         try
         {
             var (wav, length) = await _recorder.StopAsync();
-            _ = Player.PlayAsync(Player.Click(true));
+            if (_settings.RadioClicks) _ = Player.PlayAsync(Player.Click(true));
             if (length < TimeSpan.FromMilliseconds(350)) { await HeartbeatAsync(); return; }
             SetState(Light.Talking, "Waiting for ATC…");
             var result = await _link.TransmitAsync(_server, wav);
+            if (result is null) { Log.Write("Server heard nothing real; no reply"); return; }
             _radioLog.Add("YOU", string.IsNullOrWhiteSpace(result.Heard) ? "(nothing heard)" : result.Heard, Theme.Text);
             _radioLog.Add("ATC", result.Reply, Theme.Accent);
             await Player.PlayAsync(result.Audio);
@@ -227,8 +228,35 @@ internal sealed class TrayApp : ApplicationContext
         _ = HeartbeatAsync();
     }
 
-    private void UpdatePttMenu() =>
-        _pttItem.Text = _settings.Ptt is null ? "Set push-to-talk button…" : $"Push-to-talk: {_settings.Ptt.Describe()} (change…)";
+    private void UpdatePttMenu() { }
+
+    private void ApplyAudioSettings()
+    {
+        _recorder.DeviceId = _settings.MicDeviceId;
+        Player.DeviceId = _settings.SpeakerDeviceId;
+        Player.Volume = Math.Clamp(_settings.Volume, 0, 100) / 100f;
+    }
+
+    private bool _settingsOpen;
+
+    private async Task OpenSettingsAsync()
+    {
+        if (_settingsOpen) return;
+        _settingsOpen = true;
+        _ptt.Suspended = true;
+        try
+        {
+            using var f = new SettingsForm(_settings, _server, _link, async () => { _server = null; await DiscoverAsync(); }, _lastSpeech);
+            if (f.ShowDialog() == DialogResult.OK)
+            {
+                ApplyAudioSettings();
+                _ptt.Binding = _settings.Ptt;
+                Log.Write("Settings saved");
+            }
+        }
+        finally { _ptt.Suspended = false; _settingsOpen = false; }
+        await HeartbeatAsync();
+    }
 
     // ------------------------------------------------------------------ misc UI
 

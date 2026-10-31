@@ -19,6 +19,7 @@ builder.Logging.AddFilter("Microsoft.AspNetCore", LogLevel.Warning);
 builder.Logging.AddFilter("System.Net.Http", LogLevel.Warning);
 
 builder.Services.AddSingleton<ServerState>();
+builder.Services.AddSingleton<SettingsStore>();
 builder.Services.AddSingleton<SpeechWorker>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<SpeechWorker>());
 builder.Services.AddHostedService<DiscoveryResponder>();
@@ -68,6 +69,8 @@ app.MapPost("/api/radio", async (HttpContext ctx, IHttpClientFactory f, ServerSt
     }
     using (resp)
     {
+        if (resp.StatusCode == System.Net.HttpStatusCode.NoContent)
+            return Results.NoContent(); // nothing real was said (stray key-up)
         if (!resp.IsSuccessStatusCode)
             return Results.Json(new { error = await resp.Content.ReadAsStringAsync() }, jsonOpts, statusCode: 502);
         var heard = Header(resp, "X-LAIA-Heard");
@@ -93,6 +96,28 @@ app.MapPost("/api/say", async (HttpContext ctx, IHttpClientFactory f, ServerStat
     var bytes = await resp.Content.ReadAsByteArrayAsync();
     return resp.IsSuccessStatusCode ? Results.Bytes(bytes, "audio/wav")
         : Results.Json(new { error = System.Text.Encoding.UTF8.GetString(bytes) }, jsonOpts, statusCode: 502);
+});
+
+// Settings entered in the LAIA Sim settings window. Keys never leave this PC in readable form.
+app.MapGet("/api/settings", (SettingsStore st) => Results.Json(st.Public(), jsonOpts));
+app.MapPut("/api/settings", async (HttpContext ctx, SettingsStore st, ILogger<Program> log) =>
+{
+    using var doc = await JsonDocument.ParseAsync(ctx.Request.Body);
+    st.Update(doc.RootElement);
+    log.LogInformation("Settings updated from {ip}", ctx.Connection.RemoteIpAddress);
+    return Results.Json(st.Public(), jsonOpts);
+});
+app.MapPost("/api/settings/test/{service}", async (string service, HttpContext ctx, SettingsStore st) =>
+{
+    string? value = null;
+    try
+    {
+        using var doc = await JsonDocument.ParseAsync(ctx.Request.Body);
+        if (doc.RootElement.TryGetProperty("value", out var v) && v.ValueKind == JsonValueKind.String && v.GetString()!.Length > 0) value = v.GetString();
+    }
+    catch (JsonException) { }
+    value ??= service switch { "simbrief" => st.Get("simbrief_user"), "airlabs" => st.Get("airlabs_key"), "aeroapi" => st.Get("aeroapi_key"), _ => null };
+    return Results.Json(await ServiceTester.TestAsync(service, value), jsonOpts);
 });
 
 app.Run();

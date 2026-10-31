@@ -57,6 +57,8 @@ jobs:
             $p = Start-Process $stub -ArgumentList "/screenshots `"$dir`"" -PassThru
             if (-not $p.WaitForExit(120000)) { $p.Kill(); Write-Host "timed out: $stub" }
           }
+          $sim = Start-Process "out\sim-payload\LaiaSim.exe" -ArgumentList "--screenshots `"$dir`"" -PassThru
+          if (-not $sim.WaitForExit(120000)) { $sim.Kill(); Write-Host "timed out: LaiaSim screenshots" }
           Get-ChildItem $dir
 
       - name: End-to-end test (install, voice round trip, uninstall)

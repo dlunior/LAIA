@@ -31,6 +31,10 @@ public sealed class SimSettings
     public string? PreferredServer { get; set; }
     public bool ShowTranscript { get; set; } = true;
     public bool FirstRunDone { get; set; }
+    public string? MicDeviceId { get; set; }
+    public string? SpeakerDeviceId { get; set; }
+    public int Volume { get; set; } = 90;
+    public bool RadioClicks { get; set; } = true;
 
     private static string PathOnDisk => System.IO.Path.Combine(Log.Dir, "sim-settings.json");
     private static readonly JsonSerializerOptions Opts = new() { WriteIndented = true };

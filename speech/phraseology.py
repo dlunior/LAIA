@@ -181,6 +181,12 @@ def find_facility(text):
     return None, None
 
 
+# Remembers which facility each callsign last talked to, so a call without a facility name
+# ("Delta 1196, with you") is answered by the same controller. Reset when the engine restarts.
+_LAST_FACILITY = {}
+_LAST_ANY = {"facility": None}
+
+
 def build_reply(heard):
     """Return the controller's reply text for what the pilot said."""
     text = (heard or "").strip()
@@ -188,37 +194,41 @@ def build_reply(heard):
     if len(_tokens(text)) < 2:
         return "Station calling, say again."
 
-    callsign, _, _ = find_callsign(text)
+    callsign, _, cs_key = find_callsign(text)
     facility, kind = find_facility(text)
-    station = facility or "LAIA"
+    if facility:
+        _LAST_ANY["facility"] = facility
+        if cs_key:
+            _LAST_FACILITY[cs_key] = facility
+    else:
+        facility = _LAST_FACILITY.get(cs_key) if cs_key else _LAST_ANY["facility"]
 
     if not callsign:
-        return f"Station calling {station}, say again your call sign."
+        return f"Station calling {facility}, say again your call sign." if facility else "Station calling, say again your call sign."
+
+    # FAA phraseology: callsign, then facility (optional when already in contact).
+    head = f"{callsign}, {facility}" if facility else callsign
 
     def has(*phrases):
         return any(p in low for p in phrases)
 
     if has("radio check", "how do you read", "how do you hear"):
-        return f"{callsign}, {station}, read you five by five."
+        return f"{head}, read you five by five."
     if has("say again", "repeat"):
-        return f"{callsign}, {station}, I say again, go ahead."
+        return f"{head}, I say again, go ahead."
     if has("clearance", "ifr to", "i f r to", "ready to copy"):
-        return f"{callsign}, {station}, roger. Your clearance is on request, I'll call you back shortly."
+        return f"{head}, roger. Your clearance is on request, I'll call you back shortly."
     if has("push", "pushback", "push back"):
-        return f"{callsign}, {station}, push back approved at your discretion, advise ready to taxi."
+        return f"{head}, push back approved at your discretion, advise ready to taxi."
     if has("ready to taxi", "request taxi", "taxi"):
-        return f"{callsign}, {station}, roger, hold position, I'll have your taxi instructions shortly."
+        return f"{head}, roger, hold position, I'll have your taxi instructions shortly."
     if has("ready for departure", "ready to go", "holding short", "ready at"):
-        return f"{callsign}, {station}, roger, hold short, number one for departure."
-    if has("with you", "checking in", "check in", "level", "climbing", "descending", "passing", "out of"):
-        if kind in ("Approach", "Departure", "Center", "Centre"):
-            return f"{callsign}, {station}, roger."
-        return f"{callsign}, {station}, roger."
+        return f"{head}, roger, hold short, number one for departure."
     if has("inbound", "with information", "have information", "landing", "full stop"):
-        return f"{callsign}, {station}, roger, report established, expect the visual approach."
+        return f"{head}, roger, report established, expect the visual approach."
     if has("thank", "good day", "good night", "so long"):
         return f"{callsign}, good day."
-    return f"{callsign}, {station}, roger."
+    return f"{head}, roger."
 
 
 if __name__ == "__main__":
@@ -231,6 +241,10 @@ if __name__ == "__main__":
         "hello hello",
         "Kennedy Ground JetBlue 7 push back gate 5",
         "Center, Southwest twenty-one hundred level three five zero",
+        "Delta 1196",
+        "Delta 1196 checking in",
+        "LaGuardia Ground, Delta 1196, looking for IFR to Orlando",
+        "Delta eleven ninety six, with you",
     ]
     for t in tests:
         print(f"{t}\n  -> {build_reply(t)}")

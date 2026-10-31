@@ -65,6 +65,40 @@ Write-Host "reply wav: $((Get-Item $answer).Length) bytes"
 if ($said -notmatch "^Delta") { Fail "reply didn't address Delta" }
 Copy-Item $call, $answer $env:SMOKE_OUT -ErrorAction SilentlyContinue
 
+Step "Stray key-up (silence) gets no reply"
+$silent = "$work\silent.wav"
+$fs = [IO.File]::Create($silent); $bw = New-Object IO.BinaryWriter($fs)
+$n = 16000; $dataLen = $n * 2
+$bw.Write([Text.Encoding]::ASCII.GetBytes("RIFF")); $bw.Write([int](36 + $dataLen)); $bw.Write([Text.Encoding]::ASCII.GetBytes("WAVEfmt "))
+$bw.Write([int]16); $bw.Write([int16]1); $bw.Write([int16]1); $bw.Write([int]16000); $bw.Write([int]32000); $bw.Write([int16]2); $bw.Write([int16]16)
+$bw.Write([Text.Encoding]::ASCII.GetBytes("data")); $bw.Write([int]$dataLen); $bw.Write((New-Object byte[] $dataLen)); $bw.Dispose()
+$r = Invoke-WebRequest -Method Post -Uri "http://127.0.0.1:47801/api/radio" -ContentType "audio/wav" -InFile $silent -SkipHttpErrorCheck
+Write-Host "silence -> HTTP $($r.StatusCode)"
+if ($r.StatusCode -ne 204) { Fail "silence should get no reply (204), got $($r.StatusCode)" }
+
+Step "No facility named: reply has no made-up station name"
+$call2 = "$work\call2.wav"
+Invoke-WebRequest -Method Post -Uri "http://127.0.0.1:47801/api/say" -ContentType "application/json" `
+    -Body '{"text":"Delta twelve thirty four, with you.","radio":true}' -OutFile $call2
+$r = Invoke-WebRequest -Method Post -Uri "http://127.0.0.1:47801/api/radio" -ContentType "audio/wav" -InFile $call2 -OutFile "$work\reply2.wav" -PassThru
+$said2 = [Uri]::UnescapeDataString("$($r.Headers['X-LAIA-Reply'])")
+Write-Host "REPLY: $said2"
+if ($said2 -match "LAIA") { Fail "reply used LAIA as a station name" }
+
+Step "Settings: save, read back masked, stored encrypted"
+$body = '{"simbrief_user":"smoketest","schedule_source":"airlabs","airlabs_key":"SMOKEKEY123456"}'
+$st = Invoke-RestMethod -Method Put -Uri "http://127.0.0.1:47801/api/settings" -ContentType "application/json" -Body $body
+$st | ConvertTo-Json -Depth 4
+if ($st.simbrief_user -ne "smoketest" -or $st.schedule_source -ne "airlabs" -or -not $st.airlabs.set -or $st.airlabs.hint -ne ([string][char]0x2026 + "3456")) { Fail "settings didn't round-trip" }
+$raw = Get-Content "C:\ProgramData\LAIA\settings.json" -Raw
+if ($raw -match "SMOKEKEY123456") { Fail "API key stored in plain text" }
+if ($raw -notmatch "dpapi:") { Fail "API key not encrypted" }
+$t = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:47801/api/settings/test/airlabs" -ContentType "application/json" -Body '{"value":""}'
+Write-Host "airlabs test with fake key: $($t.ok) $($t.message)"
+if ($t.ok) { Fail "fake AirLabs key reported as working" }
+$st = Invoke-RestMethod -Method Put -Uri "http://127.0.0.1:47801/api/settings" -ContentType "application/json" -Body '{"airlabs_key":""}'
+if ($st.airlabs.set) { Fail "key removal failed" }
+
 Step "Install LAIA Sim silently"
 $p = Start-Process "$Dist\LAIA-Sim-Setup.exe" -ArgumentList "/silent" -Wait -PassThru
 if ($p.ExitCode -ne 0) { Fail "sim setup returned $($p.ExitCode)" }
