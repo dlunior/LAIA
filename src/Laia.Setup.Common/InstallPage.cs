@@ -25,7 +25,7 @@ public sealed class InstallPage : StackPanel, IInstallView
             _rows.Add(r);
             list.Children.Add(r);
         }
-        Children.Add(new ScrollViewer { Content = list, MaxHeight = 230, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Margin = new Thickness(0, 6, 0, 0) });
+        Children.Add(new ScrollViewer { Content = list, MaxHeight = 230, VerticalScrollBarVisibility = ScrollBarVisibility.Hidden, Margin = new Thickness(0, 6, 0, 0) });
         _progress.Update("Getting ready…", 0);
     }
 
