@@ -43,7 +43,10 @@ jobs:
         run: ./build/make-python.ps1 -Out out/python
 
       - name: Publish apps and pack installers
-        run: ./build/pack.ps1 -Version $env:VERSION -PythonDir out/python
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          ./build/pack.ps1 -Version $env:VERSION -PythonDir out/python *>&1 | Tee-Object -FilePath out/pack.log
+          if (-not (Test-Path out/dist/LAIA-Sim-Setup.exe)) { throw "packing failed" }
 
       - name: Render installer screenshots
         continue-on-error: true
@@ -60,7 +63,9 @@ jobs:
         id: smoke
         env:
           SMOKE_OUT: ${{ github.workspace }}\out\screenshots
-        run: ./build/smoke-test.ps1 -Dist out\dist
+        run: |
+          ./build/smoke-test.ps1 -Dist out\dist *>&1 | Tee-Object -FilePath out\smoke.log
+          if (-not (Select-String -Path out\smoke.log -Pattern "SMOKE PASS" -Quiet)) { throw "end-to-end test failed" }
 
       - name: Upload installers
         uses: actions/upload-artifact@v4
@@ -95,6 +100,7 @@ jobs:
           New-Item -ItemType Directory -Force $dir | Out-Null
           if (Test-Path out\screenshots) { Copy-Item out\screenshots\* $dir -ErrorAction SilentlyContinue }
           Copy-Item (Join-Path $env:TEMP "LAIA-Setup.log") $dir -ErrorAction SilentlyContinue
+          Copy-Item out\pack.log, out\smoke.log $dir -ErrorAction SilentlyContinue
           Copy-Item "C:\ProgramData\LAIA\logs\server.log" $dir -ErrorAction SilentlyContinue
           "run ${{ github.run_number }} commit ${{ github.sha }} smoke=${{ steps.smoke.outcome }}" | Set-Content "$dir\RUN.txt"
           Set-Location $dir
