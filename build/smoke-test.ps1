@@ -139,6 +139,25 @@ Write-Host "HEARD: $([Uri]::UnescapeDataString("$($r.Headers['X-LAIA-Heard'])"))
 Write-Host "REPLY: $said3"
 if ($said3 -notmatch "contact LaGuardia Clearance") { Fail "clearance request on ground frequency wasn't redirected" }
 
+Step "AI traffic: test departure at LaGuardia"
+$rs = ""
+for ($i = 0; $i -lt 60; $i++) { $rs = (Invoke-RestMethod "http://127.0.0.1:47801/api/traffic").runways; if ($rs -match "airports with runways") { break }; Start-Sleep 3 }
+Write-Host "runways: $rs"
+if ($rs -notmatch "airports with runways") { Fail "runway data never loaded" }
+SimState $gnd
+$t = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:47801/api/traffic/test/departure"
+Write-Host "test departure: $($t.ok) $($t.message)"
+if (-not $t.ok) { Fail "test departure refused: $($t.message)" }
+$o = @{ connected = $true; simulator = "MSFS 2024"; lat = 40.7769; lon = -73.8740; onGround = $true; com1Active = [double]$gnd; com1Transmit = $true }
+$reply = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:47801/api/sim/state" -ContentType "application/json" -Body ($o | ConvertTo-Json)
+Write-Host "sim/state reply traffic: $($reply.traffic | ConvertTo-Json -Compress)"
+if (@($reply.traffic).Count -ne 1) { Fail "traffic not sent to the sim" }
+Start-Sleep 70
+$tr = (Invoke-RestMethod "http://127.0.0.1:47801/api/traffic").traffic
+Write-Host "after 70 s: $($tr | ConvertTo-Json -Compress)"
+if (@($tr).Count -ne 1 -or $tr[0].onGround -or $tr[0].altFt -lt 30) { Fail "test departure didn't take off" }
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:47801/api/traffic/clear" | Out-Null
+
 Step "Frequency with no controller"
 SimState 123.450
 $r = Invoke-WebRequest -Method Post -Uri "http://127.0.0.1:47801/api/radio" -ContentType "audio/wav" -InFile $call3 -SkipHttpErrorCheck

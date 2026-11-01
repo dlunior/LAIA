@@ -51,6 +51,7 @@ public sealed class SimConnectClient : IAsyncDisposable
     public event Action<uint, uint>? SimException; // exception code, sendId
     public event Action<uint, uint>? SimEvent;     // client event id, data
     public event Action? Quit;
+    public event Action<uint, uint>? AssignedObjectId; // request id, object id
 
     private SimConnectClient(Stream stream, string endpoint) { _stream = stream; Endpoint = endpoint; }
 
@@ -127,6 +128,7 @@ public sealed class SimConnectClient : IAsyncDisposable
         public Packet F32(float v) { _w.Write(v); return this; }
         public Packet F64(double v) { _w.Write(v); return this; }
         public Packet Byte(byte v) { _w.Write(v); return this; }
+        public Packet Bytes(byte[] v) { _w.Write(v); return this; }
         public Packet Str(string? s, int fixedLength)
         {
             var bytes = Encoding.Latin1.GetBytes(s ?? "");
@@ -187,6 +189,30 @@ public sealed class SimConnectClient : IAsyncDisposable
     public Task<uint> RequestDataOnSimObjectAsync(uint requestId, uint defineId, uint objectId, SimPeriod period, uint flags = 0) =>
         SendAsync(new Packet(0x0E).U32(requestId).U32(defineId).U32(objectId).U32((uint)period).U32(flags).U32(0).U32(0).U32(0));
 
+    /// <summary>Places an AI aircraft that MSFS's own air traffic control ignores (LAIA flies it).</summary>
+    public Task<uint> AICreateNonATCAircraftAsync(string title, string tail, double lat, double lon, double altFt,
+        double pitch, double bank, double heading, bool onGround, int airspeedKt, uint requestId) =>
+        SendAsync(new Packet(0x29).Str(title, 256).Str(tail, 12)
+            .F64(lat).F64(lon).F64(altFt).F64(pitch).F64(bank).F64(heading).U32(onGround ? 1u : 0u).U32((uint)airspeedKt)
+            .U32(requestId));
+
+    public Task<uint> AIReleaseControlAsync(uint objectId, uint requestId) => SendAsync(new Packet(0x2B).U32(objectId).U32(requestId));
+    public Task<uint> AIRemoveObjectAsync(uint objectId, uint requestId) => SendAsync(new Packet(0x2C).U32(objectId).U32(requestId));
+
+    public Task<uint> MapClientEventToSimEventAsync(uint eventId, string name) => SendAsync(new Packet(0x04).U32(eventId).Str(name, 256));
+
+    /// <summary>Sends a sim event to an object (highest priority group).</summary>
+    public Task<uint> TransmitClientEventAsync(uint objectId, uint eventId, uint data) =>
+        SendAsync(new Packet(0x05).U32(objectId).U32(eventId).U32(data).U32(1).U32(0x10));
+
+    /// <summary>Writes the values of a data definition to an object (untagged, one entry).</summary>
+    public Task<uint> SetDataOnSimObjectAsync(uint defineId, uint objectId, byte[] data)
+    {
+        var p = new Packet(0x10).U32(defineId).U32(objectId).U32(0).U32(1).U32((uint)data.Length);
+        p.Bytes(data);
+        return SendAsync(p);
+    }
+
     public Task<uint> SubscribeToSystemEventAsync(uint eventId, string name) =>
         SendAsync(new Packet(0x17).U32(eventId).Str(name, 256));
 
@@ -227,6 +253,9 @@ public sealed class SimConnectClient : IAsyncDisposable
                     return;
                 case 4: // EVENT
                     SimEvent?.Invoke(BinaryPrimitives.ReadUInt32LittleEndian(body.AsSpan(4)), BinaryPrimitives.ReadUInt32LittleEndian(body.AsSpan(8)));
+                    break;
+                case 12: // ASSIGNED_OBJECT_ID
+                    AssignedObjectId?.Invoke(BinaryPrimitives.ReadUInt32LittleEndian(body), BinaryPrimitives.ReadUInt32LittleEndian(body.AsSpan(4)));
                     break;
                 case 8: // SIMOBJECT_DATA
                 case 9: // SIMOBJECT_DATA_BYTYPE

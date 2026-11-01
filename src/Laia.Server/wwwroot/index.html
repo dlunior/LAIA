@@ -67,6 +67,13 @@
     <div class="muted" id="sayMsg" style="margin-top:8px"></div>
   </section>
   <section class="card wide">
+    <h2>AI traffic (test)</h2>
+    <div class="muted">Puts one AI airliner on the active runway at the airport nearest you. The ATC PC flies it; your sim draws it with an AIG model.</div>
+    <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap"><button id="tDep">Send a test departure</button><button id="tArr">Send a test arrival</button><button id="tClr" class="ghost">Remove traffic</button></div>
+    <div class="muted" id="tMsg" style="margin-top:8px"></div>
+    <dl id="tList"></dl>
+  </section>
+  <section class="card wide">
     <h2>Radio log</h2>
     <div class="log" id="log"><div class="empty">Nothing yet. Hold your push-to-talk button in the sim and call the controller.</div></div>
   </section>
@@ -120,6 +127,13 @@ $("say").addEventListener("submit",async e=>{
     const url=URL.createObjectURL(await r.blob());new Audio(url).play();$("sayMsg").textContent="";
   }catch(err){$("sayMsg").textContent="Failed: "+err}
 });
+async function traffic(path){$("tMsg").textContent="…";try{const r=await fetch(path,{method:"POST"});$("tMsg").textContent=(await r.json()).message;}catch(e){$("tMsg").textContent="Failed: "+e}}
+$("tDep").addEventListener("click",()=>traffic("/api/traffic/test/departure"));
+$("tArr").addEventListener("click",()=>traffic("/api/traffic/test/arrival"));
+$("tClr").addEventListener("click",()=>traffic("/api/traffic/clear"));
+async function pollTraffic(){try{const r=await fetch("/api/traffic");const t=await r.json();
+  $("tList").innerHTML=(t.traffic||[]).map(a=>`<dt>${esc(a.callsign)} · ${esc(a.type)}</dt><dd>${esc(a.phase)} · ${Math.round(a.groundSpeed)} kt${a.onGround?"":" · "+Math.round(a.altFt).toLocaleString()+" ft"}</dd>`).join("");}catch(e){}}
+setInterval(pollTraffic,1000);
 $("reload").addEventListener("click",async()=>{$("planStatus").textContent="Loading…";try{const r=await fetch("/api/simbrief/reload",{method:"POST"});$("planStatus").textContent=(await r.json()).status;}catch(e){$("planStatus").textContent="Failed";}});
 poll();setInterval(poll,2000);
 </script>

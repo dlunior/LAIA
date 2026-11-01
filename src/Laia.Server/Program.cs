@@ -23,6 +23,10 @@ builder.Services.AddSingleton<SettingsStore>();
 builder.Services.AddSingleton<FrequencyDb>();
 builder.Services.AddHostedService<FrequencyUpdater>();
 builder.Services.AddSingleton<SimBriefService>();
+builder.Services.AddSingleton<RunwayDb>();
+builder.Services.AddHostedService<RunwayUpdater>();
+builder.Services.AddSingleton<TrafficEngine>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<TrafficEngine>());
 builder.Services.AddSingleton<SpeechWorker>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<SpeechWorker>());
 builder.Services.AddHostedService<DiscoveryResponder>();
@@ -51,7 +55,7 @@ app.MapGet("/logo.png", () => Results.Bytes(logoPng, "image/png"));
 app.MapGet("/api/status", (ServerState s, FrequencyDb f, SimBriefService sb) => Results.Json(s.Snapshot(FlightInfo(s, f, sb)), jsonOpts));
 
 // LAIA Sim posts the user's aircraft about once a second.
-app.MapPost("/api/sim/state", async (HttpContext ctx, ServerState s, SimBriefService sb) =>
+app.MapPost("/api/sim/state", async (HttpContext ctx, ServerState s, SimBriefService sb, TrafficEngine traffic) =>
 {
     var st = await JsonSerializer.DeserializeAsync<Laia.Common.SimConnect.AircraftState>(ctx.Request.Body, jsonOpts);
     if (st is null) return Results.BadRequest();
@@ -59,8 +63,18 @@ app.MapPost("/api/sim/state", async (HttpContext ctx, ServerState s, SimBriefSer
     var justConnected = s.SetSim(st);
     if (st.Connected && (justConnected || DateTime.UtcNow - sb.LastAttemptUtc > TimeSpan.FromMinutes(15)))
         _ = Task.Run(sb.RefreshAsync);
-    return Results.Ok();
+    // The reply carries the AI traffic for LAIA Sim to draw.
+    return Results.Json(new Laia.Common.SimConnect.SimStateReply { Traffic = st.Connected ? traffic.Snapshot() : new() }, jsonOpts);
 });
+
+app.MapGet("/api/traffic", (TrafficEngine t, RunwayDb r) => Results.Json(new { runways = r.Status, traffic = t.Snapshot() }, jsonOpts));
+app.MapPost("/api/traffic/test/{kind}", (string kind, TrafficEngine t) =>
+{
+    if (kind is not ("departure" or "arrival")) return Results.BadRequest();
+    var (ok, message) = t.StartTest(kind);
+    return Results.Json(new { ok, message }, jsonOpts);
+});
+app.MapPost("/api/traffic/clear", (TrafficEngine t) => { t.Clear(); return Results.Json(new { ok = true, message = "Traffic removed." }, jsonOpts); });
 
 app.MapPost("/api/simbrief/reload", async (SimBriefService sb) => { await sb.RefreshAsync(); return Results.Json(new { status = sb.Status }, jsonOpts); });
 

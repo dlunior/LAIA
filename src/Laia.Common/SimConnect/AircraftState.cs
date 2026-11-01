@@ -26,6 +26,8 @@ public sealed class AircraftState
     public string AtcId { get; set; } = "";
     public string AtcAirline { get; set; } = "";
     public string AtcFlightNumber { get; set; } = "";
+    public double WindDirection { get; set; }   // true, wind from
+    public double WindSpeed { get; set; }       // knots
 
     public AircraftState Clone() => (AircraftState)MemberwiseClone();
 

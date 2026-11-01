@@ -17,6 +17,9 @@ internal sealed class SimLink : IDisposable
     private readonly object _gate = new();
     private readonly AircraftState _state = new();
     private SimConnectClient? _sc;
+    private TrafficRenderer? _traffic;
+    private AigCatalog? _catalog;
+    public int TrafficCount => _traffic?.Count ?? 0;
     private DateTime _lastData = DateTime.MinValue;
 
     public Func<ServerInfo?>? Server { get; set; }
@@ -61,6 +64,10 @@ internal sealed class SimLink : IDisposable
                 Log.Write($"SimConnect open via {sc.Endpoint} ({sc.SimulatorName})");
                 await RegisterAsync(sc);
                 _sc = sc;
+                var is2024 = sc.SimulatorName.Contains("SunRise", StringComparison.OrdinalIgnoreCase);
+                _catalog ??= await Task.Run(() => AigCatalog.Scan(is2024));
+                _traffic = new TrafficRenderer(sc, _catalog);
+                await _traffic.InitAsync();
                 lock (_gate) { _state.Simulator = sc.SimulatorName.Contains("SunRise", StringComparison.OrdinalIgnoreCase) ? "MSFS 2024" : sc.SimulatorName.Contains("KittyHawk", StringComparison.OrdinalIgnoreCase) ? "MSFS 2020" : sc.SimulatorName; }
                 SetStatus($"Connected to {_state.Simulator}");
                 await sc.RunAsync(ct);
@@ -69,6 +76,7 @@ internal sealed class SimLink : IDisposable
             catch (Exception ex) { Log.Write("Sim link error: " + ex.Message); }
             finally
             {
+                if (_traffic is not null) { try { await _traffic.DisposeAsync(); } catch { } _traffic = null; }
                 if (_sc is not null) { await _sc.DisposeAsync(); _sc = null; }
                 lock (_gate) _state.Connected = false;
             }
@@ -84,6 +92,7 @@ internal sealed class SimLink : IDisposable
         ("GROUND VELOCITY", "knots"), ("VERTICAL SPEED", "feet per minute"), ("SIM ON GROUND", "bool"),
         ("COM ACTIVE FREQUENCY:1", "MHz"), ("COM STANDBY FREQUENCY:1", "MHz"), ("COM ACTIVE FREQUENCY:2", "MHz"), ("COM STANDBY FREQUENCY:2", "MHz"),
         ("COM TRANSMIT:1", "bool"), ("COM TRANSMIT:2", "bool"), ("TRANSPONDER CODE:1", "number"),
+        ("AMBIENT WIND DIRECTION", "degrees"), ("AMBIENT WIND VELOCITY", "knots"),
     };
 
     private async Task RegisterAsync(SimConnectClient sc)
@@ -127,6 +136,8 @@ internal sealed class SimLink : IDisposable
                 // MSFS 2024 reports the plain code (1200); some aircraft report BCO16 (0x1200 = 4608).
                 var dec = sq.ToString("D4");
                 _state.Squawk = dec.All(ch => ch <= '7') ? dec : sq.ToString("X4");
+                _state.WindDirection = d.ReadFloat64();
+                _state.WindSpeed = d.ReadFloat64();
             }
             else if (d.RequestId == ReqStrings)
             {
@@ -161,6 +172,11 @@ internal sealed class SimLink : IDisposable
                 {
                     using var resp = await _http.PostAsJsonAsync(server.BaseUrl + "/api/sim/state", snap, ct);
                     lastSentConnected = snap.Connected;
+                    if (resp.IsSuccessStatusCode && _traffic is { } tr && snap.Connected)
+                    {
+                        var reply = await resp.Content.ReadFromJsonAsync<SimStateReply>(cancellationToken: ct);
+                        if (reply is not null) tr.Update(reply.Traffic);
+                    }
                 }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
