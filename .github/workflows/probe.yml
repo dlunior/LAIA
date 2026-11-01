@@ -8,29 +8,27 @@ jobs:
   probe:
     runs-on: ubuntu-latest
     steps:
-      - name: Inspect FAA NASR CSV
+      - name: Inspect FAA frequency file
         run: |
-          set -x
           mkdir -p out && cd out
-          page=$(curl -sL "https://www.faa.gov/air_traffic/flight_info/aeronav/aero_data/NASR_Subscription/")
-          echo "$page" | grep -oE 'NASR_Subscription/[0-9]{4}-[0-9]{2}-[0-9]{2}' | sort -u > cycles.txt
-          cat cycles.txt
-          cur=$(curl -sL "https://www.faa.gov/air_traffic/flight_info/aeronav/aero_data/NASR_Subscription/2026-10-29")
-          echo "$cur" | grep -oE 'https?://[^"]+\.zip' | sort -u > zips.txt
-          cat zips.txt
-          url=$(grep -i "CSV" zips.txt | grep -iv "change" | head -1)
-          echo "CSV URL: $url" > report.txt
-          curl -sL "$url" -o nasr.zip
-          ls -la nasr.zip >> report.txt
-          unzip -l nasr.zip >> report.txt
-          mkdir x && cd x && unzip -q ../nasr.zip
-          find . -name "*.zip" -exec unzip -q -o {} \; 2>/dev/null || true
-          for f in $(find . -iname "FRQ*.csv" -o -iname "APT_BASE.csv" -o -iname "ATC_BASE.csv" -o -iname "ATC_ATIS.csv" -o -iname "ATC_SVC.csv" -o -iname "COM.csv" -o -iname "ARB*.csv" -o -iname "AFF*.csv"); do
-            echo "===== $f ($(wc -l < $f) lines)" >> ../report.txt
-            head -3 "$f" >> ../report.txt
-            grep -E '"?LGA"?,|LA GUARDIA|"KLGA"' "$f" | head -25 >> ../report.txt
-          done
-          find . -iname "*.csv" | sort >> ../report.txt
+          curl -sL "https://nfdc.faa.gov/webContent/28DaySub/extra/29_Oct_2026_FRQ_CSV.zip" -o frq.zip
+          unzip -o -q frq.zip && ls -la > report.txt
+          f=$(ls | grep -i '^FRQ.*csv$' | grep -v CHG | head -1)
+          echo "FILE $f $(wc -l < $f) lines" >> report.txt
+          head -1 "$f" >> report.txt
+          echo "== LGA / N90 / ZNY rows" >> report.txt
+          grep -E '"(LGA|N90|ZNY|JFK)"' "$f" | head -60 >> report.txt
+          echo "== FACILITY_TYPE counts" >> report.txt
+          python3 -c "
+          import csv,collections,sys
+          r=list(csv.DictReader(open('$f',encoding='latin-1')))
+          print(collections.Counter(x['FACILITY_TYPE'] for x in r).most_common(30))
+          print(collections.Counter(x['FREQ_USE'] for x in r).most_common(60))
+          print(collections.Counter(x['SERVICED_SITE_TYPE'] for x in r).most_common(20))
+          for x in r:
+            if x['FACILITY'] in ('ATL','A80','ZTL','CRW','CYXC') : print({k:x[k] for k in ('FACILITY','FACILITY_TYPE','SERVICED_FACILITY','TOWER_OR_COMM_CALL','PRIMARY_APPROACH_RADIO_CALL','FREQ','FREQ_USE','SECTORIZATION','LAT_DECIMAL','LONG_DECIMAL')})
+          " >> report.txt 2>&1
+          touch cycles.txt zips.txt
       - name: Publish report
         run: |
           cd out
