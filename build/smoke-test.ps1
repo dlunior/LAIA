@@ -152,6 +152,9 @@ $o = @{ connected = $true; simulator = "MSFS 2024"; lat = 40.7769; lon = -73.874
 $reply = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:47801/api/sim/state" -ContentType "application/json" -Body ($o | ConvertTo-Json)
 Write-Host "sim/state reply traffic: $($reply.traffic | ConvertTo-Json -Compress)"
 if (@($reply.traffic).Count -ne 1) { Fail "traffic not sent to the sim" }
+$lt = [int]$reply.traffic[0].lights
+Write-Host "lights while lined up: $lt"
+if (($lt -band 1) -eq 0 -or ($lt -band 2) -eq 0 -or ($lt -band 8) -eq 0) { Fail "nav, beacon and landing lights should be on when lined up" }
 Start-Sleep 75
 $tr = (Invoke-RestMethod "http://127.0.0.1:47801/api/traffic").traffic
 Write-Host "after 75 s: $($tr | ConvertTo-Json -Compress)"

@@ -38,6 +38,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, ServerSta
     {
         Id = a.Id, Callsign = a.Callsign, Airline = a.Airline, Type = a.Type, Lat = a.Lat, Lon = a.Lon, AltFt = a.AltFt, OnGround = a.OnGround,
         Heading = a.Heading, Pitch = a.Pitch, Bank = a.Bank, GroundSpeed = a.GroundSpeed, VerticalSpeed = a.VerticalSpeed, GearDown = a.GearDown, Phase = a.Phase,
+        Lights = a.Lights,
     };
 
     public void Clear() { lock (_gate) _flights.Clear(); }
@@ -157,8 +158,32 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, ServerSta
         Place(f);
     }
 
+    private const int Nav = 1, Beacon = 2, Strobes = 4, Landing = 8, Taxi = 16, Logo = 32, Wing = 64;
+
+    /// <summary>Lights the way airline crews use them: nav/beacon/logo whenever active; strobes and
+    /// landing lights on the runway and below 10,000 ft; taxi lights on the ground before takeoff.</summary>
+    private static int LightsFor(Flight f)
+    {
+        var a = f.Ac;
+        var l = Nav | Beacon | Logo;
+        var belowTenThousand = f.AglFt + f.Rwy.ElevationFt < 10000;
+        if (f.Kind == "departure")
+        {
+            if (a.OnGround) l |= Strobes | Landing | Taxi | Wing;
+            else { l |= Strobes; if (belowTenThousand) l |= Landing; }
+        }
+        else
+        {
+            l |= Strobes;
+            if (belowTenThousand) l |= Landing;
+            if (a.OnGround && a.GroundSpeed < 60) l = (l & ~Landing & ~Strobes) | Taxi; // vacating
+        }
+        return l;
+    }
+
     private static void Place(Flight f)
     {
+        f.Ac.Lights = LightsFor(f);
         var (lat, lon) = Geo.Offset(f.Rwy.Lat, f.Rwy.Lon, f.Rwy.TrueHeading, f.DistanceFromThreshold);
         f.Ac.Lat = lat;
         f.Ac.Lon = lon;

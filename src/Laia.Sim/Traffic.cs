@@ -55,7 +55,12 @@ internal sealed class AigCatalog
             if (eq < 0) continue;
             var key = line[..eq].Trim().ToLowerInvariant();
             var val = line[(eq + 1)..].Trim().Trim('"').Trim();
-            if (section.Equals("GENERAL", StringComparison.OrdinalIgnoreCase) && key is "icao_type_designator" or "atc_model" && type.Length == 0) type = val;
+            if (section.Equals("GENERAL", StringComparison.OrdinalIgnoreCase))
+            {
+                // icao_type_designator ("A321") is the reliable one; atc_model ("$$:A321") is only a fallback.
+                if (key == "icao_type_designator" && val.Length > 0) type = val;
+                else if (key == "atc_model" && type.Length == 0) type = val.Replace("$$:", "");
+            }
             else if (section.StartsWith("FLTSIM.", StringComparison.OrdinalIgnoreCase))
             {
                 if (key == "title") title = val;
@@ -105,6 +110,10 @@ internal sealed class TrafficRenderer : IAsyncDisposable
 {
     private const uint DefPos = 10, DefGround = 11, DefGear = 12;
     private const uint EvFreezeLatLon = 100, EvFreezeAlt = 101, EvFreezeAtt = 102;
+    // Light switches, in the order of the TrafficAircraft.Lights bits.
+    private static readonly string[] LightEvents =
+        { "NAV_LIGHTS_SET", "BEACON_LIGHTS_SET", "STROBES_SET", "LANDING_LIGHTS_SET", "TAXI_LIGHTS_SET", "LOGO_LIGHTS_SET", "WING_LIGHTS_SET" };
+    private const uint EvLightBase = 110;
     private readonly SimConnectClient _sc;
     private readonly AigCatalog _catalog;
     private readonly object _gate = new();
@@ -120,7 +129,8 @@ internal sealed class TrafficRenderer : IAsyncDisposable
         public bool Ready, Removed;
         public double Lat, Lon, Alt, Hdg, Pitch;
         public double GroundAlt = double.NaN, CgFt = double.NaN;
-        public DateTime LastGear;
+        public DateTime LastGear, LastLights;
+        public int SentLights = -1;
     }
 
     public TrafficRenderer(SimConnectClient sc, AigCatalog catalog) { _sc = sc; _catalog = catalog; }
@@ -138,6 +148,7 @@ internal sealed class TrafficRenderer : IAsyncDisposable
         await _sc.MapClientEventToSimEventAsync(EvFreezeLatLon, "FREEZE_LATITUDE_LONGITUDE_SET");
         await _sc.MapClientEventToSimEventAsync(EvFreezeAlt, "FREEZE_ALTITUDE_SET");
         await _sc.MapClientEventToSimEventAsync(EvFreezeAtt, "FREEZE_ATTITUDE_SET");
+        for (var i = 0; i < LightEvents.Length; i++) await _sc.MapClientEventToSimEventAsync(EvLightBase + (uint)i, LightEvents[i]);
         _sc.AssignedObjectId += OnAssigned;
         _sc.Data += OnData;
         _ = Task.Run(() => RenderLoop(_cts.Token));
@@ -258,6 +269,14 @@ internal sealed class TrafficRenderer : IAsyncDisposable
                     try
                     {
                         await _sc.SetDataOnSimObjectAsync(DefPos, o.ObjectId, buf.ToArray());
+                        // Lights: send when they change, and repeat every 5 s in case the model reset them.
+                        if (t.Lights != o.SentLights || (now - o.LastLights).TotalSeconds > 5)
+                        {
+                            o.SentLights = t.Lights;
+                            o.LastLights = now;
+                            for (var i = 0; i < LightEvents.Length; i++)
+                                await _sc.TransmitClientEventAsync(o.ObjectId, EvLightBase + (uint)i, (uint)((t.Lights >> i) & 1));
+                        }
                         if ((now - o.LastGear).TotalSeconds > 1)
                         {
                             o.LastGear = now;
