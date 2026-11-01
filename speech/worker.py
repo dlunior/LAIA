@@ -305,12 +305,25 @@ class Handler(BaseHTTPRequestHandler):
             if self.path.startswith("/radio"):
                 t0 = time.time()
                 audio = read_wav(self._body())
+                ctx = {}
+                raw_ctx = self.headers.get("X-LAIA-Context")
+                if raw_ctx:
+                    try:
+                        ctx = json.loads(urllib.parse.unquote(raw_ctx))
+                    except Exception as e:
+                        log(f"bad context header: {e}")
                 with ENGINE.lock:
                     heard = ENGINE.transcribe(audio)
                     if not heard:
                         # Nothing real was said (stray key-up): stay quiet like a real controller.
                         return self._send(204, b"", "text/plain", {"X-LAIA-Heard": "", "X-LAIA-Reply": ""})
-                    reply = build_reply(heard)
+                    if ctx.get("no_atc"):
+                        # Tuned to a frequency nobody answers on (CTAF, ATIS, or nothing nearby).
+                        log(f"heard on unanswered frequency: {heard!r}")
+                        return self._send(204, b"", "text/plain", {
+                            "X-LAIA-Heard": urllib.parse.quote(heard),
+                            "X-LAIA-Note": urllib.parse.quote(ctx.get("note") or "")})
+                    reply = build_reply(heard, ctx)
                     wav = ENGINE.speak(reply)
                 ENGINE.last_ms = (time.time() - t0) * 1000
                 log(f"heard: {heard!r} -> {reply!r} ({ENGINE.last_ms:.0f} ms)")

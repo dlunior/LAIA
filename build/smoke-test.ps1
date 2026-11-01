@@ -99,6 +99,50 @@ if ($t.ok) { Fail "fake AirLabs key reported as working" }
 $st = Invoke-RestMethod -Method Put -Uri "http://127.0.0.1:47801/api/settings" -ContentType "application/json" -Body '{"airlabs_key":""}'
 if ($st.airlabs.set) { Fail "key removal failed" }
 
+Step "FAA frequency data"
+$fs = ""
+for ($i = 0; $i -lt 60; $i++) {
+    $fs = (Invoke-RestMethod "http://127.0.0.1:47801/api/status").flight.frequencies
+    if ($fs -match "FAA cycle") { break }
+    Start-Sleep 3
+}
+Write-Host "frequencies: $fs"
+if ($fs -notmatch "FAA cycle") { Fail "FAA frequency data never loaded" }
+$lga = Invoke-RestMethod "http://127.0.0.1:47801/api/airport/KLGA/frequencies"
+$lga.frequencies | Format-Table | Out-String | Write-Host
+$gnd = ($lga.frequencies | Where-Object { $_.kind -eq "Ground" -and $_.primary } | Select-Object -First 1).freqText
+$cd = ($lga.frequencies | Where-Object { $_.kind -eq "Clearance" } | Select-Object -First 1).freqText
+Write-Host "LGA ground $gnd, clearance $cd"
+if (-not $gnd -or -not $cd) { Fail "LaGuardia ground/clearance frequencies not found" }
+
+Step "Simulated aircraft at LaGuardia on the ground frequency"
+function SimState($freq) {
+    $o = @{ connected = $true; simulator = "MSFS 2024"; lat = 40.7769; lon = -73.8740; altitudeFt = 21; onGround = $true;
+            com1Active = [double]$freq; com1Transmit = $true; headingMag = 40; title = "Smoke Test A320" }
+    Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:47801/api/sim/state" -ContentType "application/json" -Body ($o | ConvertTo-Json) | Out-Null
+}
+SimState $gnd
+$st = Invoke-RestMethod "http://127.0.0.1:47801/api/status"
+Write-Host "flight: $($st.flight | ConvertTo-Json -Depth 4 -Compress)"
+if ($st.flight.radio.station -notmatch "Ground") { Fail "ground frequency not recognised: $($st.flight.radio.station)" }
+
+$call3 = "$work\call3.wav"
+Invoke-WebRequest -Method Post -Uri "http://127.0.0.1:47801/api/say" -ContentType "application/json" `
+    -Body '{"text":"LaGuardia Ground, Delta eleven ninety six, request I F R clearance to Orlando.","radio":true}' -OutFile $call3
+$r = Invoke-WebRequest -Method Post -Uri "http://127.0.0.1:47801/api/radio" -ContentType "audio/wav" -InFile $call3 -OutFile "$work\reply3.wav" -PassThru
+$said3 = [Uri]::UnescapeDataString("$($r.Headers['X-LAIA-Reply'])")
+Write-Host "HEARD: $([Uri]::UnescapeDataString("$($r.Headers['X-LAIA-Heard'])"))"
+Write-Host "REPLY: $said3"
+if ($said3 -notmatch "contact LaGuardia Clearance") { Fail "clearance request on ground frequency wasn't redirected" }
+
+Step "Frequency with no controller"
+SimState 123.450
+$r = Invoke-WebRequest -Method Post -Uri "http://127.0.0.1:47801/api/radio" -ContentType "audio/wav" -InFile $call3 -SkipHttpErrorCheck
+Write-Host "HTTP $($r.StatusCode) note: $([Uri]::UnescapeDataString("$($r.Headers['X-LAIA-Note'])"))"
+if ($r.StatusCode -ne 204) { Fail "a frequency with no ATC still got a reply" }
+$o = @{ connected = $false }
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:47801/api/sim/state" -ContentType "application/json" -Body ($o | ConvertTo-Json) | Out-Null
+
 Step "Install LAIA Sim silently"
 $p = Start-Process "$Dist\LAIA-Sim-Setup.exe" -ArgumentList "/silent" -Wait -PassThru
 if ($p.ExitCode -ne 0) { Fail "sim setup returned $($p.ExitCode)" }

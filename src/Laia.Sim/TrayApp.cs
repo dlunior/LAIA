@@ -17,6 +17,8 @@ internal sealed class TrayApp : ApplicationContext
     private readonly Recorder _recorder = new();
     private readonly ServerLink _link = new();
     private readonly RadioLogForm _radioLog = new();
+    private readonly SimLink _sim = new();
+    private readonly ToolStripMenuItem _simItem = new("Waiting for MSFS") { Enabled = false };
     private readonly ToolStripMenuItem _statusItem;
     private readonly ToolStripMenuItem _pttItem;
     private readonly ToolStripMenuItem _logItem;
@@ -44,6 +46,7 @@ internal sealed class TrayApp : ApplicationContext
         _logItem = new ToolStripMenuItem("Show radio transcript", null, (_, _) => ToggleLog()) { Checked = _settings.ShowTranscript };
         var menu = new ContextMenuStrip { ShowImageMargin = false, Font = new Font("Segoe UI", 10f) };
         menu.Items.Add(_statusItem);
+        menu.Items.Add(_simItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(_pttItem);
         menu.Items.Add(_logItem);
@@ -65,6 +68,11 @@ internal sealed class TrayApp : ApplicationContext
         _ptt.Pressed += OnPttPressed;
         _ptt.Released += OnPttReleased;
         UpdatePttMenu();
+
+        _sim.Server = () => _server;
+        var ui = SynchronizationContext.Current;
+        _sim.StatusChanged += st => ui?.Post(_ => _simItem.Text = st, null);
+        _sim.Start();
 
         _heartbeat.Tick += async (_, _) => await HeartbeatAsync();
         _heartbeat.Start();
@@ -188,6 +196,11 @@ internal sealed class TrayApp : ApplicationContext
             var result = await _link.TransmitAsync(_server, wav);
             if (result is null) { Log.Write("Server heard nothing real; no reply"); return; }
             _radioLog.Add("YOU", string.IsNullOrWhiteSpace(result.Heard) ? "(nothing heard)" : result.Heard, Theme.Text);
+            if (result.Audio.Length == 0)
+            {
+                _radioLog.Add("NO REPLY", result.Note, Theme.Muted);
+                return;
+            }
             _radioLog.Add("ATC", result.Reply, Theme.Accent);
             await Player.PlayAsync(result.Audio);
         }
@@ -297,6 +310,7 @@ internal sealed class TrayApp : ApplicationContext
         _ptt.Dispose();
         _heartbeat.Dispose();
         _radioLog.Dispose();
+        _sim.Dispose();
         base.ExitThreadCore();
     }
 }

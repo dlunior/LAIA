@@ -228,7 +228,7 @@ internal static class Player
     }
 }
 
-internal sealed record RadioResult(string Heard, string Reply, byte[] Audio);
+internal sealed record RadioResult(string Heard, string Reply, byte[] Audio, string Note = "");
 
 internal sealed class RadioException(string message) : Exception(message);
 
@@ -245,7 +245,11 @@ internal sealed class ServerLink
         using var req = new HttpRequestMessage(HttpMethod.Post, server.BaseUrl + "/api/radio") { Content = content };
         req.Headers.Add("X-LAIA-Client", Environment.MachineName);
         using var resp = await _http.SendAsync(req);
-        if (resp.StatusCode == System.Net.HttpStatusCode.NoContent) return null;
+        if (resp.StatusCode == System.Net.HttpStatusCode.NoContent)
+        {
+            var heard = Header(resp, "X-LAIA-Heard");
+            return heard.Length == 0 ? null : new RadioResult(heard, "", Array.Empty<byte>(), Header(resp, "X-LAIA-Note"));
+        }
         if (!resp.IsSuccessStatusCode)
         {
             var body = await resp.Content.ReadAsStringAsync();

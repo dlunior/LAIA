@@ -30,6 +30,19 @@ public sealed class ServerState
     public string SpeechStatus { get; set; } = "starting"; // starting | loading | ready | error
     public string? SpeechDetail { get; set; }
     public JsonElement? SpeechHealth { get; set; }
+    public Laia.Common.SimConnect.AircraftState? Sim { get; private set; }
+    public DateTime SimUpdatedUtc { get; private set; } = DateTime.MinValue;
+    public string? LastRadioContext { get; set; }
+
+    /// <summary>Returns true when the sim just (re)connected.</summary>
+    public bool SetSim(Laia.Common.SimConnect.AircraftState s)
+    {
+        var wasConnected = Sim is { Connected: true } && DateTime.UtcNow - SimUpdatedUtc < TimeSpan.FromSeconds(30);
+        Sim = s;
+        SimUpdatedUtc = DateTime.UtcNow;
+        return s.Connected && !wasConnected;
+    }
+
     public string? SimAddress { get; private set; }
     public string? SimName { get; private set; }
     public DateTime? SimSeenUtc { get; private set; }
@@ -55,8 +68,9 @@ public sealed class ServerState
         lock (_gate) return _log.TakeLast(n).Reverse().ToList();
     }
 
-    public object Snapshot() => new
+    public object Snapshot(object? flight = null) => new
     {
+        flight,
         app = "LAIA Server",
         version = Version,
         machine = Environment.MachineName,

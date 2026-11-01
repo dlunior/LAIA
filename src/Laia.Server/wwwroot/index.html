@@ -33,6 +33,7 @@
   input{flex:1;background:#0d1426;border:1px solid var(--line);border-radius:10px;color:var(--text);padding:10px 12px;font:inherit}
   button{background:linear-gradient(180deg,#3cc4ff,#1e9bdc);border:0;color:#04121f;font-weight:600;border-radius:10px;padding:10px 16px;cursor:pointer;font:inherit;font-weight:600}
   button:disabled{opacity:.4;cursor:default}
+  button.ghost{background:transparent;color:var(--text);border:1px solid var(--line);font-weight:500}
   .empty{color:var(--muted);font-style:italic}
 </style>
 </head>
@@ -52,6 +53,13 @@
     <h2>Flight sim PC</h2>
     <div class="big"><span class="dot" id="pdot"></span><span id="ptext">Not connected yet</span></div>
     <div class="muted" id="pdetail">Install LAIA Sim on your flight sim PC. It finds this server on its own.</div>
+  </section>
+  <section class="card">
+    <h2>Your flight</h2>
+    <div class="big"><span class="dot" id="fdot"></span><span id="ftext">Waiting for MSFS</span></div>
+    <div class="muted" id="fdetail">Start MSFS on your sim PC and load a flight. LAIA Sim connects on its own.</div>
+    <dl id="finfo"></dl>
+    <div style="margin-top:12px"><button id="reload" class="ghost">Reload SimBrief plan</button> <span class="muted" id="planStatus"></span></div>
   </section>
   <section class="card">
     <h2>Test the controller voice</h2>
@@ -83,6 +91,22 @@ async function poll(){
     if(s.sim){const fresh=s.sim.lastSeenSeconds<90;$("pdot").className="dot "+(fresh?"ok":"warn");
       $("ptext").textContent=fresh?"Connected":"Last seen "+dur(s.sim.lastSeenSeconds)+" ago";
       $("pdetail").textContent=(s.sim.name||"Sim PC")+" at "+s.sim.address;}
+    const fl=s.flight||{};
+    const rows2=[];
+    if(fl.sim){const m=fl.sim;$("fdot").className="dot ok";
+      $("ftext").textContent=(m.onGround?"On the ground":"Airborne")+(fl.where&&fl.where.nm<15?` near ${fl.where.airport}`:"");
+      $("fdetail").textContent=`${m.simulator||"MSFS"} · ${m.title||""}`;
+      rows2.push(["Altitude",`${Math.round(m.altitudeFt).toLocaleString()} ft${m.onGround?"":" · "+Math.round(m.verticalSpeed)+" fpm"}`]);
+      rows2.push(["Speed",`${Math.round(m.ias)} kt indicated · ${Math.round(m.groundSpeed)} kt ground`]);
+      rows2.push(["Heading",`${String(Math.round(m.headingMag)%360||360).padStart(3,"0")}°`]);
+      if(fl.radio)rows2.push(["Transmitting on",`${fl.radio.freq} · ${fl.radio.station||"no ATC on this frequency"}`]);
+      rows2.push(["Squawk",m.squawk||"-"]);
+    }else{$("fdot").className="dot";$("ftext").textContent="Waiting for MSFS";$("fdetail").textContent="Start MSFS on your sim PC and load a flight. LAIA Sim connects on its own.";}
+    if(fl.plan){const p=fl.plan;rows2.push(["SimBrief plan",`${p.callsign} ${p.origin} to ${p.destination} · ${p.aircraft}`]);
+      rows2.push(["Route",`${p.sid?p.sid+" ":""}${p.route}${p.star?" "+p.star:""}`]);
+      rows2.push(["Cruise",p.cruise>=18000?"FL"+String(p.cruise/100).padStart(3,"0"):p.cruise+" ft"]);}
+    $("finfo").innerHTML=rows2.map(([a,b])=>`<dt>${esc(a)}</dt><dd>${esc(b)}</dd>`).join("");
+    $("planStatus").textContent=fl.planStatus||"";
     const t=s.transcript||[];
     if(t.length){$("log").innerHTML=t.map(e=>`<div class="ex"><div class="who">${new Date(e.time).toLocaleTimeString()} · ${Math.round(e.ms)} ms</div><div class="pilot">You: ${esc(e.heard)||"<i>(nothing heard)</i>"}</div><div class="atc">ATC: ${esc(e.reply)}</div></div>`).join("");}
   }catch(e){$("machine").textContent="Can't reach the LAIA service. Is it running?";}
@@ -94,6 +118,7 @@ $("say").addEventListener("submit",async e=>{
     const url=URL.createObjectURL(await r.blob());new Audio(url).play();$("sayMsg").textContent="";
   }catch(err){$("sayMsg").textContent="Failed: "+err}
 });
+$("reload").addEventListener("click",async()=>{$("planStatus").textContent="Loading…";try{const r=await fetch("/api/simbrief/reload",{method:"POST"});$("planStatus").textContent=(await r.json()).status;}catch(e){$("planStatus").textContent="Failed";}});
 poll();setInterval(poll,2000);
 </script>
 </body>

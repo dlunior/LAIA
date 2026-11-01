@@ -20,6 +20,9 @@ builder.Logging.AddFilter("System.Net.Http", LogLevel.Warning);
 
 builder.Services.AddSingleton<ServerState>();
 builder.Services.AddSingleton<SettingsStore>();
+builder.Services.AddSingleton<FrequencyDb>();
+builder.Services.AddHostedService<FrequencyUpdater>();
+builder.Services.AddSingleton<SimBriefService>();
 builder.Services.AddSingleton<SpeechWorker>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<SpeechWorker>());
 builder.Services.AddHostedService<DiscoveryResponder>();
@@ -45,11 +48,29 @@ var logoPng = Resource("logo.png");
 app.MapGet("/", () => Results.Bytes(indexHtml, "text/html; charset=utf-8"));
 app.MapGet("/logo.png", () => Results.Bytes(logoPng, "image/png"));
 
-app.MapGet("/api/status", (ServerState s) => Results.Json(s.Snapshot(), jsonOpts));
+app.MapGet("/api/status", (ServerState s, FrequencyDb f, SimBriefService sb) => Results.Json(s.Snapshot(FlightInfo(s, f, sb)), jsonOpts));
+
+// LAIA Sim posts the user's aircraft about once a second.
+app.MapPost("/api/sim/state", async (HttpContext ctx, ServerState s, SimBriefService sb) =>
+{
+    var st = await JsonSerializer.DeserializeAsync<Laia.Common.SimConnect.AircraftState>(ctx.Request.Body, jsonOpts);
+    if (st is null) return Results.BadRequest();
+    s.TouchSim(ctx.Connection.RemoteIpAddress?.ToString(), null);
+    var justConnected = s.SetSim(st);
+    if (st.Connected && (justConnected || DateTime.UtcNow - sb.LastAttemptUtc > TimeSpan.FromMinutes(15)))
+        _ = Task.Run(sb.RefreshAsync);
+    return Results.Ok();
+});
+
+app.MapPost("/api/simbrief/reload", async (SimBriefService sb) => { await sb.RefreshAsync(); return Results.Json(new { status = sb.Status }, jsonOpts); });
+
+// Diagnostics: the published frequencies LAIA knows for an airport (e.g. /api/airport/KLGA/frequencies).
+app.MapGet("/api/airport/{id}/frequencies", (string id, FrequencyDb f) =>
+    Results.Json(new { status = f.Status, frequencies = f.AirportFrequencies(id).Select(x => new { x.Name, x.FreqText, kind = x.Kind.ToString(), x.Primary }) }, jsonOpts));
 app.MapGet("/api/transcript", (ServerState s) => Results.Json(s.Recent(), jsonOpts));
 
 // The sim PC sends a push-to-talk recording here and gets the controller's spoken reply back.
-app.MapPost("/api/radio", async (HttpContext ctx, IHttpClientFactory f, ServerState s, ILogger<Program> log) =>
+app.MapPost("/api/radio", async (HttpContext ctx, IHttpClientFactory f, ServerState s, FrequencyDb freqs, SimBriefService sb, ILogger<Program> log) =>
 {
     s.TouchSim(ctx.Connection.RemoteIpAddress?.ToString(), ctx.Request.Headers["X-LAIA-Client"].ToString());
     using var body = new MemoryStream();
@@ -60,8 +81,12 @@ app.MapPost("/api/radio", async (HttpContext ctx, IHttpClientFactory f, ServerSt
     var sw = Stopwatch.StartNew();
     using var content = new ByteArrayContent(body.ToArray());
     content.Headers.ContentType = new MediaTypeHeaderValue("audio/wav");
+    var (radioCtx, radioSummary) = RadioContext.Build(s, freqs, sb);
+    s.LastRadioContext = radioSummary;
+    using var req = new HttpRequestMessage(HttpMethod.Post, "radio") { Content = content };
+    req.Headers.Add("X-LAIA-Context", Uri.EscapeDataString(JsonSerializer.Serialize(radioCtx)));
     HttpResponseMessage resp;
-    try { resp = await f.CreateClient("speech").PostAsync("radio", content, ctx.RequestAborted); }
+    try { resp = await f.CreateClient("speech").SendAsync(req, ctx.RequestAborted); }
     catch (Exception ex)
     {
         log.LogWarning("Speech engine call failed: {msg}", ex.Message);
@@ -70,14 +95,26 @@ app.MapPost("/api/radio", async (HttpContext ctx, IHttpClientFactory f, ServerSt
     using (resp)
     {
         if (resp.StatusCode == System.Net.HttpStatusCode.NoContent)
-            return Results.NoContent(); // nothing real was said (stray key-up)
+        {
+            // Nothing real was said (stray key-up), or nobody answers on that frequency.
+            var heard0 = Header(resp, "X-LAIA-Heard");
+            var note = Header(resp, "X-LAIA-Note");
+            if (heard0.Length > 0)
+            {
+                s.AddExchange(heard0, $"(no reply: {note})", sw.Elapsed.TotalMilliseconds);
+                ctx.Response.Headers["X-LAIA-Heard"] = Uri.EscapeDataString(heard0);
+                ctx.Response.Headers["X-LAIA-Note"] = Uri.EscapeDataString(note);
+                log.LogInformation("Radio: heard \"{heard}\" with no reply ({note})", heard0, note);
+            }
+            return Results.NoContent();
+        }
         if (!resp.IsSuccessStatusCode)
             return Results.Json(new { error = await resp.Content.ReadAsStringAsync() }, jsonOpts, statusCode: 502);
         var heard = Header(resp, "X-LAIA-Heard");
         var reply = Header(resp, "X-LAIA-Reply");
         var wav = await resp.Content.ReadAsByteArrayAsync();
         s.AddExchange(heard, reply, sw.Elapsed.TotalMilliseconds);
-        log.LogInformation("Radio: heard \"{heard}\" -> \"{reply}\" ({ms:0} ms)", heard, reply, sw.Elapsed.TotalMilliseconds);
+        log.LogInformation("Radio [{ctx}]: heard \"{heard}\" -> \"{reply}\" ({ms:0} ms)", radioSummary, heard, reply, sw.Elapsed.TotalMilliseconds);
         ctx.Response.Headers["X-LAIA-Heard"] = Uri.EscapeDataString(heard);
         ctx.Response.Headers["X-LAIA-Reply"] = Uri.EscapeDataString(reply);
         return Results.Bytes(wav, "audio/wav");
@@ -100,10 +137,11 @@ app.MapPost("/api/say", async (HttpContext ctx, IHttpClientFactory f, ServerStat
 
 // Settings entered in the LAIA Sim settings window. Keys never leave this PC in readable form.
 app.MapGet("/api/settings", (SettingsStore st) => Results.Json(st.Public(), jsonOpts));
-app.MapPut("/api/settings", async (HttpContext ctx, SettingsStore st, ILogger<Program> log) =>
+app.MapPut("/api/settings", async (HttpContext ctx, SettingsStore st, SimBriefService sb, ILogger<Program> log) =>
 {
     using var doc = await JsonDocument.ParseAsync(ctx.Request.Body);
     st.Update(doc.RootElement);
+    if (doc.RootElement.TryGetProperty("simbrief_user", out _)) _ = Task.Run(sb.RefreshAsync);
     log.LogInformation("Settings updated from {ip}", ctx.Connection.RemoteIpAddress);
     return Results.Json(st.Public(), jsonOpts);
 });
@@ -121,6 +159,31 @@ app.MapPost("/api/settings/test/{service}", async (string service, HttpContext c
 });
 
 app.Run();
+
+static object FlightInfo(ServerState s, FrequencyDb f, SimBriefService sb)
+{
+    var sim = s.Sim;
+    var live = sim is { Connected: true } && DateTime.UtcNow - s.SimUpdatedUtc < TimeSpan.FromSeconds(15);
+    object? where = null, radio = null;
+    if (live && f.Loaded)
+    {
+        var near = f.NearestAirport(sim!.Lat, sim.Lon);
+        if (near is { } n) where = new { airport = n.ident, nm = Math.Round(n.nm, 1) };
+        var tuned = f.Lookup(sim.TransmitFrequency, sim.Lat, sim.Lon);
+        radio = new { freq = sim.TransmitFrequency.ToString("0.000", System.Globalization.CultureInfo.InvariantCulture), station = tuned?.Name };
+    }
+    var p = sb.Plan;
+    return new
+    {
+        sim = live ? sim : null,
+        where,
+        radio,
+        plan = p is null ? null : new { p.Callsign, p.Origin, p.Destination, p.Route, cruise = p.CruiseFt, p.Sid, p.Star, p.Aircraft, p.Squawk, p.DepartureFreq },
+        planStatus = sb.Status,
+        frequencies = f.Status,
+        lastRadio = s.LastRadioContext,
+    };
+}
 
 static string Header(HttpResponseMessage r, string name) =>
     r.Headers.TryGetValues(name, out var v) ? Uri.UnescapeDataString(v.FirstOrDefault() ?? "") : "";
