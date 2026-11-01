@@ -8,26 +8,16 @@ jobs:
   probe:
     runs-on: ubuntu-latest
     steps:
-      - name: Inspect FAA frequency file
+      - name: Inspect FAA runway files
         run: |
           mkdir -p out && cd out
-          curl -sL "https://nfdc.faa.gov/webContent/28DaySub/extra/29_Oct_2026_FRQ_CSV.zip" -o frq.zip
-          unzip -o -q frq.zip && ls -la > report.txt
-          f=$(ls | grep -i '^FRQ.*csv$' | grep -v CHG | head -1)
-          echo "FILE $f $(wc -l < $f) lines" >> report.txt
-          head -1 "$f" >> report.txt
-          echo "== LGA / N90 / ZNY rows" >> report.txt
-          grep -E '"(LGA|N90|ZNY|JFK)"' "$f" | head -60 >> report.txt
-          echo "== FACILITY_TYPE counts" >> report.txt
-          python3 -c "
-          import csv,collections,sys
-          r=list(csv.DictReader(open('$f',encoding='latin-1')))
-          print(collections.Counter(x['FACILITY_TYPE'] for x in r).most_common(30))
-          print(collections.Counter(x['FREQ_USE'] for x in r).most_common(60))
-          print(collections.Counter(x['SERVICED_SITE_TYPE'] for x in r).most_common(20))
-          for x in r:
-            if x['FACILITY'] in ('ATL','A80','ZTL','CRW','CYXC') : print({k:x[k] for k in ('FACILITY','FACILITY_TYPE','SERVICED_FACILITY','TOWER_OR_COMM_CALL','PRIMARY_APPROACH_RADIO_CALL','FREQ','FREQ_USE','SECTORIZATION','LAT_DECIMAL','LONG_DECIMAL')})
-          " >> report.txt 2>&1
+          curl -sL "https://nfdc.faa.gov/webContent/28DaySub/extra/29_Oct_2026_APT_CSV.zip" -o apt.zip
+          unzip -o -q apt.zip && ls -la > report.txt
+          for f in APT_RWY.csv APT_RWY_END.csv APT_BASE.csv; do
+            echo "===== $f $(wc -l < $f)" >> report.txt
+            head -1 $f >> report.txt
+            grep -E '"(LGA|MSP)"' $f | head -12 >> report.txt
+          done
           touch cycles.txt zips.txt
       - name: Publish report
         run: |
