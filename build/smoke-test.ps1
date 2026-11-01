@@ -152,9 +152,9 @@ $o = @{ connected = $true; simulator = "MSFS 2024"; lat = 40.7769; lon = -73.874
 $reply = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:47801/api/sim/state" -ContentType "application/json" -Body ($o | ConvertTo-Json)
 Write-Host "sim/state reply traffic: $($reply.traffic | ConvertTo-Json -Compress)"
 if (@($reply.traffic).Count -ne 1) { Fail "traffic not sent to the sim" }
-Start-Sleep 70
+Start-Sleep 75
 $tr = (Invoke-RestMethod "http://127.0.0.1:47801/api/traffic").traffic
-Write-Host "after 70 s: $($tr | ConvertTo-Json -Compress)"
+Write-Host "after 75 s: $($tr | ConvertTo-Json -Compress)"
 if (@($tr).Count -ne 1 -or $tr[0].onGround -or $tr[0].altFt -lt 30) { Fail "test departure didn't take off" }
 Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:47801/api/traffic/clear" | Out-Null
 

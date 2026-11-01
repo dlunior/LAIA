@@ -112,7 +112,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, ServerSta
             if (a.OnGround)
             {
                 a.Phase = "takeoff roll";
-                a.GroundSpeed = Math.Min(a.GroundSpeed + 3.2 * dt, 165);
+                a.GroundSpeed = Math.Min(a.GroundSpeed + 4.5 * dt, 165); // ~36 s to rotation, about 5,000 ft of runway
                 if (a.GroundSpeed > 145) a.Pitch = Math.Min(a.Pitch + 3 * dt, 9); // rotate
                 if (a.GroundSpeed >= 160) { a.OnGround = false; a.Phase = "climbing"; }
             }
