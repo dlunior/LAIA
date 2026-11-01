@@ -99,10 +99,30 @@ internal sealed class ServerPlan
     {
         var redist = Path.Combine(InstallDir, "redist", "vc_redist.x64.exe");
         if (!File.Exists(redist)) { c.Result = "Already included"; return; }
+        var bundled = System.Diagnostics.FileVersionInfo.GetVersionInfo(redist);
+        var installed = InstalledVcRuntime();
+        if (installed is not null && System.Version.TryParse(bundled.ProductVersion, out var want) && installed >= new System.Version(want.Major, want.Minor, Math.Max(0, want.Build)))
+        {
+            c.Result = $"Already installed ({installed})";
+            return;
+        }
         c.Report(null, "Microsoft Visual C++ runtime");
         var code = await Sys.RunAsync(redist, "/install /quiet /norestart", timeout: TimeSpan.FromMinutes(10));
         if (code is not (0 or 1638 or 3010 or 1641)) throw new InvalidOperationException($"Visual C++ runtime installer returned {code}");
         c.Result = code == 1638 ? "Already up to date" : "Installed";
+    }
+
+    private static System.Version? InstalledVcRuntime()
+    {
+        try
+        {
+            using var k = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64");
+            if (k?.GetValue("Installed") is int i && i == 1 &&
+                k.GetValue("Major") is int major && k.GetValue("Minor") is int minor && k.GetValue("Bld") is int bld)
+                return new System.Version(major, minor, bld);
+        }
+        catch { }
+        return null;
     }
 
     private Task WriteConfigAsync(StepContext c)
@@ -116,6 +136,7 @@ internal sealed class ServerPlan
         cfg["whisper_model"] = WhisperModel;
         cfg["whisper_device"] = UseGpu ? "auto" : "cpu";
         cfg["models_dir"] = ModelsDir;
+        cfg["cuda_dir"] = CudaDir;
         cfg["kokoro_model"] = Path.Combine(ModelsDir, "kokoro", "kokoro-v1.0.onnx");
         cfg["kokoro_voices"] = Path.Combine(ModelsDir, "kokoro", "voices-v1.0.bin");
         Default("voice", "am_michael");
@@ -145,12 +166,23 @@ internal sealed class ServerPlan
         c.Result = "Kokoro voice ready";
     }
 
+    /// <summary>NVIDIA libraries live in ProgramData so updates don't delete and re-download them.</summary>
+    public string CudaDir => Path.Combine(DataDir, "cuda");
+    private const string CudaSpec = "nvidia-cublas-cu12 nvidia-cudnn-cu12>=9,<10 nvidia-cuda-runtime-cu12";
+
     private async Task GpuLibsAsync(StepContext c)
     {
-        c.Report(null, "Downloading NVIDIA speech libraries (about 1.2 GB)…");
+        var marker = Path.Combine(CudaDir, "laia-installed.txt");
+        var have = File.Exists(marker) && File.ReadAllText(marker).Trim() == CudaSpec &&
+                   Directory.Exists(Path.Combine(CudaDir, "nvidia", "cublas", "bin")) && Directory.Exists(Path.Combine(CudaDir, "nvidia", "cudnn", "bin"));
+        if (have) { c.Result = $"{Gpu!.Name} ({Gpu.VramText}) ready (already downloaded)"; return; }
+
+        c.Report(null, "Downloading NVIDIA speech libraries (about 1.2 GB, only once)…");
+        Sys.DeleteDirectory(CudaDir);
+        Directory.CreateDirectory(CudaDir);
         var code = await Sys.RunAsync(PythonExe,
-            "-m pip install --no-warn-script-location --disable-pip-version-check --progress-bar off --upgrade " +
-            "nvidia-cublas-cu12 \"nvidia-cudnn-cu12>=9,<10\" nvidia-cuda-runtime-cu12",
+            $"-m pip install --no-warn-script-location --disable-pip-version-check --progress-bar off --target \"{CudaDir}\" " +
+            string.Join(" ", CudaSpec.Split(' ').Select(x => $"\"{x}\"")),
             line =>
             {
                 if (line.StartsWith("Downloading", StringComparison.OrdinalIgnoreCase) || line.StartsWith("Collecting", StringComparison.OrdinalIgnoreCase))
@@ -164,6 +196,7 @@ internal sealed class ServerPlan
             c.Warning = "Couldn't set up the graphics card, so speech will run on the processor (a little slower).";
             return;
         }
+        File.WriteAllText(marker, CudaSpec);
         c.Result = $"{Gpu!.Name} ({Gpu.VramText}) ready";
     }
 

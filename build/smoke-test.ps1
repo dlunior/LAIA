@@ -17,6 +17,10 @@ Write-Host "exit $($p.ExitCode) after $([int]$t.Elapsed.TotalSeconds)s"
 Get-Content $log | Select-Object -Last 60
 if ($p.ExitCode -ne 0) { Fail "server setup returned $($p.ExitCode)" }
 
+Step "C++ runtime step skipped when already installed"
+$vc = Select-String -Path $log -Pattern "\] (Ok|Warn) .*(Already installed|Already up to date|Installed)" | Select-Object -Last 3
+$vc | ForEach-Object { Write-Host $_.Line }
+
 Step "Service and firewall"
 sc.exe query LAIA
 netsh advfirewall firewall show rule name="LAIA Server"

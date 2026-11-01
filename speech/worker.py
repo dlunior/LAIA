@@ -88,9 +88,13 @@ def log(msg):
     print(f"{time.strftime('%H:%M:%S')} {msg}", flush=True)
 
 
-def add_cuda_paths():
-    """The NVIDIA pip wheels drop their DLLs in site-packages/nvidia/*/bin; make them findable."""
-    for base in list(sys.path):
+def add_cuda_paths(cfg=None):
+    """The NVIDIA pip wheels keep their DLLs in <folder>/nvidia/*/bin; make them findable.
+    Setup installs them in ProgramData/LAIA/cuda (kept across updates); older installs had them in site-packages."""
+    bases = list(sys.path)
+    cuda_dir = (cfg or {}).get("cuda_dir") or os.path.join(data_dir(), "cuda")
+    bases.insert(0, cuda_dir)
+    for base in bases:
         nv = os.path.join(base, "nvidia")
         if not os.path.isdir(nv):
             continue
@@ -173,7 +177,7 @@ class Engine:
         want = self.cfg.get("whisper_device", "auto")
         attempts = []
         if want in ("auto", "cuda"):
-            add_cuda_paths()
+            add_cuda_paths(self.cfg)
             attempts.append(("cuda", "float16"))
         attempts.append(("cpu", "int8"))
         last = None
