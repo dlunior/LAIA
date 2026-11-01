@@ -196,6 +196,7 @@ internal sealed class TrayApp : ApplicationContext
             var result = await _link.TransmitAsync(_server, wav);
             if (result is null) { Log.Write("Server heard nothing real; no reply"); return; }
             _radioLog.Add("YOU", string.IsNullOrWhiteSpace(result.Heard) ? "(nothing heard)" : result.Heard, Theme.Text);
+            Log.Write($"Radio: you \"{result.Heard}\" -> {(result.Audio.Length == 0 ? "no reply (" + result.Note + ")" : "ATC \"" + result.Reply + "\"")}");
             if (result.Audio.Length == 0)
             {
                 _radioLog.Add("NO REPLY", result.Note, Theme.Muted);
@@ -297,14 +298,18 @@ internal sealed class TrayApp : ApplicationContext
 
     private void SetState(Light light, string text)
     {
-        _tray.Icon = _icons[light];
+        if (_exiting) return;
+        try { _tray.Icon = _icons[light]; } catch (Exception ex) { Log.Write("Tray icon update failed: " + ex.Message); }
         _statusItem.Text = text;
         var tip = "LAIA Sim - " + text;
-        _tray.Text = tip.Length > 63 ? tip[..62] + "…" : tip;
+        try { _tray.Text = tip.Length > 63 ? tip[..62] + "…" : tip; } catch { }
     }
+
+    private bool _exiting;
 
     protected override void ExitThreadCore()
     {
+        _exiting = true;
         _tray.Visible = false;
         _tray.Dispose();
         _ptt.Dispose();

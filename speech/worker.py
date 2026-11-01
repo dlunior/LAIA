@@ -27,7 +27,7 @@ if HERE not in sys.path:
 
 import numpy as np  # noqa: E402
 
-from phraseology import build_reply  # noqa: E402
+from phraseology import build_reply, plan_callsign  # noqa: E402
 from radio_fx import radio_filter  # noqa: E402
 
 WHISPER_PROMPT = (
@@ -217,7 +217,7 @@ class Engine:
 
     # ---- operations
 
-    def transcribe(self, audio):
+    def transcribe(self, audio, hint=""):
         """Returns what the pilot said, or "" for a stray key-up / silence / Whisper phantom phrase."""
         if audio.size < 4800:  # under 0.3 s
             return ""
@@ -226,7 +226,7 @@ class Engine:
             log(f"ignored near-silent transmission (rms {rms:.4f})")
             return ""
         segs, _ = self.whisper.transcribe(
-            audio, language="en", beam_size=5, vad_filter=True, initial_prompt=WHISPER_PROMPT,
+            audio, language="en", beam_size=5, vad_filter=True, initial_prompt=(hint + " " + WHISPER_PROMPT).strip(),
             condition_on_previous_text=False, without_timestamps=True)
         kept = []
         for s in segs:
@@ -316,8 +316,15 @@ class Handler(BaseHTTPRequestHandler):
                         ctx = json.loads(urllib.parse.unquote(raw_ctx))
                     except Exception as e:
                         log(f"bad context header: {e}")
+                # Tell Whisper what it's likely to hear: the user's own callsign and who they're calling.
+                hint = ""
+                _, airline, num = plan_callsign((ctx.get("plan") or {}).get("callsign"))
+                if airline:
+                    hint += f"{airline} {num}. "
+                if ctx.get("tuned"):
+                    hint += f"{ctx['tuned']['name']}. "
                 with ENGINE.lock:
-                    heard = ENGINE.transcribe(audio)
+                    heard = ENGINE.transcribe(audio, hint)
                     if not heard:
                         # Nothing real was said (stray key-up): stay quiet like a real controller.
                         return self._send(204, b"", "text/plain", {"X-LAIA-Heard": "", "X-LAIA-Reply": ""})

@@ -167,7 +167,7 @@ static object FlightInfo(ServerState s, FrequencyDb f, SimBriefService sb)
     object? where = null, radio = null;
     if (live && f.Loaded)
     {
-        var near = f.NearestAirport(sim!.Lat, sim.Lon);
+        var near = sim!.AltitudeFt < 18000 ? f.NearestAirport(sim.Lat, sim.Lon) : null;
         if (near is { } n) where = new { airport = n.ident, nm = Math.Round(n.nm, 1) };
         var tuned = f.Lookup(sim.TransmitFrequency, sim.Lat, sim.Lon);
         radio = new { freq = sim.TransmitFrequency.ToString("0.000", System.Globalization.CultureInfo.InvariantCulture), station = tuned?.Name };

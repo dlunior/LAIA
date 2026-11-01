@@ -252,11 +252,13 @@ public sealed class FrequencyDb
         return _byAirport.TryGetValue(ident, out var list) ? list : _byAirport.GetValueOrDefault(icaoOrIdent) ?? new();
     }
 
+    /// <summary>Nearest airport with a control tower (small private strips are ignored).</summary>
     public (string ident, double nm)? NearestAirport(double lat, double lon)
     {
         (string, double)? best = null;
         foreach (var (ident, alat, alon) in _airports)
         {
+            if (!_byAirport.TryGetValue(ident, out var fl) || !fl.Any(f => f.Kind == FacKind.Tower)) continue;
             var d = DistanceNm(lat, lon, alat, alon);
             if (best is null || d < best.Value.Item2) best = (ident, d);
         }

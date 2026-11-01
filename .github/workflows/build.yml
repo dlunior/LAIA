@@ -42,6 +42,11 @@ jobs:
         if: steps.pycache.outputs.cache-hit != 'true'
         run: ./build/make-python.ps1 -Out out/python
 
+      - name: Check radio reply logic
+        run: |
+          & out/python/python.exe speech/test_phraseology.py
+          if ($LASTEXITCODE) { throw "radio reply checks failed" }
+
       - name: Publish apps and pack installers
         run: |
           New-Item -ItemType Directory -Force out | Out-Null

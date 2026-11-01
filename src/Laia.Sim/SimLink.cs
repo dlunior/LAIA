@@ -123,9 +123,10 @@ internal sealed class SimLink : IDisposable
                 _state.Com2Standby = Math.Round(d.ReadFloat64(), 3);
                 _state.Com1Transmit = d.ReadFloat64() > 0.5;
                 _state.Com2Transmit = d.ReadFloat64() > 0.5;
-                var sq = (int)d.ReadFloat64();
-                // MSFS reports the code in BCO16 (each hex digit is one squawk digit).
-                _state.Squawk = sq is > 0 and <= 0x7777 ? sq.ToString("X4") : sq.ToString("D4");
+                var sq = (int)Math.Round(d.ReadFloat64());
+                // MSFS 2024 reports the plain code (1200); some aircraft report BCO16 (0x1200 = 4608).
+                var dec = sq.ToString("D4");
+                _state.Squawk = dec.All(ch => ch <= '7') ? dec : sq.ToString("X4");
             }
             else if (d.RequestId == ReqStrings)
             {

@@ -103,7 +103,9 @@ async function poll(){
       rows2.push(["Squawk",m.squawk||"-"]);
     }else{$("fdot").className="dot";$("ftext").textContent="Waiting for MSFS";$("fdetail").textContent="Start MSFS on your sim PC and load a flight. LAIA Sim connects on its own.";}
     if(fl.plan){const p=fl.plan;rows2.push(["SimBrief plan",`${p.callsign} ${p.origin} to ${p.destination} · ${p.aircraft}`]);
-      rows2.push(["Route",`${p.sid?p.sid+" ":""}${p.route}${p.star?" "+p.star:""}`]);
+      const rt=(p.route||"").split(/\s+/).filter((w,i,a)=>w&&w!==a[i-1]);
+      if(p.sid&&rt[0]!==p.sid)rt.unshift(p.sid);if(p.star&&rt[rt.length-1]!==p.star)rt.push(p.star);
+      rows2.push(["Route",rt.join(" ")]);
       rows2.push(["Cruise",p.cruise>=18000?"FL"+String(p.cruise/100).padStart(3,"0"):p.cruise+" ft"]);}
     $("finfo").innerHTML=rows2.map(([a,b])=>`<dt>${esc(a)}</dt><dd>${esc(b)}</dd>`).join("");
     $("planStatus").textContent=fl.planStatus||"";

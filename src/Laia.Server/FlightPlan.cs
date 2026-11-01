@@ -101,6 +101,7 @@ public static class RadioContext
             };
         }
         var sim = state.Sim;
+        if (sim is { Connected: true } && DateTime.UtcNow - state.SimUpdatedUtc < TimeSpan.FromSeconds(15)) ctx["on_ground"] = sim.OnGround;
         if (sim is null || !sim.Connected || DateTime.UtcNow - state.SimUpdatedUtc > TimeSpan.FromSeconds(15) || !freqs.Loaded)
             return (ctx, "no sim position, answering by what was said");
 

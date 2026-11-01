@@ -187,6 +187,28 @@ _LAST_FACILITY = {}
 _LAST_ANY = {"facility": None}
 _CLEARED = {}  # callsign key -> squawk given in the clearance (for readback checks)
 
+# ICAO airline code -> radio telephony, for turning a SimBrief callsign (DAL1196) into speech.
+TELEPHONY = {
+    "DAL": "Delta", "UAL": "United", "AAL": "American", "SWA": "Southwest", "JBU": "JetBlue", "ACA": "Air Canada",
+    "ROU": "Rouge", "JZA": "Jazz", "WJA": "WestJet", "ASA": "Alaska", "NKS": "Spirit Wings", "FFT": "Frontier Flight",
+    "SKW": "SkyWest", "RPA": "Brickyard", "EDV": "Endeavor", "ENY": "Envoy", "PDT": "Piedmont", "JIA": "Blue Streak",
+    "FDX": "FedEx", "UPS": "UPS", "AAY": "Allegiant", "SCX": "Sun Country", "POE": "Porter", "FLE": "Flair",
+    "TSC": "Transat", "HAL": "Hawaiian", "BAW": "Speedbird", "DLH": "Lufthansa", "AFR": "Air France", "KLM": "KLM",
+    "VIR": "Virgin", "CMP": "Copa", "AMX": "Aeromexico", "VOI": "Volaris", "BHS": "Bahamas", "BWA": "Caribbean",
+    "GJS": "Lindbergh", "QXE": "Horizon", "CPZ": "Compass", "MXY": "Moxy", "VXP": "Avelo", "AWI": "Air Wisconsin",
+}
+
+
+def plan_callsign(callsign):
+    """'DAL1196' -> ('Delta eleven ninety-six', 'Delta', '1196') or (None, None, None)."""
+    m = re.match(r"^([A-Z]{3})(\d+[A-Z]{0,2})$", (callsign or "").upper())
+    if not m or m.group(1) not in TELEPHONY:
+        return None, None, None
+    name = TELEPHONY[m.group(1)]
+    num = re.match(r"\d+", m.group(2)).group(0)
+    return f"{name} {say_flight_number(num)}", name, m.group(2)
+
+
 KIND_WORDS = {"Clearance": "clearance", "Ground": "ground", "Tower": "tower", "Approach": "approach",
               "Departure": "departure", "Center": "center", "Ramp": "ramp"}
 
@@ -267,6 +289,16 @@ def build_reply(heard, ctx=None):
     named, named_kind = find_facility(text)
     tuned = ctx.get("tuned")
 
+    # The user is the only aircraft on frequency for now: if the airline name matches their SimBrief
+    # callsign (or the call contains the squawk we just gave them) but the number was misheard, it's them.
+    plan_spoken, plan_airline, plan_key = plan_callsign(((ctx.get("plan") or {}).get("callsign")))
+    if plan_spoken and cs_key != plan_key:
+        digits_said = re.sub(r"\D", "", " ".join(str(UNITS.get(t, t)) for t in _tokens(text)))
+        squawk = _CLEARED.get(plan_key)
+        if (not callsign and (plan_airline.lower() in low or (squawk and squawk in digits_said))) or \
+           (callsign and callsign.split(" ")[0].lower() == plan_airline.split(" ")[0].lower() and len(text) > 0 and cs_key and len(cs_key) < 2):
+            callsign, cs_key = plan_spoken, plan_key
+
     if tuned:
         facility, kind = tuned["name"], tuned["kind"]
     else:
@@ -319,6 +351,8 @@ def build_reply(heard, ctx=None):
     if has("say again", "repeat"):
         return f"{head}, I say again, go ahead."
     if wants_clearance:
+        if ctx.get("on_ground") is False:
+            return f"{head}, roger, say request."
         if ctx.get("plan"):
             return _clearance(head, cs_key, ctx)
         return f"{head}, roger. Your clearance is on request, I'll call you back shortly."
