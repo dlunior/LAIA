@@ -55,6 +55,7 @@ public sealed class Flight
     public Flight? BlockedBy, Ignore;
     public double IgnoreUntil;
     public bool LandingChecked, WentAround;
+    public double LastOrbit = -999;
     public string Route = "";               // procedure names for the control page
     public bool UserIsObstacle;
 
@@ -361,8 +362,9 @@ public sealed class TrafficWorld
         if (RunwayBusy(r, f)) return false;
         // Only line up if the takeoff can follow without delaying the next arrival.
         var eta = ArrivalEta(r);
-        var needed = Math.Max(WakeRemaining(f), 15) + 25 + 60;
-        if (eta < Math.Max(100, needed)) return false;
+        // Line-up ~25 s, short wait, takeoff roll ~55 s, and the departure must be off the runway well before the arrival.
+        var needed = Math.Max(WakeRemaining(f), 15) + 25 + 60 + 40;
+        if (eta < needed) return false;
         Log($"{f.Callsign}: lining up runway {f.Rwy.Ident} (next arrival {(double.IsInfinity(eta) ? "none" : eta.ToString("0") + " s")})");
         return true;
     }
@@ -637,6 +639,42 @@ public sealed class TrafficWorld
         f.ThrS = f.Path.PointS[thrIndex];
         f.S = 0;
         f.LandingChecked = false;
+    }
+
+    /// <summary>A full circle from the current position, then the rest of the route.</summary>
+    private void Orbit(Flight f, string why)
+    {
+        Log($"{f.Callsign}: making a 360 for spacing ({why})");
+        f.LastOrbit = Time;
+        var path = f.Path!;
+        var (p, dir, _) = path.At(f.S);
+        var v = Wind.Tas(f.Ias, f.AltFt) * Kt;
+        var r = Math.Max(1500, v * v / (G * Math.Tan(25 * Math.PI / 180)));
+        // Turn away from the airport side.
+        var right = V2.Cross(V2.FromBearing(dir), f.Rwy!.Threshold - p) > 0;
+        var perp = V2.FromBearing(dir).Perp * (right ? 1 : -1);
+        var c = p + perp * r;
+        var phi0 = (p - c).Bearing;
+        var pts = new List<V2> { p };
+        for (var k = 1; k < 8; k++) pts.Add(c + V2.FromBearing(phi0 + (right ? 45 : -45) * k, r));
+        pts.Add(p + V2.FromBearing(dir, 200));
+        // Remaining route points (the kept points after the current distance).
+        var remaining = new List<V2>();
+        var keptS = KeptPointS(path);
+        for (var i = 0; i < path.Points.Count; i++) if (keptS[i] > f.S + 300) remaining.Add(path.Points[i]);
+        pts.AddRange(remaining);
+        var thrIndex = pts.Count - 2;
+        f.Path = AirPath(pts, i => i >= thrIndex ? 1 : i <= 8 ? f.Ias : 180, f.AltFt);
+        f.ThrS = f.Path.PointS[thrIndex];
+        f.S = 0;
+    }
+
+    /// <summary>Distance along the path of each kept (de-duplicated) point.</summary>
+    private static double[] KeptPointS(PathGeom path)
+    {
+        var res = new double[path.Points.Count];
+        for (var i = 0; i < res.Length; i++) res[i] = path.Project(path.Points[i]);
+        return res;
     }
 
     private bool RunwayBusy(int runway, Flight self) =>
@@ -949,6 +987,8 @@ public sealed class TrafficWorld
                 var gap = dth - leaderD;
                 var need = (leader.P.Heavy && !f.P.Heavy ? 5 : 4) + 0.5;
                 if (gap < need) target = Math.Min(target, Math.Max(dth > 8 ? f.P.MinClean - 10 : f.P.Vapp, leader.Ias - 15));
+                // Too close to fix with speed: a 360° turn (as a controller would give) to drop back.
+                if (gap < need - 1.5 && dth > 7 && Time - f.LastOrbit > 240) { Orbit(f, $"{gap:0.0} nm behind {leader.Callsign}"); return; }
             }
             if (f.Phase == "flare") target = f.P.Vapp - 5;
             f.Ias += Math.Clamp(target - f.Ias, -1.0 * dt, 1.5 * dt);
