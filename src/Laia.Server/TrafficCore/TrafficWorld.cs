@@ -51,6 +51,7 @@ public sealed class Flight
     public bool Done, Test;
     public double ThrS;                     // arrival: distance along the path of the landing threshold
     public int HoldNode = -1, EntryNode = -1, StartNode = -1;
+    public List<int> LineupNodes = new();   // nodes between the hold-short point and the runway
     public double BlockedFor;
     public Flight? BlockedBy, Ignore;
     public double IgnoreUntil;
@@ -284,9 +285,14 @@ public sealed class TrafficWorld
         V2 towardRoute;
         if (route is not null && route.Count >= 2) towardRoute = (Apt.Nodes[route[1]] - access).Unit;
         else towardRoute = (f.Rwy!.Threshold - access).Unit;
-        var q = s.P - face * Math.Min(25, Math.Max(8, (access - s.P).Length * 0.4));
-        var end = access - towardRoute * Math.Max(25, f.P.LengthM * 0.6);
-        f.Path = new PathGeom(new List<V2> { s.P, q, access, end }, _ => 22, 0.5);
+        // Push straight back to the taxilane, then swing the tail so the nose points along the route.
+        var back = Math.Clamp(V2.Dot(access - s.P, face * -1), Math.Max(15, f.P.LengthM * 0.5), 90);
+        var p1 = s.P - face * back;
+        // Tail swings away from the route direction (never back toward the gate).
+        var swing = towardRoute;
+        if (V2.Dot(swing, face) > 0.7) swing = face.Perp; // route heads back past the gate: swing sideways
+        var end = p1 - swing * Math.Max(30, f.P.LengthM * 0.8);
+        f.Path = new PathGeom(new List<V2> { s.P, p1, end }, _ => Math.Max(18, f.P.LengthM * 0.5), 0.5);
         f.S = 0;
         f.Reverse = true;
         f.MaxKt = 3;
@@ -317,6 +323,13 @@ public sealed class TrafficWorld
         if (f.HoldNode < 0 || from < 0) { Log($"{f.Callsign}: no taxi route to runway {f.Rwy?.Ident}"); return false; }
         var route = Apt.Route(from, f.HoldNode, ActiveRunways());
         if (route is null) { Log($"{f.Callsign}: no taxi route to runway {f.Rwy!.Ident}"); return false; }
+        // Stop at the painted hold-short line, not at the edge of the runway.
+        var holdIndex = HoldShortIndex(route, route.Count - 1, f.Rwy!);
+        f.LineupNodes = route.Skip(holdIndex + 1).ToList();
+        route = route.Take(holdIndex + 1).ToList();
+        // Don't drive backwards to a node that's behind the aircraft after pushback.
+        var fwd = V2.FromBearing(f.Heading);
+        while (route.Count > 1 && V2.Dot(Apt.Nodes[route[0]] - start, fwd) < 5) route.RemoveAt(0);
         var pts = new List<V2> { start };
         pts.AddRange(route.Select(n => Apt.Nodes[n]));
         SetGroundPath(f, pts, route, 1);
@@ -324,6 +337,31 @@ public sealed class TrafficWorld
         f.MaxKt = f.P.Heavy ? 16 : 20;
         f.SetPhase("taxi", Time);
         return true;
+    }
+
+    /// <summary>
+    /// Index in the route where an aircraft should hold short of the runway reached after route[last]:
+    /// the nearest marked hold-short point within 200 m, otherwise the first point at least 75 m from the centreline.
+    /// </summary>
+    private int HoldShortIndex(List<int> route, int last, RunwayEnd rwy)
+    {
+        double dist = 0;
+        for (var k = last; k >= 0; k--)
+        {
+            if (k < last) dist += (Apt.Nodes[route[k]] - Apt.Nodes[route[k + 1]]).Length;
+            if (dist > 200) break;
+            if (Apt.NodeHoldShort[route[k]] && Apt.NodeRunway[route[k]] < 0) return k;
+        }
+        var minOff = rwy.WidthM / 2 + 55;
+        for (var k = last; k >= 0; k--)
+            if (Math.Abs(OffsetFrom(rwy.Runway, Apt.Nodes[route[k]])) >= minOff) return k;
+        return last;
+    }
+
+    private double OffsetFrom(int runway, V2 p)
+    {
+        var e = Apt.Ends.First(x => x.Runway == runway);
+        return e.Offset(p);
     }
 
     private HashSet<int> ActiveRunways()
@@ -349,7 +387,8 @@ public sealed class TrafficWorld
             var j = i + 1;
             while (j < route.Count && Apt.NodeRunway[route[j]] == r) j++;
             if (j >= route.Count) continue; // the route ends on that runway (a departure entering it): handled by line-up
-            var stopS = f.Path.PointS[i + offset];
+            var hi = HoldShortIndex(route, i, Apt.Ends.First(x => x.Runway == r));
+            var stopS = f.Path.PointS[hi + offset];
             var exitS = f.Path.PointS[j + offset] + 10;
             f.Stops.Add(new Stop { S = Math.Max(0, stopS - 2), Runway = r, ExitS = exitS });
         }
@@ -387,7 +426,12 @@ public sealed class TrafficWorld
         var along = Math.Max(rwy.Along(e), 20);
         var onCl = rwy.Threshold + rwy.Dir * along;
         var end = rwy.Threshold + rwy.Dir * (along + 90);
-        f.Path = new PathGeom(new List<V2> { f.Pos, hold, onCl, end }, _ => 30, 1.0);
+        var pts = new List<V2> { f.Pos };
+        pts.AddRange(f.LineupNodes.Where(n => Apt.NodeRunway[n] < 0).Select(n => Apt.Nodes[n]));
+        pts.Add(hold);
+        pts.Add(onCl);
+        pts.Add(end);
+        f.Path = new PathGeom(pts.Distinct().ToList(), _ => 30, 1.0);
         f.S = 0;
         f.Stops.Clear();
         f.MaxKt = 10;
@@ -605,7 +649,10 @@ public sealed class TrafficWorld
         {
             if (along > -10 * nm)
             {
-                // Wrong side of the final approach course: fly a downwind first.
+                // Wrong side of the final approach course: fly a downwind first. Coming from beyond the
+                // airport, go around its side rather than over it.
+                if (along > 3 * nm && Math.Abs(off) < 5 * nm)
+                    pts.Add(thr + left * (side * 6 * nm) + dir * Math.Min(along, 12 * nm));
                 pts.Add(thr + left * (side * 5 * nm) + dir * Math.Min(along, 3 * nm));
                 pts.Add(thr + left * (side * 5 * nm) - dir * (11 * nm));
             }
@@ -698,31 +745,40 @@ public sealed class TrafficWorld
         f.SetPhase("landing roll", Time);
         var tdAlong = rwy.Along(f.Pos);
         var v0 = f.Gs * Kt;
-        var stopDist = (v0 * v0 - 13 * 13) / (2 * 1.5);
-        var minExit = tdAlong + Math.Max(300, stopDist);
         var pts = new List<V2> { f.Pos };
         List<int>? route = null;
         var offset = 0;
         AirportModel.ParkingSpot? gate = null;
         if (Apt.HasGround)
         {
+            gate = FindGate(f.P, f.Airline);
+            // Exits on the terminal side (where the gate is) first, then the first one the aircraft can make
+            // with normal braking: about 2 m/s², slowing to ~30 kt for a high-speed exit or ~18 kt for a 90° turn.
+            var side = gate is null ? 0 : Math.Sign(rwy.Offset(gate.P));
+            double Needed(double dot) { var vx = dot > 0.5 ? 16.0 : 9.0; return tdAlong + Math.Max(250, (v0 * v0 - vx * vx) / (2 * 2.0)); }
             var links = Apt.RunwayLinks(rwy.Runway)
                 .Select(l => (l.on, l.off, along: rwy.Along(Apt.Nodes[l.on]), dir: (Apt.Nodes[l.off] - Apt.Nodes[l.on]).Unit))
-                .Where(l => V2.Dot(l.dir, rwy.Dir) > -0.3) // don't turn back sharply
+                .Where(l => V2.Dot(l.dir, rwy.Dir) > -0.2 && l.along < rwy.LengthM + 30) // never turn back
                 .ToList();
-            var cands = links.Where(l => l.along >= minExit).OrderBy(l => l.along).ToList();
+            bool WrongSide((int on, int off, double along, V2 dir) l) => side != 0 && Math.Sign(rwy.Offset(Apt.Nodes[l.off])) != side;
+            var cands = links.Where(l => l.along >= Needed(V2.Dot(l.dir, rwy.Dir)))
+                .OrderBy(l => WrongSide(l) ? 1 : 0).ThenBy(l => l.along).ToList();
             if (cands.Count == 0) cands = links.OrderByDescending(l => l.along).ToList();
-            if (cands.Count > 0)
+            List<int>? taxi = null;
+            (int on, int off, double along, V2 dir)? exit = null;
+            foreach (var c in cands.Take(5))
             {
-                var exit = cands[0];
-                var onCl = rwy.Threshold + rwy.Dir * exit.along;
-                pts.Add(onCl);
-                gate = FindGate(f.P, f.Airline);
-                List<int>? taxi = null;
-                if (gate is not null) taxi = Apt.Route(exit.off, gate.Access, ActiveRunways());
-                if (taxi is null) gate = null;
-                route = new List<int> { exit.on };
-                route.AddRange(taxi ?? new List<int> { exit.off });
+                exit ??= c;
+                if (gate is null) break;
+                taxi = Apt.Route(c.off, gate.Access, ActiveRunways());
+                if (taxi is not null) { exit = c; break; }
+            }
+            if (taxi is null) gate = null;
+            if (exit is { } x)
+            {
+                pts.Add(rwy.Threshold + rwy.Dir * x.along);
+                route = new List<int> { x.on };
+                route.AddRange(taxi ?? new List<int> { x.off });
                 offset = 2;
                 pts.AddRange(route.Select(n => Apt.Nodes[n]));
                 if (gate is not null)
@@ -830,11 +886,11 @@ public sealed class TrafficWorld
     {
         var path = f.Path!;
         var v = f.Gs * Kt;
-        var brake = f.Phase == "landing roll" ? 1.8 : 1.0;
+        var brake = f.Phase == "landing roll" ? 2.4 : 1.0;
         var vmax = f.MaxKt * Kt;
         if (f.Phase == "landing roll") vmax = Math.Max(vmax, v); // decelerate gently from touchdown speed
-        var target = path.CurveLimit(f.S, 1.0, vmax);
-        if (f.Phase == "landing roll") target = Math.Min(target, Math.Max(f.MaxKt * Kt, v - 1.5 * dt));
+        var target = path.CurveLimit(f.S, f.Phase == "landing roll" ? 2.0 : 1.0, vmax);
+        if (f.Phase == "landing roll") target = Math.Min(target, Math.Max(f.MaxKt * Kt, v - 2.0 * dt));
         // Runway crossings: ask for clearance on the way, stop at the hold line if not given.
         Stop? hold = null;
         foreach (var st in f.Stops)

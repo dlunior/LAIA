@@ -236,7 +236,8 @@ public sealed class AirportModel
                 var v = e.B;
                 if (v >= TaxiPointCount && v != to) continue; // don't route through other parking spots
                 var cost = e.Len;
-                if (e.Type == 2) cost *= 8;                   // along a runway
+                // Prefer named taxiways; apron alleys and lead-ins only to reach a gate.
+                cost *= e.Type switch { 2 => 8, 4 => 3, 3 => 4, _ => e.Name.Length == 0 ? 1.5 : 1.0 };
                 if (NodeRunway[v] >= 0 && avoidRunways is not null && avoidRunways.Contains(NodeRunway[v])) cost += 400; // crossing an active runway
                 var nd = dist[u] + cost;
                 if (dist.TryGetValue(v, out var old) && old <= nd) continue;

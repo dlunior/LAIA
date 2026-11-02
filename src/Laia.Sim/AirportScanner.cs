@@ -123,6 +123,7 @@ internal sealed class AirportScanner : IAsyncDisposable
         if (layout?.Root?.Value is not AirportData apt) { Log.Write($"Airport data: MSFS has no data for {icao}"); return null; }
         apt.Simulator = simulator;
         apt.ScannedUtc = DateTime.UtcNow;
+        apt.Format = AirportData.CurrentFormat;
         foreach (var c in layout.Root.Children)
         {
             switch (c.Value)
@@ -311,6 +312,14 @@ internal sealed class AirportUploader
                     _tried.Add(icao);
                     var apt = await _scanner.ScanAsync(icao, simulator, ct);
                     if (apt is null) continue;
+                    try
+                    {
+                        // Keep a copy on this PC too (handy for checking what MSFS reported).
+                        var dir = Path.Combine(Log.Dir, "airports");
+                        Directory.CreateDirectory(dir);
+                        await File.WriteAllTextAsync(Path.Combine(dir, icao + ".json"), System.Text.Json.JsonSerializer.Serialize(apt), ct);
+                    }
+                    catch { }
                     using var resp = await _http.PostAsJsonAsync(serverBase + "/api/airport", apt, ct);
                     if (!resp.IsSuccessStatusCode) Log.Write($"Airport data: server didn't accept {icao} (HTTP {(int)resp.StatusCode})");
                 }

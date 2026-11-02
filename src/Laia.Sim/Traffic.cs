@@ -116,7 +116,7 @@ internal sealed class TrafficRenderer : IAsyncDisposable
     // Light switches, in the order of the TrafficAircraft.Lights bits.
     private static readonly string[] LightEvents =
         { "NAV_LIGHTS_SET", "BEACON_LIGHTS_SET", "STROBES_SET", "LANDING_LIGHTS_SET", "TAXI_LIGHTS_SET", "LOGO_LIGHTS_SET", "WING_LIGHTS_SET", "CABIN_LIGHTS_SET" };
-    private const uint EvLightBase = 110;
+    private const uint EvLightBase = 110, EvGearUp = 130, EvGearDown = 131;
     private const double RenderDelay = 0.6; // seconds behind the server (server updates arrive 4x a second)
     private readonly SimConnectClient _sc;
     private readonly AigCatalog _catalog;
@@ -147,7 +147,7 @@ internal sealed class TrafficRenderer : IAsyncDisposable
         public string Motion = "laia";
         public double GroundAlt = double.NaN, CgFt = double.NaN, SmoothGround = double.NaN;
         public double LastLights = -100, LastGear = -100;
-        public int SentLights = -1;
+        public int SentLights = -1, SentGear = -1;
         public double SentLat, SentLon, SentAlt, SentHdg, LastSent = -100;
     }
 
@@ -171,6 +171,8 @@ internal sealed class TrafficRenderer : IAsyncDisposable
         await _sc.MapClientEventToSimEventAsync(EvFreezeAlt, "FREEZE_ALTITUDE_SET");
         await _sc.MapClientEventToSimEventAsync(EvFreezeAtt, "FREEZE_ATTITUDE_SET");
         for (var i = 0; i < LightEvents.Length; i++) await _sc.MapClientEventToSimEventAsync(EvLightBase + (uint)i, LightEvents[i]);
+        await _sc.MapClientEventToSimEventAsync(EvGearUp, "GEAR_UP");
+        await _sc.MapClientEventToSimEventAsync(EvGearDown, "GEAR_DOWN");
         _sc.AssignedObjectId += OnAssigned;
         _sc.Data += OnData;
         _sc.Frame += OnFrame;
@@ -500,9 +502,14 @@ internal sealed class TrafficRenderer : IAsyncDisposable
                             for (var i = 0; i < LightEvents.Length; i++)
                                 await _sc.TransmitClientEventAsync(o.ObjectId, EvLightBase + (uint)i, (uint)((t.Lights >> i) & 1));
                         }
-                        if (now - o.LastGear > 1)
+                        // Gear: the gear command (what a pilot's lever does) when it changes and every few seconds,
+                        // plus the handle position for models that read that.
+                        var g = t.GearDown ? 1 : 0;
+                        if (g != o.SentGear || now - o.LastGear > 3)
                         {
+                            o.SentGear = g;
                             o.LastGear = now;
+                            await _sc.TransmitClientEventAsync(o.ObjectId, g == 1 ? EvGearDown : EvGearUp, 0);
                             BinaryPrimitives.WriteDoubleLittleEndian(gear, t.GearDown ? 1 : 0);
                             await _sc.SetDataOnSimObjectAsync(DefGear, o.ObjectId, gear.ToArray());
                         }

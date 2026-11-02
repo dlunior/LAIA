@@ -69,7 +69,7 @@ public sealed class AirportStore(ILogger<AirportStore> log)
             var list = new List<string>();
             foreach (var i in icaos.Where(i => !string.IsNullOrWhiteSpace(i)).Select(i => i.Trim().ToUpperInvariant()).Distinct())
             {
-                if (!_data.TryGetValue(i, out var d) || DateTime.UtcNow - d.ScannedUtc > TimeSpan.FromDays(28) ||
+                if (!_data.TryGetValue(i, out var d) || DateTime.UtcNow - d.ScannedUtc > TimeSpan.FromDays(28) || d.Format < AirportData.CurrentFormat ||
                     (simulator.Length > 0 && d.Simulator.Length > 0 && d.Simulator != simulator))
                     list.Add(i);
             }

@@ -15,6 +15,9 @@ public sealed class AirportData
     public double MagVar { get; set; }
     public string Simulator { get; set; } = "";
     public DateTime ScannedUtc { get; set; }
+    /// <summary>Version of the reading code; older readings are read again.</summary>
+    public int Format { get; set; }
+    public const int CurrentFormat = 2;
     public List<AirportRunway> Runways { get; set; } = new();
     /// <summary>Taxi points, in the simulator's index order (taxi paths refer to them by index).</summary>
     public List<TaxiPoint> Points { get; set; } = new();

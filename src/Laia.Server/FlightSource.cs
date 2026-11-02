@@ -48,9 +48,34 @@ public sealed class FlightSource(SettingsStore settings, ILogger<FlightSource> l
         lock (_gate) return _catalog.Count > 0 ? _catalog : Fallback.ToList();
     }
 
+    // Airlines that typically fly at airports in each region (used when there's no real schedule).
+    private static readonly HashSet<string> NorthAmerica = new()
+    {
+        "DAL", "UAL", "AAL", "SWA", "JBU", "ASA", "NKS", "FFT", "SKW", "RPA", "ENY", "EDV", "JIA", "PDT", "AAY", "SCX", "HAL", "MXY", "BRE", "QXE",
+        "GJS", "ASH", "CPZ", "UCA", "ACA", "WJA", "JZA", "POE", "TSC", "SWG", "ROU", "FLE", "WSW", "VXP",
+    };
+    private static readonly HashSet<string> Europe = new()
+    {
+        "BAW", "EZY", "RYR", "DLH", "AFR", "KLM", "IBE", "VLG", "SAS", "FIN", "AUA", "SWR", "TAP", "ITY", "BEL", "LOT", "WZZ", "EIN", "EWG", "TRA",
+        "NAX", "NOZ", "TOM", "EXS", "VIR", "SHT", "BEE", "LOG", "CFE", "AEE", "THY", "PGT", "CSA", "AEA", "VOE", "TVS", "DLA", "CLH", "HOP", "BCS",
+    };
+
+    private static HashSet<string>? RegionFor(string airport) => airport.Length == 4 ? airport[0] switch
+    {
+        'K' or 'C' or 'P' => NorthAmerica,
+        'E' or 'L' => Europe,
+        _ => null,
+    } : null;
+
     public AircraftIdentity NewAircraft(string airport, int maxGateSize, Random rng)
     {
         var cat = Catalog().Where(e => Perf.For(e.Type).GateSize <= maxGateSize).ToList();
+        var region = RegionFor(airport);
+        if (region is not null)
+        {
+            var local = cat.Where(e => region.Contains(e.Airline)).ToList();
+            if (local.Count > 0) cat = local;
+        }
         if (cat.Count == 0) cat = Fallback.Where(e => Perf.For(e.Type).GateSize <= maxGateSize).ToList();
         CatalogEntry pick;
         var sched = Schedule(airport);
@@ -141,7 +166,8 @@ public sealed class FlightSource(SettingsStore settings, ILogger<FlightSource> l
                     var airline = S("airline_icao");
                     var cs = S("flight_icao");
                     var other = dep ? S("arr_icao") : S("dep_icao");
-                    if (airline.Length != 3 || cs.Length < 4 || S("cs_flight_iata").Length > 0) continue; // skip codeshares
+                    // Skip codeshares (the same flight sold under another airline's number).
+                    if (airline.Length != 3 || cs.Length < 4 || S("cs_flight_iata").Length > 0 || S("cs_airline_iata").Length > 0 || S("cs_flight_number").Length > 0) continue;
                     list.Add(new SchedFlight(airline, cs, other, dep));
                 }
             }
