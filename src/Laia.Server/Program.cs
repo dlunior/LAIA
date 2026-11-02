@@ -64,7 +64,7 @@ app.MapPost("/api/sim/state", async (HttpContext ctx, ServerState s, SimBriefSer
     if (st.Connected && (justConnected || DateTime.UtcNow - sb.LastAttemptUtc > TimeSpan.FromMinutes(15)))
         _ = Task.Run(sb.RefreshAsync);
     // The reply carries the AI traffic for LAIA Sim to draw.
-    return Results.Json(new Laia.Common.SimConnect.SimStateReply { Traffic = st.Connected ? traffic.Snapshot() : new() }, jsonOpts);
+    return Results.Json(new Laia.Common.SimConnect.SimStateReply { Traffic = st.Connected ? traffic.Snapshot() : new(), ServerTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() }, jsonOpts);
 });
 
 app.MapGet("/api/traffic", (TrafficEngine t, RunwayDb r) => Results.Json(new { runways = r.Status, traffic = t.Snapshot() }, jsonOpts));

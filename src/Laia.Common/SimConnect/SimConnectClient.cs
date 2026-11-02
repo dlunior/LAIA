@@ -52,6 +52,7 @@ public sealed class SimConnectClient : IAsyncDisposable
     public event Action<uint, uint>? SimEvent;     // client event id, data
     public event Action? Quit;
     public event Action<uint, uint>? AssignedObjectId; // request id, object id
+    public event Action? Frame;
 
     private SimConnectClient(Stream stream, string endpoint) { _stream = stream; Endpoint = endpoint; }
 
@@ -253,6 +254,9 @@ public sealed class SimConnectClient : IAsyncDisposable
                     return;
                 case 4: // EVENT
                     SimEvent?.Invoke(BinaryPrimitives.ReadUInt32LittleEndian(body.AsSpan(4)), BinaryPrimitives.ReadUInt32LittleEndian(body.AsSpan(8)));
+                    break;
+                case 7: // EVENT_FRAME
+                    Frame?.Invoke();
                     break;
                 case 12: // ASSIGNED_OBJECT_ID
                     AssignedObjectId?.Invoke(BinaryPrimitives.ReadUInt32LittleEndian(body), BinaryPrimitives.ReadUInt32LittleEndian(body.AsSpan(4)));

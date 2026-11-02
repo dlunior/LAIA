@@ -38,7 +38,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, ServerSta
     {
         Id = a.Id, Callsign = a.Callsign, Airline = a.Airline, Type = a.Type, Lat = a.Lat, Lon = a.Lon, AltFt = a.AltFt, OnGround = a.OnGround,
         Heading = a.Heading, Pitch = a.Pitch, Bank = a.Bank, GroundSpeed = a.GroundSpeed, VerticalSpeed = a.VerticalSpeed, GearDown = a.GearDown, Phase = a.Phase,
-        Lights = a.Lights,
+        Lights = a.Lights, AglFt = a.AglFt, TimeMs = a.TimeMs,
     };
 
     public void Clear() { lock (_gate) _flights.Clear(); }
@@ -184,6 +184,8 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, ServerSta
     private static void Place(Flight f)
     {
         f.Ac.Lights = LightsFor(f);
+        f.Ac.AglFt = f.AglFt;
+        f.Ac.TimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         var (lat, lon) = Geo.Offset(f.Rwy.Lat, f.Rwy.Lon, f.Rwy.TrueHeading, f.DistanceFromThreshold);
         f.Ac.Lat = lat;
         f.Ac.Lon = lon;

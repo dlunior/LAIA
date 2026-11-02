@@ -13,7 +13,9 @@ public sealed class TrafficAircraft
     public double Lat { get; set; }
     public double Lon { get; set; }
     public double AltFt { get; set; }           // MSL; ignored while on the ground (the sim uses the terrain)
+    public double AglFt { get; set; }           // height above the runway / ground
     public bool OnGround { get; set; }
+    public long TimeMs { get; set; }            // server clock when this position was valid (Unix ms)
     public double Heading { get; set; }         // true
     public double Pitch { get; set; }           // degrees, nose up positive
     public double Bank { get; set; }            // degrees, right wing down positive
@@ -28,4 +30,5 @@ public sealed class TrafficAircraft
 public sealed class SimStateReply
 {
     public List<TrafficAircraft> Traffic { get; set; } = new();
+    public long ServerTimeMs { get; set; }
 }
