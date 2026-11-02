@@ -140,15 +140,20 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, ServerSta
             {
                 a.Phase = "final approach";
                 f.DistanceFromThreshold += a.GroundSpeed / 3600 * dt;
-                var glide = Math.Max(0, -f.DistanceFromThreshold * 318.4 + 50); // cross the threshold at ~50 ft
-                if (f.AglFt > 40) { f.AglFt = glide; a.Pitch = 2.5; a.VerticalSpeed = -a.GroundSpeed * 101.3 * Math.Tan(3 * Math.PI / 180); }
+                // 3-degree glidepath aimed 1,000 ft past the threshold (crosses the threshold at ~50 ft), like an ILS.
+                const double aimNm = 1000.0 / 6076;
+                var glide = Math.Max(0, (aimNm - f.DistanceFromThreshold) * 318.4);
+                if (f.AglFt > 20 && a.Phase != "flare") { f.AglFt = glide; a.Pitch = 2.5; a.VerticalSpeed = -a.GroundSpeed * 101.3 * Math.Tan(3 * Math.PI / 180); }
                 else
                 {
+                    // Flare from 20 ft: sink rate eases from ~700 fpm to ~240 fpm; touchdown around 1,300 ft past the threshold.
                     a.Phase = "flare";
                     a.Pitch = Math.Min(a.Pitch + 1.5 * dt, 5);
-                    a.VerticalSpeed = -180;
-                    f.AglFt = Math.Max(0, f.AglFt - 3 * dt);
-                    a.GroundSpeed = Math.Max(a.GroundSpeed - 1 * dt, 130);
+                    var sink = a.VerticalSpeed / 60;                       // ft/s, negative
+                    sink += (-4 - sink) * (1 - Math.Exp(-dt / 1.0));
+                    a.VerticalSpeed = sink * 60;
+                    f.AglFt = Math.Max(0, f.AglFt + sink * dt);
+                    a.GroundSpeed = Math.Max(a.GroundSpeed - 1.5 * dt, 125);
                     if (f.AglFt <= 0) { a.OnGround = true; a.VerticalSpeed = 0; }
                 }
             }
