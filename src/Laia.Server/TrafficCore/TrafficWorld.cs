@@ -185,7 +185,8 @@ public sealed class TrafficWorld
         var interval = 3600 / Math.Max(1, mph / 2);
         if (Time >= _nextDep)
         {
-            if (active < maxActive && StartDeparture(null, 60 + Rng.NextDouble() * 60) is not null) Movements++;
+            var queue = Flights.Count(f => f.Kind == "departure" && f.Phase is "pushback" or "engine start" or "taxi" or "holding short");
+            if (active < maxActive && queue < 3 && StartDeparture(null, 60 + Rng.NextDouble() * 60) is not null) Movements++;
             _nextDep = Time + interval * (0.6 + 0.8 * Rng.NextDouble());
         }
         if (Time >= _nextArr)
@@ -363,7 +364,8 @@ public sealed class TrafficWorld
         // Only line up if the takeoff can follow without delaying the next arrival.
         var eta = ArrivalEta(r);
         // Line-up ~25 s, short wait, takeoff roll ~55 s, and the departure must be off the runway well before the arrival.
-        var needed = Math.Max(WakeRemaining(f), 15) + 25 + 60 + 40;
+        // (US practice: the departure must be airborne before the arrival crosses the threshold.)
+        var needed = Math.Max(WakeRemaining(f), 8) + 25 + 50 + 12;
         if (eta < needed) return false;
         Log($"{f.Callsign}: lining up runway {f.Rwy.Ident} (next arrival {(double.IsInfinity(eta) ? "none" : eta.ToString("0") + " s")})");
         return true;
@@ -373,7 +375,7 @@ public sealed class TrafficWorld
     {
         var r = f.Rwy!.Runway;
         if (RunwayBusy(r, f)) return false;
-        if (ArrivalEta(r) < 45) return false;
+        if (ArrivalEta(r) < 50) return false;
         return WakeRemaining(f) <= 0;
     }
 
@@ -677,6 +679,8 @@ public sealed class TrafficWorld
         return res;
     }
 
+    private bool DeparturesWaiting => Flights.Any(o => o.Phase == "holding short" && Time - o.PhaseTime > 40);
+
     private bool RunwayBusy(int runway, Flight self) =>
         Flights.Any(o => o != self && !o.Done && (o.Reserve == runway || (o.OnRunway == runway && !(o.Kind == "departure" && !o.OnGround))));
 
@@ -782,7 +786,7 @@ public sealed class TrafficWorld
                 break;
             case "lining up":
                 f.Lights = Nav | Beacon | Logo | Taxi | Strobes | Landing;
-                if (MoveGround(f, dt)) { f.SetPhase("lined up", Time); f.Gs = 0; f.Timer = 5 + Rng.NextDouble() * 8; }
+                if (MoveGround(f, dt)) { f.SetPhase("lined up", Time); f.Gs = 0; f.Timer = 3 + Rng.NextDouble() * 4; }
                 break;
             case "lined up":
                 f.Lights = Nav | Beacon | Logo | Taxi | Strobes | Landing;
@@ -985,7 +989,8 @@ public sealed class TrafficWorld
             if (leader is not null && !leader.OnGround)
             {
                 var gap = dth - leaderD;
-                var need = (leader.P.Heavy && !f.P.Heavy ? 5 : 4) + 0.5;
+                // Wider gaps when departures are waiting, so they can go between arrivals.
+                var need = (leader.P.Heavy && !f.P.Heavy ? 5 : 4) + (DeparturesWaiting ? 2.5 : 0.5);
                 if (gap < need) target = Math.Min(target, Math.Max(dth > 8 ? f.P.MinClean - 10 : f.P.Vapp, leader.Ias - 15));
                 // Too close to fix with speed: a 360° turn (as a controller would give) to drop back.
                 if (gap < need - 1.5 && dth > 7 && Time - f.LastOrbit > 240) { Orbit(f, $"{gap:0.0} nm behind {leader.Callsign}"); return; }
