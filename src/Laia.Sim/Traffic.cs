@@ -111,7 +111,7 @@ internal sealed class TrafficRenderer : IAsyncDisposable
 {
     private const uint DefPos = 10, DefGround = 11, DefGear = 12, DefWaypoints = 13;
     private const uint WpSpeedRequested = 0x04, WpComputeVerticalSpeed = 0x10, WpOnGround = 0x00100000;
-    public string Motion { get; private set; } = "msfs";
+    public string Motion { get; private set; } = "laia";
     private const uint EvFreezeLatLon = 100, EvFreezeAlt = 101, EvFreezeAtt = 102, EvFrame = 120;
     // Light switches, in the order of the TrafficAircraft.Lights bits.
     private static readonly string[] LightEvents =
@@ -133,7 +133,7 @@ internal sealed class TrafficRenderer : IAsyncDisposable
     /// <summary>Motion report written to the log every 10 s while traffic is shown.</summary>
     private sealed class Stats
     {
-        public int Frames, Updates, LateSamples;
+        public int Frames, Updates, LateSamples, Bunched;
         public double MaxFrameGap, OffsetAdjust, MaxSampleGap;
         public double Since;
     }
@@ -144,7 +144,7 @@ internal sealed class TrafficRenderer : IAsyncDisposable
         public readonly List<(double t, TrafficAircraft s)> Samples = new();
         public uint CreateReq, GroundReq, ObjectId;
         public bool Ready, Removed;
-        public string Motion = "msfs";
+        public string Motion = "laia";
         public double GroundAlt = double.NaN, CgFt = double.NaN, SmoothGround = double.NaN;
         public double LastLights = -100, LastGear = -100;
         public int SentLights = -1;
@@ -157,7 +157,10 @@ internal sealed class TrafficRenderer : IAsyncDisposable
     public async Task InitAsync()
     {
         foreach (var (n, u) in new[] { ("PLANE LATITUDE", "degrees"), ("PLANE LONGITUDE", "degrees"), ("PLANE ALTITUDE", "feet"),
-                     ("PLANE PITCH DEGREES", "degrees"), ("PLANE BANK DEGREES", "degrees"), ("PLANE HEADING DEGREES TRUE", "degrees") })
+                     ("PLANE PITCH DEGREES", "degrees"), ("PLANE BANK DEGREES", "degrees"), ("PLANE HEADING DEGREES TRUE", "degrees"),
+                     // Telling MSFS how fast the aircraft is really moving lets it blend frames smoothly
+                     // (a frozen aircraft otherwise looks stationary between physics steps, then jumps).
+                     ("VELOCITY BODY X", "feet per second"), ("VELOCITY BODY Y", "feet per second"), ("VELOCITY BODY Z", "feet per second") })
             await _sc.AddToDataDefinitionAsync(DefPos, n, u, SimDataType.Float64);
         await _sc.AddToDataDefinitionAsync(DefGround, "GROUND ALTITUDE", "feet", SimDataType.Float64);
         await _sc.AddToDataDefinitionAsync(DefGround, "STATIC CG TO GROUND", "feet", SimDataType.Float64);
@@ -358,21 +361,52 @@ internal sealed class TrafficRenderer : IAsyncDisposable
         return (lat, lon, n.AltFt + climb, Math.Max(0, n.AglFt + climb), n.Heading, n.Pitch, n.Bank, n.OnGround);
     }
 
+    /// <summary>Ground speed (kt) and vertical speed (fpm) at server time rt, blended like the position.</summary>
+    private (double gs, double vs) Speeds(Obj o, double rt)
+    {
+        lock (_gate)
+        {
+            var s = o.Samples;
+            for (var i = 1; i < s.Count; i++)
+            {
+                if (rt > s[i].t) continue;
+                var f = Math.Clamp((rt - s[i - 1].t) / Math.Max(1e-3, s[i].t - s[i - 1].t), 0, 1);
+                return (s[i - 1].s.GroundSpeed + (s[i].s.GroundSpeed - s[i - 1].s.GroundSpeed) * f,
+                        s[i - 1].s.VerticalSpeed + (s[i].s.VerticalSpeed - s[i - 1].s.VerticalSpeed) * f);
+            }
+            var n = s[^1].s;
+            return (n.GroundSpeed, n.VerticalSpeed);
+        }
+    }
+
     private async Task RenderLoop(CancellationToken ct)
     {
-        var buf = new byte[48];
+        var buf = new byte[72];
         var gear = new byte[8];
         var lastFrame = Now;
+        var frameClock = double.NaN;
+        var avgDt = 0.0;
         try
         {
             while (!ct.IsCancellationRequested)
             {
                 // Move once per simulator frame (falls back to ~60 Hz if frame events stop).
-                await _frame.WaitAsync(TimeSpan.FromMilliseconds(16), ct);
-                var now = Now;
-                _stats.MaxFrameGap = Math.Max(_stats.MaxFrameGap, now - lastFrame);
-                var frameDt = Math.Clamp(now - lastFrame, 0.001, 0.2);
-                lastFrame = now;
+                // The fallback timeout must be well above one frame: at 60 fps frames are 16.7 ms apart, and
+                // the old 16 ms timeout fired just before each frame event, so two updates landed in one frame
+                // and none in the next. That uneven pattern was the visible stutter.
+                await _frame.WaitAsync(TimeSpan.FromMilliseconds(100), ct);
+                var wall = Now;
+                _stats.MaxFrameGap = Math.Max(_stats.MaxFrameGap, wall - lastFrame);
+                var realDt = Math.Clamp(wall - lastFrame, 0.001, 0.2);
+                lastFrame = wall;
+                // Steady frame clock: advance by the average frame length and drift gently toward the wall
+                // clock, so jitter in when the frame message reaches us doesn't become jitter in position.
+                avgDt = avgDt <= 0 ? realDt : avgDt + (realDt - avgDt) * 0.1;
+                if (double.IsNaN(frameClock) || Math.Abs(wall - frameClock) > 0.25) frameClock = wall;
+                else frameClock += avgDt + (wall - frameClock) * 0.05;
+                if (realDt < avgDt * 0.4) _stats.Bunched++;
+                var now = frameClock;
+                var frameDt = avgDt;
                 _stats.Frames++;
                 if (now - _stats.Since >= 10)
                 {
@@ -381,8 +415,8 @@ internal sealed class TrafficRenderer : IAsyncDisposable
                     if (count > 0)
                         Log.Write($"Traffic motion: {count} aircraft, {_stats.Frames / (now - _stats.Since):0} frames/s (longest gap {_stats.MaxFrameGap * 1000:0} ms), " +
                                   $"{_stats.Updates / (now - _stats.Since):0.0} updates/s (longest sample gap {_stats.MaxSampleGap * 1000:0} ms), " +
-                                  $"{_stats.LateSamples} frames ran past the newest sample, clock eased {_stats.OffsetAdjust * 1000:0} ms");
-                    _stats.Frames = 0; _stats.Updates = 0; _stats.LateSamples = 0; _stats.MaxFrameGap = 0; _stats.MaxSampleGap = 0; _stats.OffsetAdjust = 0;
+                                  $"{_stats.LateSamples} frames ran past the newest sample, {_stats.Bunched} bunched frames, clock eased {_stats.OffsetAdjust * 1000:0} ms");
+                    _stats.Frames = 0; _stats.Updates = 0; _stats.LateSamples = 0; _stats.Bunched = 0; _stats.MaxFrameGap = 0; _stats.MaxSampleGap = 0; _stats.OffsetAdjust = 0;
                     _stats.Since = now;
                 }
                 if (double.IsNaN(_offset)) continue;
@@ -431,6 +465,10 @@ internal sealed class TrafficRenderer : IAsyncDisposable
                     BinaryPrimitives.WriteDoubleLittleEndian(buf.AsSpan(24), -p.pitch); // MSFS: positive pitch is nose down
                     BinaryPrimitives.WriteDoubleLittleEndian(buf.AsSpan(32), p.bank);
                     BinaryPrimitives.WriteDoubleLittleEndian(buf.AsSpan(40), p.hdg);
+                    var (gsKt, vsFpm) = Speeds(o, rt);
+                    BinaryPrimitives.WriteDoubleLittleEndian(buf.AsSpan(48), 0);
+                    BinaryPrimitives.WriteDoubleLittleEndian(buf.AsSpan(56), p.ground ? 0 : vsFpm / 60.0);
+                    BinaryPrimitives.WriteDoubleLittleEndian(buf.AsSpan(64), gsKt * 1.68781);
                     var t = o.Latest;
                     try
                     {

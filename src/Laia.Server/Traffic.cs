@@ -44,7 +44,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, ServerSta
     public void Clear() { lock (_gate) _flights.Clear(); }
 
     /// <summary>How LAIA Sim moves the aircraft (switchable on the control page to compare).</summary>
-    public string Motion { get; private set; } = "msfs";
+    public string Motion { get; private set; } = "laia";
 
     public void SetMotion(string mode)
     {
