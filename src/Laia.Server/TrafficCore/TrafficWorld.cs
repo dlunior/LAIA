@@ -54,7 +54,7 @@ public sealed class Flight
     public double BlockedFor;
     public Flight? BlockedBy, Ignore;
     public double IgnoreUntil;
-    public bool LandingChecked;
+    public bool LandingChecked, WentAround;
     public string Route = "";               // procedure names for the control page
     public bool UserIsObstacle;
 
@@ -353,11 +353,17 @@ public sealed class TrafficWorld
         }
     }
 
+    private double WakeRemaining(Flight f) => Math.Max(0, (_lastDepHeavy && !f.P.Heavy ? 120 : 70) - (Time - _lastDepLiftoff));
+
     private bool LineUpAllowed(Flight f)
     {
         var r = f.Rwy!.Runway;
         if (RunwayBusy(r, f)) return false;
-        if (ArrivalEta(r) < 100) return false;
+        // Only line up if the takeoff can follow without delaying the next arrival.
+        var eta = ArrivalEta(r);
+        var needed = Math.Max(WakeRemaining(f), 15) + 25 + 60;
+        if (eta < Math.Max(100, needed)) return false;
+        Log($"{f.Callsign}: lining up runway {f.Rwy.Ident} (next arrival {(double.IsInfinity(eta) ? "none" : eta.ToString("0") + " s")})");
         return true;
     }
 
@@ -366,9 +372,7 @@ public sealed class TrafficWorld
         var r = f.Rwy!.Runway;
         if (RunwayBusy(r, f)) return false;
         if (ArrivalEta(r) < 45) return false;
-        var wake = _lastDepHeavy && !f.P.Heavy ? 120 : 70;
-        if (Time - _lastDepLiftoff < wake) return false;
-        return true;
+        return WakeRemaining(f) <= 0;
     }
 
     private void StartLineUp(Flight f)
@@ -612,6 +616,7 @@ public sealed class TrafficWorld
     {
         var t = d > 20 ? 250 : d > 12 ? 210 : d > 7 ? 180 : d > 4.5 ? Math.Max(160, f.P.Vapp + 10) : f.P.Vapp;
         if (f.AltFt > 10000 + Apt.ElevationFt) t = Math.Min(t, 250);
+        if (f.WentAround) t = Math.Min(t, 200);
         return t;
     }
 
@@ -620,6 +625,7 @@ public sealed class TrafficWorld
         Log($"{f.Callsign}: going around ({why})");
         var rwy = f.Rwy!;
         f.SetPhase("go-around", Time);
+        f.WentAround = true;
         var p = f.Pos;
         var climbOut = p + rwy.Dir * (4 * Geo2.MPerNm);
         BuildArrivalPath(f, climbOut);
@@ -968,7 +974,8 @@ public sealed class TrafficWorld
             if (!f.LandingChecked && dth < 0.5)
             {
                 f.LandingChecked = true;
-                if (RunwayBusy(rwy.Runway, f)) { GoAround(f, "runway not clear"); return; }
+                var blocker = Flights.FirstOrDefault(o => o != f && !o.Done && (o.Reserve == rwy.Runway || (o.OnRunway == rwy.Runway && !(o.Kind == "departure" && !o.OnGround))));
+                if (blocker is not null) { GoAround(f, $"runway not clear: {blocker.Callsign} {blocker.Phase}"); return; }
             }
             if (f.Phase == "flare" && f.AltFt <= rwy.ElevationFt)
             {

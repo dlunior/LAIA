@@ -80,7 +80,8 @@ Console.WriteLine("== One hour of busy traffic, runway 27 in use (wind 270/12)")
         if (onRwy.Count > 0)
         {
             runwayConflicts++;
-            if (runwayConflicts <= 5) log.Add($"{TimeSpan.FromSeconds(world.Time):hh\\:mm\\:ss} RUNWAY CONFLICT: " + string.Join(", ", onRwy.SelectMany(g => g).Select(f => $"{f.Callsign} {f.Phase}")));
+            if (runwayConflicts <= 3) log.Add($"{TimeSpan.FromSeconds(world.Time):hh\\:mm\\:ss} RUNWAY CONFLICT: " + string.Join(", ", onRwy.SelectMany(g => g).Select(f =>
+                $"{f.Callsign} {f.Phase} since {TimeSpan.FromSeconds(f.PhaseTime):hh\\:mm\\:ss} at ({f.Pos.X:0},{f.Pos.Y:0}) gs {f.Gs:0} reserve {f.Reserve}")));
         }
         // Ground separation between moving aircraft.
         var moving = fl.Where(f => f.OnGround && f.Phase is "taxi" or "taxi in" or "pushback" or "holding short" or "lining up" or "engine start").ToList();
