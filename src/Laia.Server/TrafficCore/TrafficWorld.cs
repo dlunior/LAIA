@@ -375,7 +375,7 @@ public sealed class TrafficWorld
     {
         var r = f.Rwy!.Runway;
         if (RunwayBusy(r, f)) return false;
-        if (ArrivalEta(r) < 50) return false;
+        if (ArrivalEta(r) < 60) return false;
         return WakeRemaining(f) <= 0;
     }
 
@@ -895,6 +895,24 @@ public sealed class TrafficWorld
             var lat = Math.Abs(V2.Cross(mdir, r));
             var need = f.P.LengthM / 2 + o.P.LengthM / 2 + 25 + v * v / 2.0;
             if (ahead > 0 && ahead < need && lat < (f.P.SpanM + o.P.SpanM) / 2 * 0.6 + 6) { by = o; break; }
+            // Paths crossing (intersections): look a few seconds ahead; whoever gets there second waits.
+            if (ahead > -10 && dist < 160)
+            {
+                var odir = V2.FromBearing(o.Reverse ? Geo2.Norm(o.Heading + 180) : o.Heading);
+                var ov = o.Gs * Kt;
+                var minD = (f.P.SpanM + o.P.SpanM) / 2 * 0.7 + 12;
+                for (var t = 2.0; t <= 8; t += 2)
+                {
+                    var mine = f.Pos + mdir * (Math.Max(v, 3) * t);
+                    var theirs = o.Pos + odir * (ov * t);
+                    if ((mine - theirs).Length >= minD) continue;
+                    // The one closer to the meeting point goes first.
+                    var meet = (mine + theirs) * 0.5;
+                    if ((o.Pos - meet).Length < (f.Pos - meet).Length) { by = o; }
+                    break;
+                }
+                if (by is not null) break;
+            }
         }
         if (by is null && UserOnGround && UserPos is { } u)
         {
@@ -1016,10 +1034,13 @@ public sealed class TrafficWorld
             f.AltFt += f.Vs / 60 * dt;
 
             // Landing clearance: the runway must be clear when the aircraft is half a mile out.
-            if (!f.LandingChecked && dth < 0.5)
+            if (!f.LandingChecked && dth < 0.4)
             {
                 f.LandingChecked = true;
-                var blocker = Flights.FirstOrDefault(o => o != f && !o.Done && (o.Reserve == rwy.Runway || (o.OnRunway == rwy.Runway && !(o.Kind == "departure" && !o.OnGround))));
+                var toThreshold = dth * Geo2.MPerNm / Math.Max(30, f.Gs * Kt);
+                // A departure that will be airborne before this aircraft reaches the threshold is fine.
+                bool Clear(Flight o) => o.Phase == "takeoff roll" && (o.P.Vr + 7 - o.Ias) / o.P.RollAccel < toThreshold;
+                var blocker = Flights.FirstOrDefault(o => o != f && !o.Done && !Clear(o) && (o.Reserve == rwy.Runway || (o.OnRunway == rwy.Runway && !(o.Kind == "departure" && !o.OnGround))));
                 if (blocker is not null) { GoAround(f, $"runway not clear: {blocker.Callsign} {blocker.Phase}"); return; }
             }
             if (f.Phase == "flare" && f.AltFt <= rwy.ElevationFt)
