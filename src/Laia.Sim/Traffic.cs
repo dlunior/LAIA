@@ -115,7 +115,7 @@ internal sealed class TrafficRenderer : IAsyncDisposable
     private const uint EvFreezeLatLon = 100, EvFreezeAlt = 101, EvFreezeAtt = 102, EvFrame = 120;
     // Light switches, in the order of the TrafficAircraft.Lights bits.
     private static readonly string[] LightEvents =
-        { "NAV_LIGHTS_SET", "BEACON_LIGHTS_SET", "STROBES_SET", "LANDING_LIGHTS_SET", "TAXI_LIGHTS_SET", "LOGO_LIGHTS_SET", "WING_LIGHTS_SET" };
+        { "NAV_LIGHTS_SET", "BEACON_LIGHTS_SET", "STROBES_SET", "LANDING_LIGHTS_SET", "TAXI_LIGHTS_SET", "LOGO_LIGHTS_SET", "WING_LIGHTS_SET", "CABIN_LIGHTS_SET" };
     private const uint EvLightBase = 110;
     private const double RenderDelay = 0.6; // seconds behind the server (server updates arrive 4x a second)
     private readonly SimConnectClient _sc;

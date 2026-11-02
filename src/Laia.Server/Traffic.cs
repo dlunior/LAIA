@@ -180,7 +180,9 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, ServerSta
         Place(f);
     }
 
-    private const int Nav = 1, Beacon = 2, Strobes = 4, Landing = 8, Taxi = 16, Logo = 32, Wing = 64;
+    private const int Nav = 1, Beacon = 2, Strobes = 4, Landing = 8, Taxi = 16, Logo = 32, Wing = 64, Cabin = 128;
+    // Cabin lights stay off (dimmed) for takeoff and landing, as airlines do; they come on at the gate and in cruise
+    // once those phases exist. The bit is always sent, so models that switch the cabin on by themselves get turned off.
 
     /// <summary>Lights the way airline crews use them: nav/beacon/logo whenever active; strobes and
     /// landing lights on the runway and below 10,000 ft; taxi lights on the ground before takeoff.</summary>

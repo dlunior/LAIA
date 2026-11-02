@@ -23,7 +23,7 @@ public sealed class TrafficAircraft
     public double VerticalSpeed { get; set; }   // feet per minute
     public bool GearDown { get; set; } = true;
     public string Phase { get; set; } = "";
-    /// <summary>Bits: 1 nav, 2 beacon, 4 strobes, 8 landing, 16 taxi, 32 logo, 64 wing.</summary>
+    /// <summary>Bits: 1 nav, 2 beacon, 4 strobes, 8 landing, 16 taxi, 32 logo, 64 wing, 128 cabin.</summary>
     public int Lights { get; set; } = 1 | 2 | 32;
 }
 
