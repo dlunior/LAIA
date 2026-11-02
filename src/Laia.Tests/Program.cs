@@ -90,7 +90,7 @@ Console.WriteLine("== One hour of busy traffic, runway 27 in use (wind 270/12)")
             {
                 var d = (moving[i].Pos - moving[j].Pos).Length;
                 minSep = Math.Min(minSep, d);
-                if (d < 12) closeCalls++;
+                if (d < 12) { closeCalls++; if (closeCalls <= 4) log.Add($"{TimeSpan.FromSeconds(world.Time):hh\\:mm\\:ss} CLOSE {moving[i].Callsign} {moving[i].Phase} / {moving[j].Callsign} {moving[j].Phase}: {d:0} m at ({moving[i].Pos.X:0},{moving[i].Pos.Y:0})"); }
             }
         foreach (var f in fl)
         {
@@ -102,7 +102,7 @@ Console.WriteLine("== One hour of busy traffic, runway 27 in use (wind 270/12)")
                 if (jump > expected * 1.6 + 2 && l.phase == f.Phase)
                 {
                     jumps++;
-                    if (jumps <= 5) log.Add($"{TimeSpan.FromSeconds(world.Time):hh\\:mm\\:ss} JUMP {f.Callsign} {f.Phase}: moved {jump:0.0} m, expected {expected:0.0}");
+                    if (jumps <= 5) log.Add($"{TimeSpan.FromSeconds(world.Time):hh\\:mm\\:ss} JUMP {f.Callsign} {f.Phase}: moved {jump:0.0} m, expected {expected:0.0}; s {f.S:0.0} of {f.Path?.Length:0.0}, from ({l.p.X:0.0},{l.p.Y:0.0}) to ({f.Pos.X:0.0},{f.Pos.Y:0.0})");
                 }
                 if (f.OnGround && l.ground && f.Gs > 1)
                 {

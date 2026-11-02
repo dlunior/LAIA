@@ -304,6 +304,15 @@ public sealed class TrafficWorld
         f.SetPhase("pushback", Time);
     }
 
+    /// <summary>No pushback while another aircraft is taxiing or pushing right behind the gate.</summary>
+    private bool PushbackClear(Flight f)
+    {
+        var s = f.Spot;
+        if (s is null) return true;
+        var behind = s.P - V2.FromBearing(s.Heading) * Math.Max(30, f.P.LengthM);
+        return !Flights.Any(o => o != f && o.OnGround && !o.Done && o.Phase is "pushback" or "taxi" or "taxi in" && (o.Pos - behind).Length < 90);
+    }
+
     /// <summary>Where departures enter the runway: the connection nearest the threshold. Returns the hold node.</summary>
     private int PickRunwayEntry(RunwayEnd rwy, out int entry)
     {
@@ -813,7 +822,7 @@ public sealed class TrafficWorld
             case "boarding":
                 f.Lights = Nav | Logo | Cabin;
                 f.Timer -= dt;
-                if (f.Timer <= 0) StartPushback(f);
+                if (f.Timer <= 0 && PushbackClear(f)) StartPushback(f);
                 break;
             case "pushback":
                 f.Lights = Nav | Beacon | Logo;
