@@ -25,6 +25,8 @@ builder.Services.AddHostedService<FrequencyUpdater>();
 builder.Services.AddSingleton<SimBriefService>();
 builder.Services.AddSingleton<RunwayDb>();
 builder.Services.AddHostedService<RunwayUpdater>();
+builder.Services.AddSingleton<AirportStore>();
+builder.Services.AddSingleton<FlightSource>();
 builder.Services.AddSingleton<TrafficEngine>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<TrafficEngine>());
 builder.Services.AddSingleton<SpeechWorker>();
@@ -55,7 +57,7 @@ app.MapGet("/logo.png", () => Results.Bytes(logoPng, "image/png"));
 app.MapGet("/api/status", (ServerState s, FrequencyDb f, SimBriefService sb) => Results.Json(s.Snapshot(FlightInfo(s, f, sb)), jsonOpts));
 
 // LAIA Sim posts the user's aircraft about once a second.
-app.MapPost("/api/sim/state", async (HttpContext ctx, ServerState s, SimBriefService sb, TrafficEngine traffic) =>
+app.MapPost("/api/sim/state", async (HttpContext ctx, ServerState s, SimBriefService sb, TrafficEngine traffic, FlightSource src) =>
 {
     var st = await JsonSerializer.DeserializeAsync<Laia.Common.SimConnect.AircraftState>(ctx.Request.Body, jsonOpts);
     if (st is null) return Results.BadRequest();
@@ -64,10 +66,36 @@ app.MapPost("/api/sim/state", async (HttpContext ctx, ServerState s, SimBriefSer
     if (st.Connected && (justConnected || DateTime.UtcNow - sb.LastAttemptUtc > TimeSpan.FromMinutes(15)))
         _ = Task.Run(sb.RefreshAsync);
     // The reply carries the AI traffic for LAIA Sim to draw.
-    return Results.Json(new Laia.Common.SimConnect.SimStateReply { Traffic = st.Connected ? traffic.Snapshot() : new(), ServerTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), Motion = traffic.Motion }, jsonOpts);
+    var reply = new Laia.Common.SimConnect.SimStateReply { Traffic = st.Connected ? traffic.Snapshot() : new(), ServerTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), Motion = traffic.Motion };
+    if (st.Connected)
+    {
+        try { var need = traffic.NeededAirports(st); if (need.Count > 0) reply.NeedAirports = need; } catch { }
+        reply.NeedCatalog = !src.HasCatalog;
+    }
+    return Results.Json(reply, jsonOpts);
 });
 
-app.MapGet("/api/traffic", (TrafficEngine t, RunwayDb r) => Results.Json(new { runways = r.Status, motion = t.Motion, traffic = t.Snapshot() }, jsonOpts));
+app.MapGet("/api/traffic", (TrafficEngine t, RunwayDb r) => Results.Json(new { runways = r.Status, motion = t.Motion, status = t.Status(), traffic = t.Snapshot() }, jsonOpts));
+app.MapPost("/api/traffic/level/{level}", (string level, TrafficEngine t) =>
+{
+    t.SetLevel(level);
+    var msg = level switch { "off" => "AI traffic off.", "light" => "Light traffic.", "busy" => "Busy traffic.", _ => "Normal traffic." };
+    return Results.Json(new { ok = true, message = msg }, jsonOpts);
+});
+// LAIA Sim sends an airport's layout and procedures, read from MSFS.
+app.MapPost("/api/airport", async (HttpContext ctx, AirportStore store) =>
+{
+    var d = await JsonSerializer.DeserializeAsync<Laia.Common.Airports.AirportData>(ctx.Request.Body, jsonOpts);
+    if (d is null || string.IsNullOrWhiteSpace(d.Icao)) return Results.BadRequest();
+    store.Add(d);
+    return Results.Json(new { ok = true }, jsonOpts);
+});
+app.MapPost("/api/traffic/catalog", async (HttpContext ctx, FlightSource src) =>
+{
+    var c = await JsonSerializer.DeserializeAsync<Laia.Common.Airports.TrafficCatalog>(ctx.Request.Body, jsonOpts);
+    if (c is not null) src.SetCatalog(c);
+    return Results.Json(new { ok = true }, jsonOpts);
+});
 app.MapPost("/api/traffic/motion/{mode}", (string mode, TrafficEngine t) =>
 {
     t.SetMotion(mode);

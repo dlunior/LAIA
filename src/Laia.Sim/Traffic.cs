@@ -148,6 +148,7 @@ internal sealed class TrafficRenderer : IAsyncDisposable
         public double GroundAlt = double.NaN, CgFt = double.NaN, SmoothGround = double.NaN;
         public double LastLights = -100, LastGear = -100;
         public int SentLights = -1;
+        public double SentLat, SentLon, SentAlt, SentHdg, LastSent = -100;
     }
 
     public TrafficRenderer(SimConnectClient sc, AigCatalog catalog) { _sc = sc; _catalog = catalog; }
@@ -481,9 +482,16 @@ internal sealed class TrafficRenderer : IAsyncDisposable
                     BinaryPrimitives.WriteDoubleLittleEndian(buf.AsSpan(56), p.ground ? 0 : vsFpm / 60.0);
                     BinaryPrimitives.WriteDoubleLittleEndian(buf.AsSpan(64), gsKt * 1.68781);
                     var t = o.Latest;
+                    // Parked aircraft don't move: refresh them every 2 s instead of every frame.
+                    var still = p.ground && gsKt < 0.05 && Math.Abs(p.lat - o.SentLat) < 1e-9 && Math.Abs(p.lon - o.SentLon) < 1e-9
+                                && Math.Abs(alt - o.SentAlt) < 0.05 && Math.Abs(p.hdg - o.SentHdg) < 0.01 && now - o.LastSent < 2;
                     try
                     {
-                        await _sc.SetDataOnSimObjectAsync(DefPos, o.ObjectId, buf.ToArray());
+                        if (!still)
+                        {
+                            await _sc.SetDataOnSimObjectAsync(DefPos, o.ObjectId, buf.ToArray());
+                            o.SentLat = p.lat; o.SentLon = p.lon; o.SentAlt = alt; o.SentHdg = p.hdg; o.LastSent = now;
+                        }
                         // Lights: send when they change, and repeat every 5 s in case the model reset them.
                         if (t.Lights != o.SentLights || now - o.LastLights > 5)
                         {

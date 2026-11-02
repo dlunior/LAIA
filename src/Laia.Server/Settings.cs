@@ -14,7 +14,7 @@ public sealed class SettingsStore
 {
     private static readonly byte[] Entropy = Encoding.UTF8.GetBytes("LAIA settings v1");
     private static readonly string[] Secrets = { "airlabs_key", "aeroapi_key" };
-    private static readonly string[] Plain = { "simbrief_user", "schedule_source" };
+    private static readonly string[] Plain = { "simbrief_user", "schedule_source", "traffic_level" };
     private readonly object _gate = new();
     private readonly string _path = Path.Combine(Paths.DataDir, "settings.json");
     private JsonObject _data;
@@ -82,6 +82,7 @@ public sealed class SettingsStore
                 if (!patch.TryGetProperty(k, out var el) || el.ValueKind == JsonValueKind.Null) continue;
                 var v = (el.GetString() ?? "").Trim();
                 if (k == "schedule_source" && v is not ("aig" or "airlabs")) continue;
+                if (k == "traffic_level" && v is not ("off" or "light" or "normal" or "busy")) continue;
                 if (v.Length == 0) _data.Remove(k);
                 else _data[k] = Secrets.Contains(k) ? Protect(v) : v;
             }

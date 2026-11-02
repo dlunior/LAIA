@@ -1,219 +1,220 @@
 using Laia.Common.SimConnect;
+using Laia.Server.TrafficCore;
 
 namespace Laia.Server;
 
 /// <summary>
-/// Build step 3: the server flies AI aircraft and LAIA Sim draws them. For now one test departure or
-/// arrival at a time, started from the control page, on the real runway best suited to the wind.
+/// Runs the AI traffic: picks the airport near the user that MSFS has given us the layout of, runs the
+/// traffic simulation there (TrafficWorld) four times a second, and hands LAIA Sim the aircraft to draw.
+/// Without a layout (or for the test buttons at an airport not read yet) a simple runway-only world is used.
 /// </summary>
-public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, ServerState state, ILogger<TrafficEngine> log) : BackgroundService
+public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportStore airports, FlightSource source, SettingsStore settings,
+    SimBriefService simbrief, ServerState state, ILogger<TrafficEngine> log) : BackgroundService
 {
     private readonly object _gate = new();
-    private readonly List<Flight> _flights = new();
-    private readonly Random _rng = new();
-    private static readonly (string airline, string name, string type)[] Liveries =
-    {
-        ("DAL", "Delta", "B739"), ("DAL", "Delta", "A321"), ("DAL", "Delta", "B752"), ("UAL", "United", "B738"), ("UAL", "United", "A320"),
-        ("AAL", "American", "A321"), ("SWA", "Southwest", "B737"), ("JBU", "JetBlue", "A320"), ("ACA", "Air Canada", "A220"),
-    };
+    private TrafficWorld? _world;       // the airport near the user (with layout)
+    private TrafficWorld? _testWorld;   // runway-only world for test buttons at airports without layout
+    private readonly List<TrafficWorld> _retiring = new();
+    private long _stampMs;
 
-    private sealed class Flight
+    public string Motion => "laia";
+    public void SetMotion(string mode) { }
+
+    public TrafficLevel Level
     {
-        public required TrafficAircraft Ac;
-        public required RunwayEnd Rwy;
-        public required string Kind; // departure | arrival
-        public double Elapsed;
-        public double Hold;
-        public double DistanceFromThreshold; // nm along the runway direction (negative = before threshold)
-        public double AglFt;
-        public bool Done;
+        get => (settings.Get("traffic_level") ?? "normal") switch { "off" => TrafficLevel.Off, "light" => TrafficLevel.Light, "busy" => TrafficLevel.Busy, _ => TrafficLevel.Normal };
     }
+
+    public void SetLevel(string level)
+    {
+        if (level is not ("off" or "light" or "normal" or "busy")) return;
+        settings.Update(System.Text.Json.JsonSerializer.SerializeToElement(new Dictionary<string, string> { ["traffic_level"] = level }));
+        lock (_gate) if (_world is not null) _world.Level = Level;
+        log.LogInformation("Traffic level: {level}", level);
+    }
+
+    public void Clear()
+    {
+        lock (_gate)
+        {
+            _testWorld = null;
+            _retiring.Clear();
+            if (_world is not null) foreach (var f in _world.Flights) f.Done = true;
+            _world = null; // restarts (and refills) on the next tick
+        }
+    }
+
+    // ------------------------------------------------------------------ what LAIA Sim draws
 
     public List<TrafficAircraft> Snapshot()
     {
-        lock (_gate) return _flights.Where(f => !f.Done).Select(f => Clone(f.Ac)).ToList();
+        var sim = state.Sim;
+        var list = new List<TrafficAircraft>();
+        lock (_gate)
+        {
+            foreach (var w in Worlds())
+                foreach (var f in w.Flights)
+                {
+                    var a = ToAircraft(w, f);
+                    if (sim is not null && sim.Connected && Geo2.DistanceNm(sim.Lat, sim.Lon, a.Lat, a.Lon) > 25) continue;
+                    list.Add(a);
+                }
+        }
+        return list;
     }
 
-    private static TrafficAircraft Clone(TrafficAircraft a) => new()
+    private IEnumerable<TrafficWorld> Worlds()
     {
-        Id = a.Id, Callsign = a.Callsign, Airline = a.Airline, Type = a.Type, Lat = a.Lat, Lon = a.Lon, AltFt = a.AltFt, OnGround = a.OnGround,
-        Heading = a.Heading, Pitch = a.Pitch, Bank = a.Bank, GroundSpeed = a.GroundSpeed, VerticalSpeed = a.VerticalSpeed, GearDown = a.GearDown, Phase = a.Phase,
-        Lights = a.Lights, AglFt = a.AglFt, TimeMs = a.TimeMs,
-    };
-
-    public void Clear() { lock (_gate) _flights.Clear(); }
-
-    /// <summary>How LAIA Sim moves the aircraft (switchable on the control page to compare).</summary>
-    public string Motion { get; private set; } = "laia";
-
-    public void SetMotion(string mode)
-    {
-        if (mode is not ("msfs" or "laia") || mode == Motion) return;
-        Motion = mode;
-        Clear(); // aircraft are created differently in each mode
-        log.LogInformation("Traffic motion mode: {mode}", mode);
+        if (_world is not null) yield return _world;
+        if (_testWorld is not null) yield return _testWorld;
+        foreach (var w in _retiring) yield return w;
     }
 
-    /// <summary>Starts a test flight at the airport nearest the user's aircraft. Returns a message for the control page.</summary>
+    private TrafficAircraft ToAircraft(TrafficWorld w, Flight f)
+    {
+        var (lat, lon) = w.Apt.Map.ToLatLon(f.Pos);
+        var ground = f.Rwy is not null && f.OnRunway >= 0 ? f.Rwy.ElevationFt : w.Apt.ElevationFt;
+        if (!f.OnGround && f.Rwy is not null && (f.Phase is "final" or "flare" or "climbing" or "takeoff roll")) ground = f.Rwy.ElevationFt;
+        return new TrafficAircraft
+        {
+            Id = f.Id, Callsign = f.Callsign, Airline = f.Airline, Type = f.Type, Lat = lat, Lon = lon, AltFt = f.AltFt,
+            AglFt = f.OnGround ? 0 : Math.Max(0, f.AltFt - ground), OnGround = f.OnGround, TimeMs = _stampMs, Heading = f.Heading,
+            Pitch = f.Pitch, Bank = f.Bank, GroundSpeed = f.Gs, VerticalSpeed = f.Vs, GearDown = f.Gear, Phase = f.Phase, Lights = f.Lights,
+        };
+    }
+
+    /// <summary>For the control page.</summary>
+    public object Status()
+    {
+        lock (_gate)
+        {
+            var w = _world;
+            return new
+            {
+                level = (settings.Get("traffic_level") ?? "normal"),
+                airport = w?.Apt.Icao,
+                airportName = w?.Apt.Name,
+                layout = w is null ? null : $"{w.Apt.Spots.Count} parking spots, {w.Apt.Data.Departures.Count} SIDs, {w.Apt.Data.Arrivals.Count} STARs, {w.Apt.Data.Approaches.Count} approaches",
+                landing = w?.ArrRwy?.Ident,
+                departing = w?.DepRwy?.Ident,
+                airportsOnFile = airports.Count,
+                catalog = source.HasCatalog,
+                schedule = source.ScheduleStatus,
+                flights = Worlds().SelectMany(x => x.Flights.Select(f => new
+                {
+                    f.Callsign, f.Type, f.Kind, f.Phase, other = f.Other, runway = f.Rwy?.Ident, route = f.Route,
+                    alt = Math.Round(f.AltFt), gs = Math.Round(f.Gs), gate = f.Spot?.Label, ground = f.OnGround,
+                })).Where(f => f.Kind != "parked").ToList(),
+                parked = Worlds().Sum(x => x.Flights.Count(f => f.Kind == "parked")),
+            };
+        }
+    }
+
+    /// <summary>Airports the server would like LAIA Sim to read: the flight plan's and the nearest towered one.</summary>
+    public List<string> NeededAirports(AircraftState sim)
+    {
+        var want = new List<string>();
+        var plan = simbrief.Plan;
+        if (plan is not null) { want.Add(plan.Origin); want.Add(plan.Destination); }
+        var near = freqs.NearestAirport(sim.Lat, sim.Lon);
+        if (near is { } n && n.nm < 40)
+            want.Add(n.ident.Length == 3 && n.ident.All(char.IsLetter) ? "K" + n.ident : n.ident);
+        return airports.Missing(want, sim.Simulator ?? "");
+    }
+
+    // ------------------------------------------------------------------ test buttons
+
     public (bool ok, string message) StartTest(string kind)
     {
         var sim = state.Sim;
         if (sim is null || !sim.Connected || DateTime.UtcNow - state.SimUpdatedUtc > TimeSpan.FromSeconds(15))
             return (false, "Start MSFS and load a flight first, so LAIA knows where you are.");
-        if (!runways.Loaded) return (false, "Runway data is still downloading. Try again in a minute.");
-        var near = freqs.NearestAirport(sim.Lat, sim.Lon);
-        if (near is null || near.Value.nm > 30) return (false, "You're not near a towered US airport (within 30 nm).");
-        var rwy = runways.Active(near.Value.ident, sim.WindDirection, sim.WindSpeed);
-        if (rwy is null) return (false, $"No runway data for {near.Value.ident}.");
-
-        var (airline, name, type) = Liveries[_rng.Next(Liveries.Length)];
-        var number = _rng.Next(300, 2999);
-        var ac = new TrafficAircraft
-        {
-            Id = Guid.NewGuid().ToString("N")[..8], Callsign = $"{airline}{number}", Airline = airline, Type = type,
-            Heading = rwy.TrueHeading, Phase = kind,
-        };
-        var f = new Flight { Ac = ac, Rwy = rwy, Kind = kind };
-        if (kind == "departure")
-        {
-            f.Hold = 25; // lined up and waiting
-            f.DistanceFromThreshold = 0.05;
-            ac.OnGround = true;
-            ac.GearDown = true;
-        }
-        else
-        {
-            f.DistanceFromThreshold = -5;  // 5 nm final
-            f.AglFt = 5 * 318.4;           // 3 degree glidepath (~1,600 ft)
-            ac.GroundSpeed = 145;
-            ac.GearDown = true;
-        }
-        Place(f);
         lock (_gate)
         {
-            _flights.RemoveAll(x => x.Done);
-            if (_flights.Count >= 4) _flights.RemoveAt(0);
-            _flights.Add(f);
+            UpdateWorld(sim);
+            var w = _world;
+            if (w is null)
+            {
+                if (!runways.Loaded) return (false, "Runway data is still downloading. Try again in a minute.");
+                var near = freqs.NearestAirport(sim.Lat, sim.Lon);
+                if (near is null || near.Value.nm > 30) return (false, "You're not near an airport LAIA knows yet (a towered US airport within 30 nm, or one MSFS has given LAIA the layout of).");
+                var rwy = runways.Active(near.Value.ident, sim.WindDirection, sim.WindSpeed);
+                if (rwy is null) return (false, $"No runway data for {near.Value.ident}.");
+                if (_testWorld is null || _testWorld.Apt.Icao != rwy.Airport)
+                {
+                    var model = AirportModel.RunwayOnly(rwy.Airport, rwy.Lat, rwy.Lon, rwy.ElevationFt, rwy.TrueHeading, rwy.LengthFt, rwy.Id, rwy.Lat, rwy.Lon);
+                    _testWorld = new TrafficWorld(model, source) { Automatic = false, Log = s => log.LogInformation("{msg}", s) };
+                }
+                w = _testWorld;
+            }
+            w.Wind = new Wind(sim.WindDirection, sim.WindSpeed);
+            var (ok, message) = kind == "departure" ? w.TestDeparture() : w.TestArrival();
+            log.LogInformation("Test {kind} at {apt}: {msg}", kind, w.Apt.Icao, message);
+            return (ok, message + (w == _testWorld ? "" : ""));
         }
-        log.LogInformation("Test {kind}: {cs} {type} runway {rwy} at {apt}", kind, ac.Callsign, type, rwy.Id, rwy.Airport);
-        var what = kind == "departure" ? $"lined up on runway {rwy.Id}, departing in about 25 seconds" : $"on a 5-mile final for runway {rwy.Id}";
-        return (true, $"{name} {number} ({type}) is {what} at {rwy.Airport}.");
+    }
+
+    // ------------------------------------------------------------------ loop
+
+    private void UpdateWorld(AircraftState sim)
+    {
+        var near = airports.Nearest(sim.Lat, sim.Lon, 40);
+        if (near is { } n && n.model.HasGround)
+        {
+            if (_world is null || _world.Apt != n.model)
+            {
+                if (_world is not null && _world.Flights.Count > 0) _retiring.Add(_world);
+                _world = new TrafficWorld(n.model, source) { Level = Level, Log = s => log.LogInformation("{msg}", s) };
+                _world.Wind = new Wind(sim.WindDirection, sim.WindSpeed);
+                _world.SelectRunways(true);
+                log.LogInformation("Traffic airport: {icao} {name} ({nm:0} nm away); taxi map {cal}", n.model.Icao, n.model.Name, n.nm, n.model.Calibration);
+                _testWorld = null;
+            }
+        }
+        else if (_world is not null && sim.Connected)
+        {
+            // Left the airport's area: let the remaining flights finish, but start nothing new.
+            _world.Automatic = false;
+            _retiring.Add(_world);
+            _world = null;
+        }
     }
 
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
-        // Step with the time that actually passed, so positions match their timestamps exactly
-        // (a fixed step with a late timer makes the speed wobble between samples).
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(0.25));
         var clock = System.Diagnostics.Stopwatch.StartNew();
         var last = clock.Elapsed.TotalSeconds;
+        var lastWorldCheck = -10.0;
         while (await timer.WaitForNextTickAsync(ct))
         {
             var now = clock.Elapsed.TotalSeconds;
             var dt = Math.Clamp(now - last, 0.01, 1.0);
             last = now;
-            lock (_gate)
+            try
             {
-                foreach (var f in _flights.Where(f => !f.Done)) Step(f, dt);
-                _flights.RemoveAll(f => f.Done && f.Elapsed > 5);
-            }
-        }
-    }
-
-    private static void Step(Flight f, double dt)
-    {
-        var a = f.Ac;
-        f.Elapsed += dt;
-        if (f.Kind == "departure")
-        {
-            if (f.Hold > 0) { f.Hold -= dt; a.Phase = "lined up"; Place(f); return; }
-            if (a.OnGround)
-            {
-                a.Phase = "takeoff roll";
-                a.GroundSpeed = Math.Min(a.GroundSpeed + 4.5 * dt, 165); // ~36 s to rotation, about 5,000 ft of runway
-                if (a.GroundSpeed > 145) a.Pitch = Math.Min(a.Pitch + 3 * dt, 9); // rotate
-                if (a.GroundSpeed >= 160) { a.OnGround = false; a.Phase = "climbing"; }
-            }
-            else
-            {
-                a.GroundSpeed = Math.Min(a.GroundSpeed + 1.5 * dt, 250);
-                a.VerticalSpeed = Math.Min(a.VerticalSpeed + 400 * dt, 2500);
-                a.Pitch = Math.Clamp(a.Pitch + 1 * dt, 9, 12);
-                f.AglFt += a.VerticalSpeed / 60 * dt;
-                if (f.AglFt > 400) a.GearDown = false;
-            }
-            f.DistanceFromThreshold += a.GroundSpeed / 3600 * dt;
-            if (f.DistanceFromThreshold > 15) f.Done = true;
-        }
-        else
-        {
-            if (!a.OnGround)
-            {
-                a.Phase = "final approach";
-                f.DistanceFromThreshold += a.GroundSpeed / 3600 * dt;
-                // 3-degree glidepath aimed 1,000 ft past the threshold (crosses the threshold at ~50 ft), like an ILS.
-                const double aimNm = 1000.0 / 6076;
-                var glide = Math.Max(0, (aimNm - f.DistanceFromThreshold) * 318.4);
-                if (f.AglFt > 20 && a.Phase != "flare") { f.AglFt = glide; a.Pitch = 2.5; a.VerticalSpeed = -a.GroundSpeed * 101.3 * Math.Tan(3 * Math.PI / 180); }
-                else
+                var sim = state.Sim;
+                var live = sim is not null && sim.Connected && DateTime.UtcNow - state.SimUpdatedUtc < TimeSpan.FromSeconds(30);
+                lock (_gate)
                 {
-                    // Flare from 20 ft: sink rate eases from ~700 fpm to ~240 fpm; touchdown around 1,300 ft past the threshold.
-                    a.Phase = "flare";
-                    a.Pitch = Math.Min(a.Pitch + 1.5 * dt, 5);
-                    var sink = a.VerticalSpeed / 60;                       // ft/s, negative
-                    sink += (-4 - sink) * (1 - Math.Exp(-dt / 1.0));
-                    a.VerticalSpeed = sink * 60;
-                    f.AglFt = Math.Max(0, f.AglFt + sink * dt);
-                    a.GroundSpeed = Math.Max(a.GroundSpeed - 1.5 * dt, 125);
-                    if (f.AglFt <= 0) { a.OnGround = true; a.VerticalSpeed = 0; }
+                    if (live && now - lastWorldCheck > 5) { UpdateWorld(sim!); lastWorldCheck = now; }
+                    foreach (var w in Worlds().ToList())
+                    {
+                        if (live)
+                        {
+                            w.Wind = new Wind(sim!.WindDirection, sim.WindSpeed);
+                            w.UserPos = w.Apt.Map.ToXY(sim.Lat, sim.Lon);
+                            w.UserOnGround = sim.OnGround;
+                        }
+                        if (w == _world) w.Level = Level;
+                        // Don't run traffic while nobody is flying (sim closed): it would all depart unseen.
+                        if (live || w.Flights.Any(f => f.Test)) w.Step(dt);
+                    }
+                    _retiring.RemoveAll(w => w.Flights.Count == 0 || w.Flights.All(f => f.Kind == "parked"));
+                    _stampMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 }
             }
-            else
-            {
-                a.Phase = "landing roll";
-                a.Pitch = Math.Max(a.Pitch - 2 * dt, 0);
-                a.GroundSpeed = Math.Max(a.GroundSpeed - 4 * dt, 0);
-                f.DistanceFromThreshold += a.GroundSpeed / 3600 * dt;
-                if (a.GroundSpeed < 25) { a.Phase = "vacating"; f.Done = true; }
-            }
+            catch (Exception ex) { log.LogWarning("Traffic step failed: {msg}", ex.Message); }
         }
-        Place(f);
-    }
-
-    private const int Nav = 1, Beacon = 2, Strobes = 4, Landing = 8, Taxi = 16, Logo = 32, Wing = 64, Cabin = 128;
-    // Cabin lights stay off (dimmed) for takeoff and landing, as airlines do; they come on at the gate and in cruise
-    // once those phases exist. The bit is always sent, so models that switch the cabin on by themselves get turned off.
-
-    /// <summary>Lights the way airline crews use them: nav/beacon/logo whenever active; strobes and
-    /// landing lights on the runway and below 10,000 ft; taxi lights on the ground before takeoff.</summary>
-    private static int LightsFor(Flight f)
-    {
-        var a = f.Ac;
-        var l = Nav | Beacon | Logo;
-        var belowTenThousand = f.AglFt + f.Rwy.ElevationFt < 10000;
-        if (f.Kind == "departure")
-        {
-            if (a.OnGround) l |= Strobes | Landing | Taxi | Wing;
-            else { l |= Strobes; if (belowTenThousand) l |= Landing; }
-        }
-        else
-        {
-            l |= Strobes;
-            if (belowTenThousand) l |= Landing;
-            if (a.OnGround && a.GroundSpeed < 60) l = (l & ~Landing & ~Strobes) | Taxi; // vacating
-        }
-        return l;
-    }
-
-    private static void Place(Flight f)
-    {
-        f.Ac.Lights = LightsFor(f);
-        f.Ac.AglFt = f.AglFt;
-        f.Ac.TimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        var (lat, lon) = Geo.Offset(f.Rwy.Lat, f.Rwy.Lon, f.Rwy.TrueHeading, f.DistanceFromThreshold);
-        f.Ac.Lat = lat;
-        f.Ac.Lon = lon;
-        f.Ac.Heading = f.Rwy.TrueHeading;
-        f.Ac.AltFt = f.Rwy.ElevationFt + f.AglFt;
     }
 }

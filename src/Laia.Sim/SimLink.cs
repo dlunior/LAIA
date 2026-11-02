@@ -19,6 +19,7 @@ internal sealed class SimLink : IDisposable
     private SimConnectClient? _sc;
     private TrafficRenderer? _traffic;
     private AigCatalog? _catalog;
+    private readonly AirportUploader _airports = new();
     public int TrafficCount => _traffic?.Count ?? 0;
     private DateTime _lastData = DateTime.MinValue;
 
@@ -77,6 +78,7 @@ internal sealed class SimLink : IDisposable
             finally
             {
                 if (_traffic is not null) { try { await _traffic.DisposeAsync(); } catch { } _traffic = null; }
+                try { await _airports.ResetAsync(); } catch { }
                 if (_sc is not null) { await _sc.DisposeAsync(); _sc = null; }
                 lock (_gate) _state.Connected = false;
             }
@@ -175,7 +177,12 @@ internal sealed class SimLink : IDisposable
                     if (resp.IsSuccessStatusCode && _traffic is { } tr && snap.Connected)
                     {
                         var reply = await resp.Content.ReadFromJsonAsync<SimStateReply>(cancellationToken: ct);
-                        if (reply is not null) tr.Update(reply.Traffic, reply.ServerTimeMs / 1000.0, reply.Motion ?? "laia");
+                        if (reply is not null)
+                        {
+                            tr.Update(reply.Traffic, reply.ServerTimeMs / 1000.0, reply.Motion ?? "laia");
+                            _airports.Request(reply.NeedAirports, server.BaseUrl, snap.Simulator, ct);
+                            if (reply.NeedCatalog && _catalog is { } cat) _ = SendCatalogAsync(server.BaseUrl, cat, ct);
+                        }
                     }
                 }
             }
@@ -183,6 +190,17 @@ internal sealed class SimLink : IDisposable
             catch { /* server briefly unreachable; the tray heartbeat handles reconnects */ }
             try { await Task.Delay(250, ct); } catch { break; } // 4x a second: smooth traffic, trivial network load
         }
+    }
+
+    private async Task SendCatalogAsync(string baseUrl, AigCatalog cat, CancellationToken ct)
+    {
+        try
+        {
+            var entries = cat.Models.GroupBy(m => (m.Airline, m.Type)).Where(g => g.Key.Airline.Length is 2 or 3 && g.Key.Type.Length > 0)
+                .Select(g => new Laia.Common.Airports.CatalogEntry(g.Key.Airline, g.Key.Type, g.Count())).ToList();
+            using var resp = await _http.PostAsJsonAsync(baseUrl + "/api/traffic/catalog", new Laia.Common.Airports.TrafficCatalog { Entries = entries }, ct);
+        }
+        catch { }
     }
 
     public void Dispose()

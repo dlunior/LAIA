@@ -47,6 +47,11 @@ jobs:
           & out/python/python.exe speech/test_phraseology.py
           if ($LASTEXITCODE) { throw "radio reply checks failed" }
 
+      - name: Check traffic logic (offline simulation)
+        run: |
+          dotnet run --project src/Laia.Tests -c Release *>&1 | Tee-Object -FilePath out/traffic-tests.log
+          if ($LASTEXITCODE) { throw "traffic checks failed" }
+
       - name: Publish apps and pack installers
         run: |
           New-Item -ItemType Directory -Force out | Out-Null
@@ -107,7 +112,7 @@ jobs:
           New-Item -ItemType Directory -Force $dir | Out-Null
           if (Test-Path out\screenshots) { Copy-Item out\screenshots\* $dir -ErrorAction SilentlyContinue }
           Copy-Item (Join-Path $env:TEMP "LAIA-Setup.log") $dir -ErrorAction SilentlyContinue
-          Copy-Item out\pack.log, out\smoke.log $dir -ErrorAction SilentlyContinue
+          Copy-Item out\pack.log, out\smoke.log, out\traffic-tests.log $dir -ErrorAction SilentlyContinue
           Copy-Item "C:\ProgramData\LAIA\logs\server.log" $dir -ErrorAction SilentlyContinue
           "run ${{ github.run_number }} commit ${{ github.sha }} smoke=${{ steps.smoke.outcome }}" | Set-Content "$dir\RUN.txt"
           Set-Location $dir

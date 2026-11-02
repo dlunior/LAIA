@@ -33,4 +33,8 @@ public sealed class SimStateReply
     public long ServerTimeMs { get; set; }
     /// <summary>"msfs": MSFS's AI flies a rolling path from LAIA; "laia": LAIA sets the position every frame.</summary>
     public string Motion { get; set; } = "laia";
+    /// <summary>Airports the server would like LAIA Sim to read from MSFS (layout and procedures).</summary>
+    public List<string>? NeedAirports { get; set; }
+    /// <summary>True when the server wants the list of installed AI models again.</summary>
+    public bool NeedCatalog { get; set; }
 }

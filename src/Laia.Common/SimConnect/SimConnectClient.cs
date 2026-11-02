@@ -37,11 +37,40 @@ public sealed class SimObjectData
     }
 }
 
+/// <summary>One FACILITY_DATA message: the fields of one facility item (airport, runway, taxi point, leg…).</summary>
+public sealed class FacilityRecord
+{
+    public uint RequestId { get; init; }
+    public uint UniqueId { get; init; }
+    public uint ParentId { get; init; }
+    public uint Type { get; init; }       // SIMCONNECT_FACILITY_DATA_TYPE
+    public bool IsListItem { get; init; }
+    public uint ItemIndex { get; init; }
+    public uint ListSize { get; init; }
+    public byte[] Data { get; init; } = Array.Empty<byte>();
+    private int _pos;
+
+    public double F64() { var v = _pos + 8 <= Data.Length ? BinaryPrimitives.ReadDoubleLittleEndian(Data.AsSpan(_pos)) : 0; _pos += 8; return v; }
+    public float F32() { var v = _pos + 4 <= Data.Length ? BinaryPrimitives.ReadSingleLittleEndian(Data.AsSpan(_pos)) : 0; _pos += 4; return v; }
+    public int I32() { var v = _pos + 4 <= Data.Length ? BinaryPrimitives.ReadInt32LittleEndian(Data.AsSpan(_pos)) : 0; _pos += 4; return v; }
+    public string Str(int length)
+    {
+        if (_pos >= Data.Length) { _pos += length; return ""; }
+        var span = Data.AsSpan(_pos, Math.Min(length, Data.Length - _pos));
+        _pos += length;
+        var end = span.IndexOf((byte)0);
+        return Encoding.Latin1.GetString(end < 0 ? span : span[..end]).Trim();
+    }
+}
+
 public sealed class SimConnectClient : IAsyncDisposable
 {
     private const uint Unused = 0xFFFFFFFF;
     private const int ProtocolVersion = 4; // FSX SP2 protocol: accepted by MSFS 2020 and 2024 for everything LAIA uses
+    /// <summary>MSFS ("KittyHawk") protocol: needed for the facility (airport layout and procedure) functions.</summary>
+    public const int ProtocolMsfs = 5;
     private readonly Stream _stream;
+    private int _protocol = ProtocolVersion;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private uint _sendId;
 
@@ -53,6 +82,8 @@ public sealed class SimConnectClient : IAsyncDisposable
     public event Action? Quit;
     public event Action<uint, uint>? AssignedObjectId; // request id, object id
     public event Action? Frame;
+    public event Action<FacilityRecord>? FacilityData;
+    public event Action<uint>? FacilityDataEnd; // request id
 
     private SimConnectClient(Stream stream, string endpoint) { _stream = stream; Endpoint = endpoint; }
 
@@ -60,7 +91,7 @@ public sealed class SimConnectClient : IAsyncDisposable
     /// Connects to the simulator on this PC. Tries MSFS's named pipes, then the local IPv4 port the
     /// simulator writes to the registry, then common default ports. Returns null if MSFS isn't reachable.
     /// </summary>
-    public static async Task<SimConnectClient?> ConnectAsync(string appName, Action<string>? log = null, CancellationToken ct = default)
+    public static async Task<SimConnectClient?> ConnectAsync(string appName, Action<string>? log = null, CancellationToken ct = default, int protocol = ProtocolVersion)
     {
         foreach (var pipe in new[] { @"Microsoft Flight Simulator\SimConnect", @"Microsoft Flight Simulator 2024\SimConnect" })
         {
@@ -68,7 +99,7 @@ public sealed class SimConnectClient : IAsyncDisposable
             {
                 var p = new NamedPipeClientStream(".", pipe, PipeDirection.InOut, PipeOptions.Asynchronous);
                 await p.ConnectAsync(1500, ct);
-                var c = new SimConnectClient(p, @"pipe \\.\pipe\" + pipe);
+                var c = new SimConnectClient(p, @"pipe \\.\pipe\" + pipe) { _protocol = protocol };
                 if (await c.OpenAsync(appName, ct)) return c;
                 await c.DisposeAsync();
             }
@@ -82,7 +113,7 @@ public sealed class SimConnectClient : IAsyncDisposable
                 using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 cts.CancelAfter(1500);
                 await tcp.ConnectAsync("127.0.0.1", port, cts.Token);
-                var c = new SimConnectClient(tcp.GetStream(), $"tcp 127.0.0.1:{port}");
+                var c = new SimConnectClient(tcp.GetStream(), $"tcp 127.0.0.1:{port}") { _protocol = protocol };
                 if (await c.OpenAsync(appName, ct)) return c;
                 await c.DisposeAsync();
             }
@@ -155,6 +186,7 @@ public sealed class SimConnectClient : IAsyncDisposable
         {
             var id = ++_sendId;
             var bytes = p.Build(id);
+            BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(4), _protocol);
             await _stream.WriteAsync(bytes);
             await _stream.FlushAsync();
             return id;
@@ -165,7 +197,10 @@ public sealed class SimConnectClient : IAsyncDisposable
     private async Task<bool> OpenAsync(string appName, CancellationToken ct)
     {
         // Open (0x01): app name, reserved, then the client version block for protocol 4 (FSX SP2).
-        await SendAsync(new Packet(0x01).Str(appName, 256).U32(0).Byte(0).Str("XSF", 3).U32(10).U32(0).U32(61259).U32(0));
+        if (_protocol >= ProtocolMsfs)
+            await SendAsync(new Packet(0x01).Str(appName, 256).U32(0).Byte(0).Str("HK", 3).U32(11).U32(0).U32(62651).U32(3));
+        else
+            await SendAsync(new Packet(0x01).Str(appName, 256).U32(0).Byte(0).Str("XSF", 3).U32(10).U32(0).U32(61259).U32(0));
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(TimeSpan.FromSeconds(6));
         try
@@ -222,6 +257,14 @@ public sealed class SimConnectClient : IAsyncDisposable
         return SendAsync(p);
     }
 
+    /// <summary>Adds a field (or "OPEN X"/"CLOSE X") to a facility data definition. MSFS protocol only.</summary>
+    public Task<uint> AddToFacilityDefinitionAsync(uint defineId, string field) =>
+        SendAsync(new Packet(0x45).U32(defineId).Str(field, 256));
+
+    /// <summary>Asks for one facility (e.g. an airport by ICAO). Answers arrive as FacilityData, then FacilityDataEnd.</summary>
+    public Task<uint> RequestFacilityDataAsync(uint defineId, uint requestId, string icao, string region = "") =>
+        SendAsync(new Packet(0x46).U32(defineId).U32(requestId).Str(icao, 16).Str(region, 4));
+
     public Task<uint> SubscribeToSystemEventAsync(uint eventId, string name) =>
         SendAsync(new Packet(0x17).U32(eventId).Str(name, 256));
 
@@ -265,6 +308,22 @@ public sealed class SimConnectClient : IAsyncDisposable
                     break;
                 case 7: // EVENT_FRAME
                     Frame?.Invoke();
+                    break;
+                case 28: // FACILITY_DATA
+                    FacilityData?.Invoke(new FacilityRecord
+                    {
+                        RequestId = BinaryPrimitives.ReadUInt32LittleEndian(body),
+                        UniqueId = BinaryPrimitives.ReadUInt32LittleEndian(body.AsSpan(4)),
+                        ParentId = BinaryPrimitives.ReadUInt32LittleEndian(body.AsSpan(8)),
+                        Type = BinaryPrimitives.ReadUInt32LittleEndian(body.AsSpan(12)),
+                        IsListItem = BinaryPrimitives.ReadUInt32LittleEndian(body.AsSpan(16)) == 1,
+                        ItemIndex = BinaryPrimitives.ReadUInt32LittleEndian(body.AsSpan(20)),
+                        ListSize = BinaryPrimitives.ReadUInt32LittleEndian(body.AsSpan(24)),
+                        Data = body.AsSpan(28).ToArray(),
+                    });
+                    break;
+                case 29: // FACILITY_DATA_END
+                    FacilityDataEnd?.Invoke(BinaryPrimitives.ReadUInt32LittleEndian(body));
                     break;
                 case 12: // ASSIGNED_OBJECT_ID
                     AssignedObjectId?.Invoke(BinaryPrimitives.ReadUInt32LittleEndian(body), BinaryPrimitives.ReadUInt32LittleEndian(body.AsSpan(4)));
