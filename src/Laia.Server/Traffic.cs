@@ -167,7 +167,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 _world = new TrafficWorld(n.model, source) { Level = Level, Log = s => log.LogInformation("{msg}", s) };
                 _world.Wind = new Wind(sim.WindDirection, sim.WindSpeed);
                 _world.SelectRunways(true);
-                log.LogInformation("Traffic airport: {icao} {name} ({nm:0} nm away); taxi map {cal}", n.model.Icao, n.model.Name, n.nm, n.model.Calibration);
+                log.LogInformation("Traffic airport: {icao} {name} ({nm:0} nm away); taxi map {cal}; {desc}", n.model.Icao, n.model.Name, n.nm, n.model.Calibration, n.model.Describe());
                 _testWorld = null;
             }
         }

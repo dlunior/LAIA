@@ -263,6 +263,21 @@ public sealed class AirportModel
         }
     }
 
+    /// <summary>One line for the log: how much of the layout LAIA could use.</summary>
+    public string Describe()
+    {
+        var parts = new List<string>();
+        for (var r = 0; r < RunwayCount; r++)
+        {
+            var ends = string.Join("/", Ends.Where(e => e.Runway == r).Select(e => e.Ident));
+            var nodes = NodeRunway.Count(x => x == r);
+            var links = RunwayLinks(r).Count();
+            parts.Add($"{ends}: {nodes} taxi points on it, {links} taxiway connections");
+        }
+        var connected = Spots.Count(s => s.Access >= 0);
+        return $"{Spots.Count} parking spots usable ({Spots.Count(s => s.IsGate)} gates); " + string.Join("; ", parts);
+    }
+
     public int NearestNode(V2 p, bool offRunway = true)
     {
         var best = -1; var bestD = double.MaxValue;

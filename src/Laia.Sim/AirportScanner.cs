@@ -20,6 +20,7 @@ internal sealed class AirportScanner : IAsyncDisposable
     private readonly object _gate = new();
     private readonly Dictionary<uint, Pending> _pending = new();
     private readonly HashSet<uint> _procDefSends = new();
+    private readonly Dictionary<uint, string> _sentFields = new();
     private bool _procedureFieldsRejected;
     private uint _nextReq = 100;
 
@@ -53,13 +54,18 @@ internal sealed class AirportScanner : IAsyncDisposable
         sc.FacilityDataEnd += OnEnd;
         sc.SimException += (code, sendId) =>
         {
-            Log.Write($"Airport data: SimConnect exception {code} on packet {sendId}");
-            lock (_gate) if (_procDefSends.Contains(sendId)) _procedureFieldsRejected = true;
+            string? field;
+            lock (_gate) { _sentFields.TryGetValue(sendId, out field); if (_procDefSends.Contains(sendId)) _procedureFieldsRejected = true; }
+            Log.Write($"Airport data: SimConnect exception {code} on packet {sendId}{(field is null ? "" : " (" + field + ")")}");
         };
         _sc = sc;
         _run = Task.Run(async () => { try { await sc.RunAsync(_cts.Token); } catch { } });
 
-        async Task Add(uint def, string f) { var id = await sc.AddToFacilityDefinitionAsync(def, f); if (def == DefProcedures) lock (_gate) _procDefSends.Add(id); }
+        async Task Add(uint def, string f)
+        {
+            var id = await sc.AddToFacilityDefinitionAsync(def, f);
+            lock (_gate) { _sentFields[id] = $"definition {def}: {f}"; if (def == DefProcedures) _procDefSends.Add(id); }
+        }
 
         // --- Layout: airport, runways, taxi points, parking, taxi paths, taxiway names
         foreach (var f in new[] { "OPEN AIRPORT", "LATITUDE", "LONGITUDE", "ALTITUDE", "MAGVAR", "NAME", "ICAO",
