@@ -126,6 +126,15 @@ internal sealed class TrafficRenderer : IAsyncDisposable
     private readonly Queue<double> _offsets = new();
     private double _offset = double.NaN; // local clock minus server clock, seconds
     private uint _nextReq = 5000;
+    private readonly Stats _stats = new();
+
+    /// <summary>Motion report written to the log every 10 s while traffic is shown.</summary>
+    private sealed class Stats
+    {
+        public int Frames, Updates, LateSamples;
+        public double MaxFrameGap, OffsetAdjust, MaxSampleGap;
+        public double Since;
+    }
 
     private sealed class Obj
     {
@@ -176,7 +185,16 @@ internal sealed class TrafficRenderer : IAsyncDisposable
             var off = Now - serverTimeSec;
             _offsets.Enqueue(off);
             while (_offsets.Count > 40) _offsets.Dequeue();
-            _offset = _offsets.Min();
+            // Ease clock corrections in (at most 2 ms per update) so aircraft never hop when the estimate changes.
+            var target = _offsets.Min();
+            if (double.IsNaN(_offset) || Math.Abs(target - _offset) > 0.5) _offset = target;
+            else
+            {
+                var step = Math.Clamp(target - _offset, -0.002, 0.002);
+                if (Math.Abs(step) > 0.0005) _stats.OffsetAdjust += Math.Abs(step);
+                _offset += step;
+            }
+            _stats.Updates++;
 
             foreach (var t in list)
             {
@@ -188,6 +206,7 @@ internal sealed class TrafficRenderer : IAsyncDisposable
                     toCreate.Add(o);
                 }
                 o.Latest = t;
+                if (o.Samples.Count > 0 && ts > o.Samples[^1].t) _stats.MaxSampleGap = Math.Max(_stats.MaxSampleGap, ts - o.Samples[^1].t);
                 if (o.Samples.Count == 0 || ts > o.Samples[^1].t) o.Samples.Add((ts, t));
                 if (o.Samples.Count > 12) o.Samples.RemoveAt(0);
             }
@@ -295,8 +314,21 @@ internal sealed class TrafficRenderer : IAsyncDisposable
                 // Move once per simulator frame (falls back to ~60 Hz if frame events stop).
                 await _frame.WaitAsync(TimeSpan.FromMilliseconds(16), ct);
                 var now = Now;
+                _stats.MaxFrameGap = Math.Max(_stats.MaxFrameGap, now - lastFrame);
                 var frameDt = Math.Clamp(now - lastFrame, 0.001, 0.2);
                 lastFrame = now;
+                _stats.Frames++;
+                if (now - _stats.Since >= 10)
+                {
+                    int count;
+                    lock (_gate) count = _objs.Count;
+                    if (count > 0)
+                        Log.Write($"Traffic motion: {count} aircraft, {_stats.Frames / (now - _stats.Since):0} frames/s (longest gap {_stats.MaxFrameGap * 1000:0} ms), " +
+                                  $"{_stats.Updates / (now - _stats.Since):0.0} updates/s (longest sample gap {_stats.MaxSampleGap * 1000:0} ms), " +
+                                  $"{_stats.LateSamples} frames ran past the newest sample, clock eased {_stats.OffsetAdjust * 1000:0} ms");
+                    _stats.Frames = 0; _stats.Updates = 0; _stats.LateSamples = 0; _stats.MaxFrameGap = 0; _stats.MaxSampleGap = 0; _stats.OffsetAdjust = 0;
+                    _stats.Since = now;
+                }
                 if (double.IsNaN(_offset)) continue;
                 var rt = now - _offset - RenderDelay; // server time we're showing
                 List<Obj> objs;
@@ -304,7 +336,11 @@ internal sealed class TrafficRenderer : IAsyncDisposable
                 foreach (var o in objs)
                 {
                     (double lat, double lon, double alt, double agl, double hdg, double pitch, double bank, bool ground) p;
-                    lock (_gate) p = Sample(o, rt);
+                    lock (_gate)
+                    {
+                        if (rt > o.Samples[^1].t) _stats.LateSamples++;
+                        p = Sample(o, rt);
+                    }
 
                     // Near the ground, height comes from the sim's own terrain under the aircraft, so the
                     // wheels meet the runway exactly (FAA runway elevation and MSFS terrain differ by a few feet).

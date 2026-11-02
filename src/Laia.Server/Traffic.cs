@@ -91,10 +91,16 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, ServerSta
 
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
-        const double dt = 0.25;
-        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(dt));
+        // Step with the time that actually passed, so positions match their timestamps exactly
+        // (a fixed step with a late timer makes the speed wobble between samples).
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(0.25));
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var last = clock.Elapsed.TotalSeconds;
         while (await timer.WaitForNextTickAsync(ct))
         {
+            var now = clock.Elapsed.TotalSeconds;
+            var dt = Math.Clamp(now - last, 0.01, 1.0);
+            last = now;
             lock (_gate)
             {
                 foreach (var f in _flights.Where(f => !f.Done)) Step(f, dt);
