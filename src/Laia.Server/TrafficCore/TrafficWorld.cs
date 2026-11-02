@@ -56,6 +56,7 @@ public sealed class Flight
     public Flight? BlockedBy, Ignore;
     public double IgnoreUntil;
     public bool LandingChecked, WentAround;
+    public double RerouteTime = -999;
     public double LastOrbit = -999;
     public string Route = "";               // procedure names for the control page
     public bool UserIsObstacle;
@@ -290,7 +291,13 @@ public sealed class TrafficWorld
         var p1 = s.P - face * back;
         // Tail swings away from the route direction (never back toward the gate).
         var swing = towardRoute;
-        if (V2.Dot(swing, face) > 0.7) swing = face.Perp; // route heads back past the gate: swing sideways
+        if (Math.Abs(V2.Dot(swing, face)) > 0.7)
+        {
+            // The route continues straight ahead or back past the gate: push tail-sideways onto the taxilane,
+            // toward the side the route then goes.
+            var later = route is not null && route.Count >= 3 ? Apt.Nodes[route[2]] - access : face.Perp;
+            swing = V2.Dot(face.Perp, later) >= 0 ? face.Perp : face.Perp * -1;
+        }
         var end = p1 - swing * Math.Max(30, f.P.LengthM * 0.8);
         f.Path = new PathGeom(new List<V2> { s.P, p1, end }, _ => Math.Max(18, f.P.LengthM * 0.5), 0.5);
         f.S = 0;
@@ -302,6 +309,48 @@ public sealed class TrafficWorld
         f.Stops.Clear();
         f.Spot = null; // the gate is free once the aircraft leaves it
         f.SetPhase("pushback", Time);
+    }
+
+    /// <summary>A new taxi route from where the aircraft is, avoiding the area around another aircraft.</summary>
+    private bool Reroute(Flight f, Flight other)
+    {
+        int dest;
+        if (f.Phase == "taxi") dest = f.HoldNode;
+        else if (f.Phase == "taxi in" && f.Spot is not null) dest = f.Spot.Access;
+        else return false;
+        if (dest < 0) return false;
+        var avoid = new HashSet<int>();
+        for (var i = 0; i < Apt.TaxiPointCount; i++) if ((Apt.Nodes[i] - other.Pos).Length < 70) avoid.Add(i);
+        var from = -1; var best = double.MaxValue;
+        for (var i = 0; i < Apt.TaxiPointCount; i++)
+        {
+            if (avoid.Contains(i) || Apt.Adj[i].Count == 0 || Apt.NodeRunway[i] >= 0) continue;
+            var d = (Apt.Nodes[i] - f.Pos).Length;
+            if (d < best) { best = d; from = i; }
+        }
+        if (from < 0 || best > 150) return false;
+        var route = Apt.Route(from, dest, ActiveRunways(), avoid);
+        if (route is null) return false;
+        var pts = new List<V2> { f.Pos };
+        var fwd = V2.FromBearing(f.Heading);
+        if (V2.Dot(Apt.Nodes[route[0]] - f.Pos, fwd) < 0)
+            pts.Add(f.Pos + fwd * 25 + fwd.Perp * 30); // turn around in a teardrop rather than on the spot
+        var offset = pts.Count;
+        if (f.Phase == "taxi")
+        {
+            var holdIndex = HoldShortIndex(route, route.Count - 1, f.Rwy!);
+            f.LineupNodes = route.Skip(holdIndex + 1).ToList();
+            route = route.Take(holdIndex + 1).ToList();
+        }
+        pts.AddRange(route.Select(n => Apt.Nodes[n]));
+        if (f.Phase == "taxi in" && f.Spot is { } gate)
+        {
+            pts.Add(gate.P - V2.FromBearing(gate.Heading) * Math.Min(40, Math.Max(15, (gate.P - Apt.Nodes[gate.Access]).Length * 0.5)));
+            pts.Add(gate.P);
+        }
+        SetGroundPath(f, pts, route, offset);
+        Log($"{f.Callsign}: taking another way round {other.Callsign}");
+        return true;
     }
 
     /// <summary>No pushback while another aircraft is taxiing or pushing right behind the gate.</summary>
@@ -980,8 +1029,14 @@ public sealed class TrafficWorld
         }
         if (by is null) { f.BlockedBy = null; f.BlockedFor = 0; return userBlock; }
         if (f.BlockedBy == by) f.BlockedFor += 0.25; else { f.BlockedBy = by; f.BlockedFor = 0; }
-        // Standoff: both waiting for each other. The older flight goes; the other keeps waiting.
-        if (by.BlockedBy == f && f.BlockedFor > 15 && string.CompareOrdinal(f.Id, by.Id) < 0)
+        // Standoff: both waiting for each other (head-on on a taxilane). The newer flight looks for another way
+        // round; if there is none, the older one eventually goes.
+        if (by.BlockedBy == f && f.BlockedFor > 8 && string.CompareOrdinal(f.Id, by.Id) > 0 && Time - f.RerouteTime > 60)
+        {
+            f.RerouteTime = Time;
+            if (Reroute(f, by)) { f.BlockedBy = null; f.BlockedFor = 0; return false; }
+        }
+        if (by.BlockedBy == f && f.BlockedFor > 20 && string.CompareOrdinal(f.Id, by.Id) < 0)
         {
             f.Ignore = by;
             f.IgnoreUntil = Time + 45;

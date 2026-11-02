@@ -219,7 +219,7 @@ public sealed class AirportModel
     /// Shortest taxi route between two nodes (A*). Parking spots are never passed through, runway edges
     /// are avoided (used only when nothing else works), and long runway backtaxis are heavily penalised.
     /// </summary>
-    public List<int>? Route(int from, int to, IReadOnlySet<int>? avoidRunways = null)
+    public List<int>? Route(int from, int to, IReadOnlySet<int>? avoidRunways = null, IReadOnlySet<int>? avoidNodes = null)
     {
         if (from < 0 || to < 0 || from >= Nodes.Length || to >= Nodes.Length) return null;
         var dist = new Dictionary<int, double> { [from] = 0 };
@@ -235,6 +235,7 @@ public sealed class AirportModel
             {
                 var v = e.B;
                 if (v >= TaxiPointCount && v != to) continue; // don't route through other parking spots
+                if (avoidNodes is not null && avoidNodes.Contains(v) && v != to) continue;
                 var cost = e.Len;
                 // Prefer named taxiways; apron alleys and lead-ins only to reach a gate.
                 cost *= e.Type switch { 2 => 8, 4 => 3, 3 => 4, _ => e.Name.Length == 0 ? 1.5 : 1.0 };

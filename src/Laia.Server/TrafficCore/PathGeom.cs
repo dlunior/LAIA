@@ -63,11 +63,11 @@ public sealed class PathGeom
         {
             var din = (p[i] - p[i - 1]).Unit; var dout = (p[i + 1] - p[i]).Unit;
             var th = Math.Abs(Geo2.Diff(din.Bearing, dout.Bearing));
-            if (th < 0.5) continue;
+            if (th < 0.5 || th > 179.5) continue; // straight on, or a complete reversal (no arc possible)
             turn[i] = th;
             var origIndex = map.IndexOf(i);
             var r = Math.Max(1, radius(origIndex < 0 ? i : origIndex));
-            var tanHalf = Math.Tan(Math.Min(th, 175) * Math.PI / 360);
+            var tanHalf = Math.Tan(th * Math.PI / 360);
             t[i] = r * tanHalf;
             rad[i] = r;
         }
@@ -78,7 +78,7 @@ public sealed class PathGeom
             var maxIn = i - 1 == 0 ? lin * 0.95 : lin * 0.5;
             var maxOut = i + 1 == p.Count - 1 ? lout * 0.95 : lout * 0.5;
             var tt = Math.Min(t[i], Math.Min(maxIn, maxOut));
-            if (tt < t[i]) { rad[i] = tt / Math.Tan(Math.Min(turn[i], 175) * Math.PI / 360); t[i] = tt; }
+            if (tt < t[i]) { rad[i] = tt / Math.Tan(turn[i] * Math.PI / 360); t[i] = tt; }
         }
 
         double s = 0;
