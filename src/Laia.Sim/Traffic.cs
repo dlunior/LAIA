@@ -134,7 +134,7 @@ internal sealed class TrafficRenderer : IAsyncDisposable
     private sealed class Stats
     {
         public int Frames, Updates, LateSamples, Bunched;
-        public double MaxFrameGap, OffsetAdjust, MaxSampleGap;
+        public double MaxFrameGap, OffsetAdjust, MaxSampleGap, Busy, MaxBusy;
         public double Since;
     }
 
@@ -415,14 +415,25 @@ internal sealed class TrafficRenderer : IAsyncDisposable
                     if (count > 0)
                         Log.Write($"Traffic motion: {count} aircraft, {_stats.Frames / (now - _stats.Since):0} frames/s (longest gap {_stats.MaxFrameGap * 1000:0} ms), " +
                                   $"{_stats.Updates / (now - _stats.Since):0.0} updates/s (longest sample gap {_stats.MaxSampleGap * 1000:0} ms), " +
-                                  $"{_stats.LateSamples} frames ran past the newest sample, {_stats.Bunched} bunched frames, clock eased {_stats.OffsetAdjust * 1000:0} ms");
-                    _stats.Frames = 0; _stats.Updates = 0; _stats.LateSamples = 0; _stats.Bunched = 0; _stats.MaxFrameGap = 0; _stats.MaxSampleGap = 0; _stats.OffsetAdjust = 0;
+                                  $"{_stats.LateSamples} frames ran past the newest sample, {_stats.Bunched} bunched frames, clock eased {_stats.OffsetAdjust * 1000:0} ms, " +
+                                  $"LAIA work {_stats.Busy * 1000 / Math.Max(1, _stats.Frames):0.0} ms per frame (max {_stats.MaxBusy * 1000:0} ms)");
+                    _stats.Frames = 0; _stats.Updates = 0; _stats.LateSamples = 0; _stats.Bunched = 0; _stats.Busy = 0; _stats.MaxBusy = 0; _stats.MaxFrameGap = 0; _stats.MaxSampleGap = 0; _stats.OffsetAdjust = 0;
                     _stats.Since = now;
                 }
                 if (double.IsNaN(_offset)) continue;
                 var rt = now - _offset - RenderDelay; // server time we're showing
                 List<Obj> objs;
                 lock (_gate) objs = _objs.Values.Where(o => o.Ready && !o.Removed && o.Samples.Count > 0).ToList();
+                var workStart = Now;
+                try { await MoveAll(objs, now, rt, frameDt, buf, gear); }
+                finally { var w = Now - workStart; _stats.Busy += w; _stats.MaxBusy = Math.Max(_stats.MaxBusy, w); }
+            }
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    private async Task MoveAll(List<Obj> objs, double now, double rt, double frameDt, byte[] buf, byte[] gear)
+    {
                 foreach (var o in objs)
                 {
                     if (o.Motion == "msfs")
@@ -490,9 +501,6 @@ internal sealed class TrafficRenderer : IAsyncDisposable
                     }
                     catch (Exception ex) { Log.Write("Traffic update failed: " + ex.Message); return; }
                 }
-            }
-        }
-        catch (OperationCanceledException) { }
     }
 
     public async ValueTask DisposeAsync()
