@@ -175,7 +175,7 @@ internal sealed class SimLink : IDisposable
                     if (resp.IsSuccessStatusCode && _traffic is { } tr && snap.Connected)
                     {
                         var reply = await resp.Content.ReadFromJsonAsync<SimStateReply>(cancellationToken: ct);
-                        if (reply is not null) tr.Update(reply.Traffic, reply.ServerTimeMs / 1000.0);
+                        if (reply is not null) tr.Update(reply.Traffic, reply.ServerTimeMs / 1000.0, reply.Motion ?? "msfs");
                     }
                 }
             }

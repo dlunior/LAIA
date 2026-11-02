@@ -43,6 +43,17 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, ServerSta
 
     public void Clear() { lock (_gate) _flights.Clear(); }
 
+    /// <summary>How LAIA Sim moves the aircraft (switchable on the control page to compare).</summary>
+    public string Motion { get; private set; } = "msfs";
+
+    public void SetMotion(string mode)
+    {
+        if (mode is not ("msfs" or "laia") || mode == Motion) return;
+        Motion = mode;
+        Clear(); // aircraft are created differently in each mode
+        log.LogInformation("Traffic motion mode: {mode}", mode);
+    }
+
     /// <summary>Starts a test flight at the airport nearest the user's aircraft. Returns a message for the control page.</summary>
     public (bool ok, string message) StartTest(string kind)
     {

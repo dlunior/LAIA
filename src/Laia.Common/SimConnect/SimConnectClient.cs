@@ -14,7 +14,7 @@ using Microsoft.Win32;
 
 namespace Laia.Common.SimConnect;
 
-public enum SimDataType : uint { Int32 = 1, Int64 = 2, Float32 = 3, Float64 = 4, String8 = 5, String32 = 6, String64 = 7, String128 = 8, String256 = 9, String260 = 10 }
+public enum SimDataType : uint { Int32 = 1, Int64 = 2, Float32 = 3, Float64 = 4, String8 = 5, String32 = 6, String64 = 7, String128 = 8, String256 = 9, String260 = 10, Waypoint = 14 }
 public enum SimPeriod : uint { Never = 0, Once = 1, VisualFrame = 2, SimFrame = 3, Second = 4 }
 
 /// <summary>One SIMOBJECT_DATA message: the values of a data definition, packed in definition order.</summary>
@@ -210,6 +210,14 @@ public sealed class SimConnectClient : IAsyncDisposable
     public Task<uint> SetDataOnSimObjectAsync(uint defineId, uint objectId, byte[] data)
     {
         var p = new Packet(0x10).U32(defineId).U32(objectId).U32(0).U32(1).U32((uint)data.Length);
+        p.Bytes(data);
+        return SendAsync(p);
+    }
+
+    /// <summary>Writes an array of fixed-size entries (e.g. AI WAYPOINT LIST) to an object.</summary>
+    public Task<uint> SetDataArrayOnSimObjectAsync(uint defineId, uint objectId, byte[] data, int count, int unitSize)
+    {
+        var p = new Packet(0x10).U32(defineId).U32(objectId).U32(0).U32((uint)count).U32((uint)unitSize);
         p.Bytes(data);
         return SendAsync(p);
     }

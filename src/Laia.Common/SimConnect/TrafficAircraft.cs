@@ -31,4 +31,6 @@ public sealed class SimStateReply
 {
     public List<TrafficAircraft> Traffic { get; set; } = new();
     public long ServerTimeMs { get; set; }
+    /// <summary>"msfs": MSFS's AI flies a rolling path from LAIA; "laia": LAIA sets the position every frame.</summary>
+    public string Motion { get; set; } = "msfs";
 }

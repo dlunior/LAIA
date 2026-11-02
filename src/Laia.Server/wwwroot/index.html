@@ -70,6 +70,7 @@
     <h2>AI traffic (test)</h2>
     <div class="muted">Puts one AI airliner on the active runway at the airport nearest you. The ATC PC flies it; your sim draws it with an AIG model.</div>
     <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap"><button id="tDep">Send a test departure</button><button id="tArr">Send a test arrival</button><button id="tClr" class="ghost">Remove traffic</button></div>
+    <div style="margin-top:10px" class="muted">Motion: <button id="mMsfs" class="ghost">MSFS flies</button> <button id="mLaia" class="ghost">LAIA moves</button> <span id="mNow"></span></div>
     <div class="muted" id="tMsg" style="margin-top:8px"></div>
     <dl id="tList"></dl>
   </section>
@@ -131,7 +132,10 @@ async function traffic(path){$("tMsg").textContent="…";try{const r=await fetch
 $("tDep").addEventListener("click",()=>traffic("/api/traffic/test/departure"));
 $("tArr").addEventListener("click",()=>traffic("/api/traffic/test/arrival"));
 $("tClr").addEventListener("click",()=>traffic("/api/traffic/clear"));
+$("mMsfs").addEventListener("click",()=>traffic("/api/traffic/motion/msfs"));
+$("mLaia").addEventListener("click",()=>traffic("/api/traffic/motion/laia"));
 async function pollTraffic(){try{const r=await fetch("/api/traffic");const t=await r.json();
+  $("mNow").textContent=t.motion==="msfs"?"(now: MSFS flies)":"(now: LAIA moves)";
   $("tList").innerHTML=(t.traffic||[]).map(a=>`<dt>${esc(a.callsign)} · ${esc(a.type)}</dt><dd>${esc(a.phase)} · ${Math.round(a.groundSpeed)} kt${a.onGround?"":" · "+Math.round(a.altFt).toLocaleString()+" ft"}</dd>`).join("");}catch(e){}}
 setInterval(pollTraffic,1000);
 $("reload").addEventListener("click",async()=>{$("planStatus").textContent="Loading…";try{const r=await fetch("/api/simbrief/reload",{method:"POST"});$("planStatus").textContent=(await r.json()).status;}catch(e){$("planStatus").textContent="Failed";}});

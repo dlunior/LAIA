@@ -64,10 +64,15 @@ app.MapPost("/api/sim/state", async (HttpContext ctx, ServerState s, SimBriefSer
     if (st.Connected && (justConnected || DateTime.UtcNow - sb.LastAttemptUtc > TimeSpan.FromMinutes(15)))
         _ = Task.Run(sb.RefreshAsync);
     // The reply carries the AI traffic for LAIA Sim to draw.
-    return Results.Json(new Laia.Common.SimConnect.SimStateReply { Traffic = st.Connected ? traffic.Snapshot() : new(), ServerTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() }, jsonOpts);
+    return Results.Json(new Laia.Common.SimConnect.SimStateReply { Traffic = st.Connected ? traffic.Snapshot() : new(), ServerTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), Motion = traffic.Motion }, jsonOpts);
 });
 
-app.MapGet("/api/traffic", (TrafficEngine t, RunwayDb r) => Results.Json(new { runways = r.Status, traffic = t.Snapshot() }, jsonOpts));
+app.MapGet("/api/traffic", (TrafficEngine t, RunwayDb r) => Results.Json(new { runways = r.Status, motion = t.Motion, traffic = t.Snapshot() }, jsonOpts));
+app.MapPost("/api/traffic/motion/{mode}", (string mode, TrafficEngine t) =>
+{
+    t.SetMotion(mode);
+    return Results.Json(new { ok = true, message = t.Motion == "msfs" ? "Motion: MSFS flies the aircraft along LAIA's path. Send a new test flight." : "Motion: LAIA moves the aircraft every frame. Send a new test flight." }, jsonOpts);
+});
 app.MapPost("/api/traffic/test/{kind}", (string kind, TrafficEngine t) =>
 {
     if (kind is not ("departure" or "arrival")) return Results.BadRequest();

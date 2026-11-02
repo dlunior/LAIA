@@ -109,7 +109,9 @@ internal sealed class AigCatalog
 /// </summary>
 internal sealed class TrafficRenderer : IAsyncDisposable
 {
-    private const uint DefPos = 10, DefGround = 11, DefGear = 12;
+    private const uint DefPos = 10, DefGround = 11, DefGear = 12, DefWaypoints = 13;
+    private const uint WpSpeedRequested = 0x04, WpComputeVerticalSpeed = 0x10, WpOnGround = 0x00100000;
+    public string Motion { get; private set; } = "msfs";
     private const uint EvFreezeLatLon = 100, EvFreezeAlt = 101, EvFreezeAtt = 102, EvFrame = 120;
     // Light switches, in the order of the TrafficAircraft.Lights bits.
     private static readonly string[] LightEvents =
@@ -142,6 +144,7 @@ internal sealed class TrafficRenderer : IAsyncDisposable
         public readonly List<(double t, TrafficAircraft s)> Samples = new();
         public uint CreateReq, GroundReq, ObjectId;
         public bool Ready, Removed;
+        public string Motion = "msfs";
         public double GroundAlt = double.NaN, CgFt = double.NaN, SmoothGround = double.NaN;
         public double LastLights = -100, LastGear = -100;
         public int SentLights = -1;
@@ -159,6 +162,7 @@ internal sealed class TrafficRenderer : IAsyncDisposable
         await _sc.AddToDataDefinitionAsync(DefGround, "GROUND ALTITUDE", "feet", SimDataType.Float64);
         await _sc.AddToDataDefinitionAsync(DefGround, "STATIC CG TO GROUND", "feet", SimDataType.Float64);
         await _sc.AddToDataDefinitionAsync(DefGear, "GEAR HANDLE POSITION", "bool", SimDataType.Float64);
+        await _sc.AddToDataDefinitionAsync(DefWaypoints, "AI WAYPOINT LIST", "number", SimDataType.Waypoint);
         await _sc.MapClientEventToSimEventAsync(EvFreezeLatLon, "FREEZE_LATITUDE_LONGITUDE_SET");
         await _sc.MapClientEventToSimEventAsync(EvFreezeAlt, "FREEZE_ALTITUDE_SET");
         await _sc.MapClientEventToSimEventAsync(EvFreezeAtt, "FREEZE_ATTITUDE_SET");
@@ -175,8 +179,13 @@ internal sealed class TrafficRenderer : IAsyncDisposable
     private double Now => _clock.Elapsed.TotalSeconds;
 
     /// <summary>Called with the server's current traffic list (about 4 times a second).</summary>
-    public void Update(List<TrafficAircraft> list, double serverTimeSec)
+    public void Update(List<TrafficAircraft> list, double serverTimeSec, string motion)
     {
+        if (motion != Motion)
+        {
+            Log.Write($"Traffic motion mode: {motion}");
+            Motion = motion;
+        }
         var toCreate = new List<Obj>();
         var toRemove = new List<Obj>();
         lock (_gate)
@@ -201,7 +210,7 @@ internal sealed class TrafficRenderer : IAsyncDisposable
                 var ts = t.TimeMs > 0 ? t.TimeMs / 1000.0 : serverTimeSec;
                 if (!_objs.TryGetValue(t.Id, out var o))
                 {
-                    o = new Obj { Latest = t, CreateReq = _nextReq++, GroundReq = _nextReq++ };
+                    o = new Obj { Latest = t, CreateReq = _nextReq++, GroundReq = _nextReq++, Motion = Motion };
                     _objs[t.Id] = o;
                     toCreate.Add(o);
                 }
@@ -219,6 +228,45 @@ internal sealed class TrafficRenderer : IAsyncDisposable
         }
         foreach (var o in toCreate) _ = CreateAsync(o);
         foreach (var o in toRemove) _ = RemoveAsync(o);
+        List<Obj> flown;
+        lock (_gate) flown = _objs.Values.Where(o => o.Ready && !o.Removed && o.Motion == "msfs").ToList();
+        foreach (var o in flown) _ = SendPathAsync(o);
+    }
+
+    /// <summary>
+    /// "MSFS flies" mode: give MSFS's AI a short path ahead of where LAIA has the aircraft (2 and 6 seconds
+    /// ahead at its speed). Refreshed 4 times a second, so MSFS keeps flying smoothly toward LAIA's track.
+    /// </summary>
+    private static byte[] BuildPath(TrafficAircraft t)
+    {
+        var buf = new byte[44 * 2];
+        var i = 0;
+        foreach (var ahead in new[] { 2.0, 6.0 })
+        {
+            var nm = Math.Max(t.GroundSpeed, t.OnGround ? 0 : 120) * ahead / 3600;
+            if (t.OnGround && t.GroundSpeed < 1) nm = 0.002 * (i + 1); // holding: points just ahead, speed zero
+            var b = t.Heading * Math.PI / 180;
+            var lat = t.Lat + nm * Math.Cos(b) / 60.0;
+            var lon = t.Lon + nm * Math.Sin(b) / (60.0 * Math.Cos(t.Lat * Math.PI / 180));
+            var alt = t.AltFt + t.VerticalSpeed / 60 * ahead;
+            var flags = WpSpeedRequested | (t.OnGround ? WpOnGround : WpComputeVerticalSpeed);
+            var span = buf.AsSpan(i * 44);
+            BinaryPrimitives.WriteDoubleLittleEndian(span, lat);
+            BinaryPrimitives.WriteDoubleLittleEndian(span[8..], lon);
+            BinaryPrimitives.WriteDoubleLittleEndian(span[16..], alt);
+            BinaryPrimitives.WriteUInt32LittleEndian(span[24..], flags);
+            BinaryPrimitives.WriteDoubleLittleEndian(span[28..], t.OnGround && t.GroundSpeed < 1 ? 0 : t.GroundSpeed);
+            BinaryPrimitives.WriteDoubleLittleEndian(span[36..], 0);
+            i++;
+        }
+        return buf;
+    }
+
+    private async Task SendPathAsync(Obj o)
+    {
+        var buf = BuildPath(o.Latest);
+        try { await _sc.SetDataArrayOnSimObjectAsync(DefWaypoints, o.ObjectId, buf, 2, 44); }
+        catch (Exception ex) { Log.Write("Traffic path failed: " + ex.Message); }
     }
 
     private async Task CreateAsync(Obj o)
@@ -240,6 +288,14 @@ internal sealed class TrafficRenderer : IAsyncDisposable
         lock (_gate) o = _objs.Values.FirstOrDefault(x => x.CreateReq == req);
         if (o is null) { _ = _sc.AIRemoveObjectAsync(objectId, _nextReq++); return; } // removed before it appeared
         o.ObjectId = objectId;
+        if (o.Motion == "msfs")
+        {
+            // MSFS's AI keeps control and flies the path LAIA sends.
+            o.Ready = true;
+            Log.Write($"Traffic: {o.Latest.Callsign} is object {objectId} (MSFS flies)");
+            _ = SendPathAsync(o);
+            return;
+        }
         try
         {
             await _sc.AIReleaseControlAsync(objectId, _nextReq++);
@@ -335,6 +391,22 @@ internal sealed class TrafficRenderer : IAsyncDisposable
                 lock (_gate) objs = _objs.Values.Where(o => o.Ready && !o.Removed && o.Samples.Count > 0).ToList();
                 foreach (var o in objs)
                 {
+                    if (o.Motion == "msfs")
+                    {
+                        var tl = o.Latest;
+                        if (tl.Lights != o.SentLights || now - o.LastLights > 5)
+                        {
+                            o.SentLights = tl.Lights;
+                            o.LastLights = now;
+                            try
+                            {
+                                for (var i = 0; i < LightEvents.Length; i++)
+                                    await _sc.TransmitClientEventAsync(o.ObjectId, EvLightBase + (uint)i, (uint)((tl.Lights >> i) & 1));
+                            }
+                            catch { }
+                        }
+                        continue;
+                    }
                     (double lat, double lon, double alt, double agl, double hdg, double pitch, double bank, bool ground) p;
                     lock (_gate)
                     {
