@@ -72,8 +72,8 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, ServerSta
         }
         else
         {
-            f.DistanceFromThreshold = -10; // 10 nm final
-            f.AglFt = 10 * 318.4;          // 3 degree glidepath
+            f.DistanceFromThreshold = -5;  // 5 nm final
+            f.AglFt = 5 * 318.4;           // 3 degree glidepath (~1,600 ft)
             ac.GroundSpeed = 145;
             ac.GearDown = true;
         }
@@ -85,7 +85,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, ServerSta
             _flights.Add(f);
         }
         log.LogInformation("Test {kind}: {cs} {type} runway {rwy} at {apt}", kind, ac.Callsign, type, rwy.Id, rwy.Airport);
-        var what = kind == "departure" ? $"lined up on runway {rwy.Id}, departing in about 25 seconds" : $"on a 10-mile final for runway {rwy.Id}";
+        var what = kind == "departure" ? $"lined up on runway {rwy.Id}, departing in about 25 seconds" : $"on a 5-mile final for runway {rwy.Id}";
         return (true, $"{name} {number} ({type}) is {what} at {rwy.Airport}.");
     }
 
