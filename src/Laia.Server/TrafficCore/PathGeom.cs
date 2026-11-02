@@ -33,6 +33,8 @@ public sealed class PathGeom
     /// <summary>Distance along the path at which each input point is reached (corner points: middle of the arc).</summary>
     public double[] PointS { get; }
     public IReadOnlyList<V2> Points { get; }
+    /// <summary>Distance along the path of each kept (de-duplicated) point in Points.</summary>
+    public double[] KeptS { get; }
     public double Length { get; }
     /// <summary>Stretches with a speed limit from their curvature: (start, end, limit in m/s).</summary>
     public List<(double s0, double s1, double vmax)> Curves { get; } = new();
@@ -107,6 +109,7 @@ public sealed class PathGeom
             else keptS[i] = s;
         }
         Length = s;
+        KeptS = keptS;
         PointS = map.Select(k => keptS[k]).ToArray();
     }
 

@@ -375,7 +375,7 @@ public sealed class TrafficWorld
     {
         var r = f.Rwy!.Runway;
         if (RunwayBusy(r, f)) return false;
-        if (ArrivalEta(r) < 60) return false;
+        if (ArrivalEta(r) < 45) return false;
         return WakeRemaining(f) <= 0;
     }
 
@@ -662,21 +662,13 @@ public sealed class TrafficWorld
         pts.Add(p + V2.FromBearing(dir, 200));
         // Remaining route points (the kept points after the current distance).
         var remaining = new List<V2>();
-        var keptS = KeptPointS(path);
+        var keptS = path.KeptS;
         for (var i = 0; i < path.Points.Count; i++) if (keptS[i] > f.S + 300) remaining.Add(path.Points[i]);
         pts.AddRange(remaining);
         var thrIndex = pts.Count - 2;
         f.Path = AirPath(pts, i => i >= thrIndex ? 1 : i <= 8 ? f.Ias : 180, f.AltFt);
         f.ThrS = f.Path.PointS[thrIndex];
         f.S = 0;
-    }
-
-    /// <summary>Distance along the path of each kept (de-duplicated) point.</summary>
-    private static double[] KeptPointS(PathGeom path)
-    {
-        var res = new double[path.Points.Count];
-        for (var i = 0; i < res.Length; i++) res[i] = path.Project(path.Points[i]);
-        return res;
     }
 
     private bool DeparturesWaiting => Flights.Any(o => o.Phase == "holding short" && Time - o.PhaseTime > 40);
