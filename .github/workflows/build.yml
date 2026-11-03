@@ -79,13 +79,6 @@ jobs:
           ./build/smoke-test.ps1 -Dist out\dist *>&1 | Tee-Object -FilePath out\smoke.log
           if (-not (Select-String -Path out\smoke.log -Pattern "SMOKE PASS" -Quiet)) { throw "end-to-end test failed" }
 
-      - name: Upload installers
-        uses: actions/upload-artifact@v4
-        with:
-          name: LAIA-installers-${{ env.VERSION }}
-          path: out/dist/*.exe
-          compression-level: 0
-
       - name: Publish release
         if: github.ref == 'refs/heads/main'
         env:
