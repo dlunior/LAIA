@@ -26,6 +26,7 @@ builder.Services.AddSingleton<SimBriefService>();
 builder.Services.AddSingleton<RunwayDb>();
 builder.Services.AddHostedService<RunwayUpdater>();
 builder.Services.AddSingleton<AirportStore>();
+builder.Services.AddSingleton<Updater>();
 builder.Services.AddSingleton<FlightSource>();
 builder.Services.AddSingleton<TrafficEngine>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<TrafficEngine>());
@@ -54,6 +55,37 @@ var logoPng = Resource("logo.png");
 app.MapGet("/", () => Results.Bytes(indexHtml, "text/html; charset=utf-8"));
 app.MapGet("/logo.png", () => Results.Bytes(logoPng, "image/png"));
 
+// Updates: the sim PC can see whether a newer LAIA exists and update this PC without anyone walking over.
+app.MapGet("/api/update", async (Updater u, ServerState s) =>
+{
+    var latest = await u.LatestAsync();
+    return Results.Json(new
+    {
+        server = s.Version,
+        latest = latest?.Version,
+        serverUpdate = latest is not null && Laia.Common.Updates.IsNewer(latest.Version, s.Version),
+        updating = u.Updating,
+        status = u.Status,
+    }, jsonOpts);
+});
+app.MapPost("/api/update/server", async (Updater u) =>
+{
+    var (ok, message) = await u.UpdateAsync();
+    return Results.Json(new { ok, message }, jsonOpts);
+});
+// Logs, so LAIA Sim can keep a copy on the sim PC.
+app.MapGet("/api/logs/{name}", (string name) =>
+{
+    var file = name switch { "server" => "server.log", "setup" => "setup.log", _ => null };
+    if (file is null) return Results.NotFound();
+    var path = Path.Combine(Paths.LogsDir, file);
+    if (!File.Exists(path)) return Results.Text("", "text/plain");
+    using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+    const long max = 3_000_000;
+    if (fs.Length > max) fs.Seek(-max, SeekOrigin.End);
+    using var sr = new StreamReader(fs);
+    return Results.Text(sr.ReadToEnd(), "text/plain; charset=utf-8");
+});
 app.MapGet("/api/status", (ServerState s, FrequencyDb f, SimBriefService sb) => Results.Json(s.Snapshot(FlightInfo(s, f, sb)), jsonOpts));
 
 // LAIA Sim posts the user's aircraft about once a second.

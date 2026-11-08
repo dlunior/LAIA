@@ -22,6 +22,8 @@ internal sealed class TrayApp : ApplicationContext
     private readonly ToolStripMenuItem _statusItem;
     private readonly ToolStripMenuItem _pttItem;
     private readonly ToolStripMenuItem _logItem;
+    private readonly ToolStripMenuItem _updateItem;
+    private readonly Updater _updates;
     private readonly System.Windows.Forms.Timer _heartbeat = new() { Interval = 5000 };
     private readonly Dictionary<Light, Icon> _icons;
     private ServerInfo? _server;
@@ -44,6 +46,8 @@ internal sealed class TrayApp : ApplicationContext
         _statusItem = new ToolStripMenuItem("Looking for LAIA Server…") { Enabled = false };
         _pttItem = new ToolStripMenuItem("Settings…", null, async (_, _) => await OpenSettingsAsync()) { Font = new Font("Segoe UI", 10f, FontStyle.Bold) };
         _logItem = new ToolStripMenuItem("Show radio transcript", null, (_, _) => ToggleLog()) { Checked = _settings.ShowTranscript };
+        _updates = new Updater(() => _server);
+        _updateItem = new ToolStripMenuItem("Check for updates", null, async (_, _) => await UpdateClickedAsync());
         var menu = new ContextMenuStrip { ShowImageMargin = false, Font = new Font("Segoe UI", 10f) };
         menu.Items.Add(_statusItem);
         menu.Items.Add(_simItem);
@@ -51,6 +55,7 @@ internal sealed class TrayApp : ApplicationContext
         menu.Items.Add(_pttItem);
         menu.Items.Add(_logItem);
         menu.Items.Add(new ToolStripMenuItem("Open ATC control page", null, (_, _) => OpenControlPage()));
+        menu.Items.Add(_updateItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(new ToolStripMenuItem("Exit LAIA Sim", null, (_, _) => ExitThread()));
 
@@ -74,7 +79,13 @@ internal sealed class TrayApp : ApplicationContext
         _sim.StatusChanged += st => ui?.Post(_ => _simItem.Text = st, null);
         _sim.Start();
 
-        _heartbeat.Tick += async (_, _) => await HeartbeatAsync();
+        _updates.Changed += () => ui?.Post(_ => RefreshUpdateItem(), null);
+        _updates.Notify += (title, text) => ui?.Post(_ => _tray.ShowBalloonTip(6000, title, text, ToolTipIcon.Info), null);
+        _heartbeat.Tick += async (_, _) =>
+        {
+            await HeartbeatAsync();
+            try { await _updates.TickAsync(); RefreshUpdateItem(); } catch { }
+        };
         _heartbeat.Start();
 
         // Kick off once the message loop is running.
@@ -87,6 +98,27 @@ internal sealed class TrayApp : ApplicationContext
             await DiscoverAsync();
         };
         kick.Start();
+    }
+
+    // ------------------------------------------------------------------ updates
+
+    private void RefreshUpdateItem()
+    {
+        _updateItem.Text = _updates.Available ? _updates.MenuText : "Check for updates";
+        _updateItem.Font = new Font("Segoe UI", 10f, _updates.Available ? FontStyle.Bold : FontStyle.Regular);
+    }
+
+    private async Task UpdateClickedAsync()
+    {
+        if (!_updates.Available)
+        {
+            await _updates.CheckAsync();
+            RefreshUpdateItem();
+            if (!_updates.Available) { _tray.ShowBalloonTip(4000, "LAIA", $"LAIA is up to date ({Updater.Current}).", ToolTipIcon.Info); return; }
+        }
+        var answer = MessageBox.Show($"{_updates.MenuText}?\n\nThe ATC PC updates itself and restarts (a few minutes). LAIA Sim closes while its installer runs.",
+            "LAIA update", MessageBoxButtons.OKCancel, MessageBoxIcon.Question);
+        if (answer == DialogResult.OK) await _updates.RunAsync();
     }
 
     // ------------------------------------------------------------------ server connection
