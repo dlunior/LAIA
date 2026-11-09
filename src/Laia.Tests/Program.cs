@@ -198,7 +198,7 @@ return failures.Count == 0 ? 0 : 1;
 sealed class BigOnlySource : IFlightSource
 {
     public AircraftIdentity NewAircraft(string airport, int maxGateSize, Random rng, IReadOnlyCollection<string>? airlines = null) => new("UAL", "B772", "UAL" + rng.Next(100, 999), "KXXX");
-    public (string callsign, string other) NewFlight(string airport, string airline, bool departure, Random rng) => (airline + rng.Next(100, 999), "KYYY");
+    public (string callsign, string other) NewFlight(string airport, string airline, bool departure, Random rng, string type = "") => (airline + rng.Next(100, 999), "KYYY");
 }
 
 sealed class TestSource : IFlightSource
@@ -210,7 +210,7 @@ sealed class TestSource : IFlightSource
         var (a, t) = ok[rng.Next(ok.Length)];
         return new AircraftIdentity(a, t, a + rng.Next(100, 3000), "KXXX");
     }
-    public (string callsign, string other) NewFlight(string airport, string airline, bool departure, Random rng) => (airline + rng.Next(100, 3000), "KYYY");
+    public (string callsign, string other) NewFlight(string airport, string airline, bool departure, Random rng, string type = "") => (airline + rng.Next(100, 3000), "KYYY");
 }
 
 /// <summary>A made-up airport: runway 09/27 (3,000 m), a parallel taxiway, six connectors, an apron with 16 gates.</summary>

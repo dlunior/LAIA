@@ -206,7 +206,7 @@ public sealed class AirportModel
             var pk = d.Parkings[k];
             var node = np + k;
             var spot = new ParkingSpot { Index = k, Node = node, P = Nodes[node], Heading = Geo2.Norm(pk.Heading), RadiusM = pk.RadiusM, Type = pk.Type, Label = pk.Label(),
-                Airlines = pk.Airlines.Select(AirlineCodes.ToIcao).Where(c => c.Length == 3).Distinct().ToList() };
+                Airlines = pk.Airlines.SelectMany(AirlineCodes.ToIcaoList).Distinct().ToList() };
             var link = Adj[node].Where(e => e.B < np).OrderBy(e => e.Len).FirstOrDefault();
             if (link is not null) spot.Access = link.B;
             else
@@ -390,6 +390,21 @@ public static class AirlineCodes
         ["SN"] = "BEL", ["LO"] = "LOT", ["W6"] = "WZZ", ["NH"] = "ANA", ["JL"] = "JAL", ["CX"] = "CPA", ["SQ"] = "SIA", ["KE"] = "KAL",
         ["QF"] = "QFA", ["NZ"] = "ANZ", ["LA"] = "LAN", ["ET"] = "ETH",
     };
+
+    // Scenery codes like "DALX" mean the airline's regional partners (Delta Connection etc.); EGF is American Eagle's old code.
+    private static readonly Dictionary<string, string[]> Partners = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["DALX"] = new[] { "EDV", "SKW", "RPA" }, ["AALX"] = new[] { "ENY", "PDT", "JIA", "SKW", "RPA" }, ["EGF"] = new[] { "ENY" },
+        ["UALX"] = new[] { "SKW", "RPA", "ASH", "GJS", "UCA" }, ["ACAX"] = new[] { "JZA", "SKV" }, ["ASAX"] = new[] { "QXE", "SKW" },
+    };
+
+    public static IEnumerable<string> ToIcaoList(string code)
+    {
+        code = (code ?? "").Trim().ToUpperInvariant();
+        if (Partners.TryGetValue(code, out var list)) return list;
+        var one = ToIcao(code);
+        return one.Length == 3 ? new[] { one } : Array.Empty<string>();
+    }
 
     public static string ToIcao(string code)
     {

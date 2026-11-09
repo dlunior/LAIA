@@ -31,11 +31,70 @@ public sealed class FlightSource(SettingsStore settings, ILogger<FlightSource> l
         new("NKS", "A320", 2), new("SKW", "E75L", 2), new("RPA", "E75L", 2), new("UAL", "B772", 1), new("DAL", "A333", 1),
     };
 
-    private static readonly string[] Destinations =
+    // Airports used for made-up flights (when there's no real schedule), with positions for realistic distances.
+    private static readonly Dictionary<string, (double lat, double lon)> Airports = new()
     {
-        "KATL", "KORD", "KDFW", "KDEN", "KLAX", "KJFK", "KLGA", "KBOS", "KMCO", "KMIA", "KSEA", "KSFO", "KLAS", "KPHX", "KIAH", "KMSP", "KDTW",
-        "KPHL", "KCLT", "KBWI", "KDCA", "KSLC", "KSAN", "KTPA", "KFLL", "KBNA", "KAUS", "KMSY", "KSTL", "KRDU", "CYYZ", "CYUL", "CYVR", "EGLL", "LFPG", "EHAM", "MMMX",
+        ["KATL"] = (33.64, -84.43), ["KORD"] = (41.98, -87.90), ["KDFW"] = (32.90, -97.04), ["KDEN"] = (39.86, -104.67), ["KLAX"] = (33.94, -118.41),
+        ["KJFK"] = (40.64, -73.78), ["KLGA"] = (40.78, -73.87), ["KEWR"] = (40.69, -74.17), ["KBOS"] = (42.36, -71.01), ["KMCO"] = (28.43, -81.31),
+        ["KMIA"] = (25.79, -80.29), ["KSEA"] = (47.45, -122.31), ["KSFO"] = (37.62, -122.38), ["KLAS"] = (36.08, -115.15), ["KPHX"] = (33.43, -112.01),
+        ["KIAH"] = (29.98, -95.34), ["KMSP"] = (44.88, -93.22), ["KDTW"] = (42.21, -83.35), ["KPHL"] = (39.87, -75.24), ["KCLT"] = (35.21, -80.94),
+        ["KBWI"] = (39.18, -76.67), ["KDCA"] = (38.85, -77.04), ["KIAD"] = (38.95, -77.46), ["KSLC"] = (40.79, -111.98), ["KSAN"] = (32.73, -117.19),
+        ["KTPA"] = (27.98, -82.53), ["KFLL"] = (26.07, -80.15), ["KBNA"] = (36.12, -86.68), ["KAUS"] = (30.19, -97.67), ["KMSY"] = (29.99, -90.26),
+        ["KSTL"] = (38.75, -90.37), ["KRDU"] = (35.88, -78.79), ["KPIT"] = (40.49, -80.23), ["KCLE"] = (41.41, -81.85), ["KCMH"] = (39.998, -82.89),
+        ["KIND"] = (39.72, -86.29), ["KMCI"] = (39.30, -94.71), ["KMKE"] = (42.95, -87.90), ["KRIC"] = (37.51, -77.32), ["KORF"] = (36.89, -76.20),
+        ["KBUF"] = (42.94, -78.73), ["KROC"] = (43.12, -77.67), ["KSYR"] = (43.11, -76.11), ["KALB"] = (42.75, -73.80), ["KBTV"] = (44.47, -73.15),
+        ["KPWM"] = (43.65, -70.31), ["KCHS"] = (32.90, -80.04), ["KSAV"] = (32.13, -81.20), ["KJAX"] = (30.49, -81.69), ["KRSW"] = (26.54, -81.76),
+        ["KPBI"] = (26.68, -80.10), ["KMEM"] = (35.04, -89.98), ["KCVG"] = (39.05, -84.67), ["KSDF"] = (38.17, -85.74), ["KGSO"] = (36.10, -79.94),
+        ["KPDX"] = (45.59, -122.60), ["KHOU"] = (29.65, -95.28), ["KDAL"] = (32.85, -96.85), ["KMDW"] = (41.79, -87.75), ["KSJC"] = (37.36, -121.93),
+        ["CYYZ"] = (43.68, -79.63), ["CYUL"] = (45.47, -73.74), ["CYVR"] = (49.19, -123.18), ["CYYC"] = (51.13, -114.01), ["CYOW"] = (45.32, -75.67),
+        ["CYHZ"] = (44.88, -63.51), ["CYWG"] = (49.91, -97.24), ["CYEG"] = (53.31, -113.58), ["CYQB"] = (46.79, -71.39), ["CYTZ"] = (43.63, -79.40),
     };
+
+    // Where the big airlines mostly fly from and to (their hubs).
+    private static readonly Dictionary<string, string[]> Hubs = new()
+    {
+        ["DAL"] = new[] { "KATL", "KDTW", "KMSP", "KSLC", "KSEA", "KBOS", "KJFK", "KLAX", "KLGA" },
+        ["EDV"] = new[] { "KATL", "KDTW", "KMSP", "KJFK", "KLGA", "KCVG" },
+        ["AAL"] = new[] { "KDFW", "KCLT", "KORD", "KMIA", "KPHL", "KPHX", "KDCA", "KJFK", "KLAX", "KLGA" },
+        ["ENY"] = new[] { "KDFW", "KORD", "KMIA", "KLGA", "KDCA", "KJFK" },
+        ["PDT"] = new[] { "KCLT", "KPHL", "KDCA" }, ["JIA"] = new[] { "KCLT", "KPHL", "KDCA" },
+        ["UAL"] = new[] { "KORD", "KDEN", "KIAH", "KEWR", "KSFO", "KIAD", "KLAX" },
+        ["ACA"] = new[] { "CYYZ", "CYUL", "CYVR", "CYYC" }, ["JZA"] = new[] { "CYYZ", "CYUL", "CYOW", "CYHZ", "CYQB" },
+        ["ASA"] = new[] { "KSEA", "KPDX", "KSFO", "KLAX", "KSAN" }, ["JBU"] = new[] { "KBOS", "KJFK", "KFLL", "KMCO" },
+        ["WJA"] = new[] { "CYYC", "CYYZ", "CYVR" }, ["POE"] = new[] { "CYTZ" },
+    };
+
+    /// <summary>The other end of a made-up flight: a distance the type can fly, often the airline's hub.</summary>
+    private static string PickOther(string airport, string airline, string type, Random rng)
+    {
+        var maxNm = Perf.For(type).Family switch
+        {
+            "turboprop" => 450, "regional jet" => 1100, "large regional" => 1700, "narrowbody" => 2600, "757" => 3300, _ => 6000,
+        };
+        var minNm = Perf.For(type).Family is "widebody" or "heavy" ? 900 : 120;
+        var lgaPerimeter = airport == "KLGA"; // LaGuardia's 1,500-mile perimeter rule (Denver excepted)
+        var here = Airports.TryGetValue(airport, out var h) ? h : ((double, double)?)null;
+        bool Fits(string icao)
+        {
+            if (icao == airport || !Airports.TryGetValue(icao, out var p)) return false;
+            if (here is null) return true;
+            var nm = Geo2.DistanceNm(here.Value.Item1, here.Value.Item2, p.lat, p.lon);
+            if (lgaPerimeter && icao != "KDEN" && nm > 1300) return false;
+            return nm >= minNm && nm <= maxNm;
+        }
+        // Regional partners fly to their mainline partner's hubs.
+        if (Hubs.TryGetValue(airline, out var hubs) && rng.NextDouble() < 0.7)
+        {
+            var ok = hubs.Where(Fits).ToList();
+            if (ok.Count > 0) return ok[rng.Next(ok.Count)];
+        }
+        var all = Airports.Keys.Where(Fits).ToList();
+        // Mostly domestic: Canadian airlines to Canada (and some US), US airlines to the US.
+        var canadian = airline is "ACA" or "JZA" or "WJA" or "POE" or "TSC" or "SWG" or "FLE" or "ROU" or "SKV";
+        var pref = all.Where(a => canadian ? a.StartsWith('C') || rng.NextDouble() < 0.3 : a.StartsWith('K') || rng.NextDouble() < 0.15).ToList();
+        if (pref.Count > 0) return pref[rng.Next(pref.Count)];
+        return all.Count > 0 ? all[rng.Next(all.Count)] : "KATL";
+    }
 
     public void SetCatalog(TrafficCatalog c)
     {
@@ -52,7 +111,7 @@ public sealed class FlightSource(SettingsStore settings, ILogger<FlightSource> l
     private static readonly HashSet<string> NorthAmerica = new()
     {
         "DAL", "UAL", "AAL", "SWA", "JBU", "ASA", "NKS", "FFT", "SKW", "RPA", "ENY", "EDV", "JIA", "PDT", "AAY", "SCX", "HAL", "MXY", "BRE", "QXE",
-        "GJS", "ASH", "CPZ", "UCA", "ACA", "WJA", "JZA", "POE", "TSC", "SWG", "ROU", "FLE", "WSW", "VXP",
+        "GJS", "ASH", "CPZ", "UCA", "ACA", "WJA", "JZA", "POE", "TSC", "SWG", "ROU", "FLE", "WSW", "VXP", "SKV", "AWI",
     };
     private static readonly HashSet<string> Europe = new()
     {
@@ -73,12 +132,13 @@ public sealed class FlightSource(SettingsStore settings, ILogger<FlightSource> l
         // A stand that belongs to particular airlines gets one of theirs (if a model is installed).
         if (airlines is { Count: > 0 })
         {
-            var mine = cat.Where(e => airlines.Contains(e.Airline)).ToList();
+            var region0 = RegionFor(airport);
+            var mine = cat.Where(e => airlines.Contains(e.Airline) && (region0 is null || region0.Contains(e.Airline))).ToList();
             if (mine.Count > 0)
             {
                 var g = mine.GroupBy(e => e.Airline).ToList();
                 var pickOwn = WeightedPick(g[rng.Next(g.Count)].ToList(), rng);
-                var (ocs, oother) = NewFlight(airport, pickOwn.Airline, true, rng);
+                var (ocs, oother) = NewFlight(airport, pickOwn.Airline, true, rng, pickOwn.Type);
                 return new AircraftIdentity(pickOwn.Airline, pickOwn.Type, ocs, oother);
             }
         }
@@ -87,6 +147,16 @@ public sealed class FlightSource(SettingsStore settings, ILogger<FlightSource> l
         {
             var local = cat.Where(e => region.Contains(e.Airline)).ToList();
             if (local.Count > 0) cat = local;
+            else
+            {
+                // No local airline has a type this small: use the region's smallest types rather than a foreign airline.
+                var regional = Catalog().Where(e => region.Contains(e.Airline)).ToList();
+                if (regional.Count > 0)
+                {
+                    var smallest = regional.Min(e => Perf.For(e.Type).GateSize);
+                    cat = regional.Where(e => Perf.For(e.Type).GateSize == smallest).ToList();
+                }
+            }
         }
         // Nothing small enough for this gate: take the smallest types available rather than nothing.
         if (cat.Count == 0)
@@ -114,7 +184,7 @@ public sealed class FlightSource(SettingsStore settings, ILogger<FlightSource> l
             var g = byAirline[rng.Next(byAirline.Count)].ToList();
             pick = WeightedPick(g, rng);
         }
-        var (cs, other) = NewFlight(airport, pick.Airline, true, rng);
+        var (cs, other) = NewFlight(airport, pick.Airline, true, rng, pick.Type);
         return new AircraftIdentity(pick.Airline, pick.Type, cs, other);
     }
 
@@ -126,7 +196,7 @@ public sealed class FlightSource(SettingsStore settings, ILogger<FlightSource> l
         return list[^1];
     }
 
-    public (string callsign, string other) NewFlight(string airport, string airline, bool departure, Random rng)
+    public (string callsign, string other) NewFlight(string airport, string airline, bool departure, Random rng, string type = "")
     {
         var sched = Schedule(airport).Where(s => s.Airline == airline && s.Departure == departure).ToList();
         if (sched.Count > 0)
@@ -138,8 +208,7 @@ public sealed class FlightSource(SettingsStore settings, ILogger<FlightSource> l
             return (s.Callsign, s.Other);
         }
         var number = airline switch { "SKW" or "RPA" or "ENY" or "EDV" or "JIA" or "PDT" => rng.Next(3000, 6000), _ => rng.Next(100, 2999) };
-        var dests = Destinations.Where(d => d != airport).ToArray();
-        return ($"{airline}{number}", dests[rng.Next(dests.Length)]);
+        return ($"{airline}{number}", PickOther(airport, airline, type, rng));
     }
 
     private List<SchedFlight> Schedule(string airport)

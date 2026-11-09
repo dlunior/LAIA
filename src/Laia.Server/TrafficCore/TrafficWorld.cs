@@ -15,7 +15,7 @@ public interface IFlightSource
     /// </summary>
     AircraftIdentity NewAircraft(string airport, int maxGateSize, Random rng, IReadOnlyCollection<string>? airlines = null);
     /// <summary>A flight number and the other airport for this airline's next departure or arrival.</summary>
-    (string callsign, string other) NewFlight(string airport, string airline, bool departure, Random rng);
+    (string callsign, string other) NewFlight(string airport, string airline, bool departure, Random rng, string type = "");
 }
 
 public sealed class Stop
@@ -276,7 +276,7 @@ public sealed class TrafficWorld
             if (s is null) return null;
             f = SpawnParked(s);
         }
-        var (cs, other) = Source.NewFlight(Apt.Icao, f.Airline, true, Rng);
+        var (cs, other) = Source.NewFlight(Apt.Icao, f.Airline, true, Rng, f.Type);
         f.Callsign = cs;
         f.Other = other;
         f.Kind = "departure";
@@ -587,7 +587,7 @@ public sealed class TrafficWorld
             id = Source.NewAircraft(Apt.Icao, 2, Rng);
             perf = Perf.For(id.Type);
         } while (rwy.LengthM < perf.MinRunwayM && ++tries < 6);
-        var (cs, other) = Source.NewFlight(Apt.Icao, id.Airline, false, Rng);
+        var (cs, other) = Source.NewFlight(Apt.Icao, id.Airline, false, Rng, id.Type);
         var f = new Flight { Id = NewId(), Callsign = cs, Airline = id.Airline, Type = id.Type, Other = other, Kind = "arrival", P = perf, Rwy = rwy, Test = test };
         f.OnGround = false;
         f.Gear = false;
@@ -1227,7 +1227,7 @@ public sealed class TrafficWorld
             return (true, $"{f.Callsign} ({f.Type}) is about to push back from {f.Spot?.Label ?? "a gate"} for runway {DepRwy.Ident}.");
         }
         var id = Source.NewAircraft(Apt.Icao, 1, Rng);
-        var (cs, other) = Source.NewFlight(Apt.Icao, id.Airline, true, Rng);
+        var (cs, other) = Source.NewFlight(Apt.Icao, id.Airline, true, Rng, id.Type);
         var rwy = DepRwy;
         var t = new Flight { Id = NewId(), Callsign = cs, Airline = id.Airline, Type = id.Type, Other = other, Kind = "departure", P = Perf.For(id.Type), Rwy = rwy, Test = true };
         t.Pos = rwy.Threshold + rwy.Dir * 60;
