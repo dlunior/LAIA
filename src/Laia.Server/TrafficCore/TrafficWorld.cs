@@ -306,6 +306,57 @@ public sealed class TrafficWorld
         Log($"{f.Callsign}: pushing back from {s.Label} ({plan.Describe()})");
     }
 
+    /// <summary>A new taxi route from where the aircraft is, avoiding the area around another aircraft.</summary>
+    private bool Reroute(Flight f, Flight other)
+    {
+        int dest;
+        if (f.Phase == "taxi") dest = f.HoldNode;
+        else if (f.Phase == "taxi in" && f.Spot is not null) dest = f.Spot.Access;
+        else return false;
+        if (dest < 0) return false;
+        var avoid = new HashSet<int>();
+        for (var i = 0; i < Apt.TaxiPointCount; i++) if ((Apt.Nodes[i] - other.Pos).Length < 70) avoid.Add(i);
+        var from = -1; var best = double.MaxValue;
+        for (var i = 0; i < Apt.TaxiPointCount; i++)
+        {
+            if (avoid.Contains(i) || Apt.Adj[i].Count == 0 || Apt.NodeRunway[i] >= 0) continue;
+            var d = (Apt.Nodes[i] - f.Pos).Length;
+            if (d < best) { best = d; from = i; }
+        }
+        if (from < 0 || best > 150) return false;
+        var route = Apt.Route(from, dest, ActiveRunways(), avoid);
+        if (route is null) return false;
+        var pts = new List<V2> { f.Pos };
+        var fwd = V2.FromBearing(f.Heading);
+        if (V2.Dot(Apt.Nodes[route[0]] - f.Pos, fwd) < 0)
+            pts.Add(f.Pos + fwd * 25 + fwd.Perp * 30); // turn around in a teardrop rather than on the spot
+        var offset = pts.Count;
+        if (f.Phase == "taxi")
+        {
+            var holdIndex = HoldShortIndex(route, route.Count - 1, f.Rwy!);
+            f.LineupNodes = route.Skip(holdIndex + 1).ToList();
+            route = route.Take(holdIndex + 1).ToList();
+        }
+        pts.AddRange(route.Select(n => Apt.Nodes[n]));
+        if (f.Phase == "taxi in" && f.Spot is { } gate)
+        {
+            pts.Add(gate.P - V2.FromBearing(gate.Heading) * Math.Min(40, Math.Max(15, (gate.P - Apt.Nodes[gate.Access]).Length * 0.5)));
+            pts.Add(gate.P);
+        }
+        SetGroundPath(f, pts, route, offset);
+        Log($"{f.Callsign}: taking another way round {other.Callsign}");
+        return true;
+    }
+
+    /// <summary>No pushback while another aircraft is taxiing or pushing right behind the gate.</summary>
+    private bool PushbackClear(Flight f)
+    {
+        var s = f.Spot;
+        if (s is null) return true;
+        var behind = s.P - V2.FromBearing(s.Heading) * Math.Max(30, f.P.LengthM);
+        return !Flights.Any(o => o != f && o.OnGround && !o.Done && o.Phase is "pushback" or "taxi" or "taxi in" && (o.Pos - behind).Length < 90);
+    }
+
     /// <summary>For the log: plans a pushback at every stand of this airport and summarises.</summary>
     public string PushbackSurvey()
     {
