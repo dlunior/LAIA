@@ -187,12 +187,15 @@ public sealed class PushbackPlanner(AirportModel apt)
             if (d < bestD) { bestD = d; start = i; }
         }
         if (start < 0) return null;
+        // Same rules as the taxi-out itself: nothing just behind, no doubling back from the first point.
         var behind = new HashSet<int>();
         for (var i = 0; i < apt.TaxiPointCount; i++)
         {
             var v = apt.Nodes[i] - end;
-            if (v.Length < 25 && V2.Dot(v, dir) < 0) behind.Add(i);
+            if (v.Length < 40 && V2.Dot(v, dir) < -2 && i != start) behind.Add(i);
         }
+        foreach (var e in apt.Adj[start])
+            if (e.B != target && V2.Dot((apt.Nodes[e.B] - apt.Nodes[start]).Unit, dir) < -0.5) behind.Add(e.B);
         var route = apt.Route(start, target, null, behind);
         if (route is null) return null;
         double len = bestD;
