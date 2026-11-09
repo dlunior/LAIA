@@ -28,6 +28,8 @@ public sealed class AircraftState
     public string AtcFlightNumber { get; set; } = "";
     public double WindDirection { get; set; }   // true, wind from
     public double WindSpeed { get; set; }       // knots
+    /// <summary>The simulator's UTC time as minutes into the week (Monday 00:00 = 0); -1 if unknown.</summary>
+    public double ZuluWeekMinute { get; set; } = -1;
 
     public AircraftState Clone() => (AircraftState)MemberwiseClone();
 

@@ -10,6 +10,8 @@ public sealed class TrafficAircraft
     public string Callsign { get; set; } = "";
     public string Airline { get; set; } = "";   // ICAO airline code, e.g. DAL
     public string Type { get; set; } = "";      // ICAO type, e.g. B739
+    /// <summary>Exact model/livery title when the flight comes from an AIG schedule (empty: pick one).</summary>
+    public string Model { get; set; } = "";
     public double Lat { get; set; }
     public double Lon { get; set; }
     public double AltFt { get; set; }           // MSL; ignored while on the ground (the sim uses the terrain)
@@ -35,6 +37,8 @@ public sealed class SimStateReply
     public string Motion { get; set; } = "laia";
     /// <summary>Airports the server would like LAIA Sim to read from MSFS (layout and procedures).</summary>
     public List<string>? NeedAirports { get; set; }
+    /// <summary>Airports whose real schedule the server would like (read from the AIG flight plans).</summary>
+    public List<string>? NeedSchedules { get; set; }
     /// <summary>True when the server wants the list of installed AI models again.</summary>
     public bool NeedCatalog { get; set; }
 }

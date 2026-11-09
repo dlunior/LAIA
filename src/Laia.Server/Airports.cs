@@ -109,3 +109,28 @@ public sealed class AirportStore(ILogger<AirportStore> log)
 
     public int Count { get { lock (_gate) { EnsureLoaded(); return _data.Count; } } }
 }
+
+/// <summary>Real schedules per airport, sent by LAIA Sim from the AIG flight plans (kept for the session, and on disk).</summary>
+public sealed class ScheduleStore(ILogger<ScheduleStore> log)
+{
+    private readonly object _gate = new();
+    private readonly Dictionary<string, ScheduleData> _data = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _asked = new(StringComparer.OrdinalIgnoreCase);
+
+    public void Add(ScheduleData d)
+    {
+        lock (_gate) _data[d.Airport] = d;
+        var airlines = d.Legs.GroupBy(l => l.Airline).OrderByDescending(g => g.Count()).Take(8).Select(g => $"{g.Key} {g.Count()}");
+        log.LogInformation("Schedule for {apt} from {src}: {n} flights a week ({airlines})", d.Airport, d.Source, d.Legs.Count, string.Join(", ", airlines));
+    }
+
+    public ScheduleData? Get(string airport) { lock (_gate) return _data.GetValueOrDefault(airport); }
+
+    /// <summary>Airports to ask LAIA Sim for (once per session each).</summary>
+    public List<string> Wanted(IEnumerable<string> airports)
+    {
+        lock (_gate) return airports.Where(a => !string.IsNullOrWhiteSpace(a) && !_data.ContainsKey(a) && !_asked.Contains(a)).Distinct().ToList();
+    }
+
+    public void MarkAsked(IEnumerable<string> airports) { lock (_gate) foreach (var a in airports) _asked.Add(a); }
+}

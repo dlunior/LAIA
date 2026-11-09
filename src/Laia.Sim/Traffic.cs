@@ -9,6 +9,8 @@ internal sealed class AigCatalog
 {
     public sealed record Model(string Title, string Airline, string Type);
     public List<Model> Models { get; } = new();
+    /// <summary>The Community folder the models were found in (the AIG flight plans live there too).</summary>
+    public string? Community { get; private set; }
     public static string Fallback => "Airbus A320 Neo Asobo";
 
     public static AigCatalog Scan(bool msfs2024)
@@ -26,7 +28,7 @@ internal sealed class AigCatalog
                         cat.Parse(cfg);
             }
             catch (Exception ex) { Log.Write("AIG scan error: " + ex.Message); }
-            if (cat.Models.Count > 0) break; // use the first Community folder that has AIG models
+            if (cat.Models.Count > 0) { cat.Community = c; break; } // the first Community folder that has AIG models
         }
         Log.Write($"AIG catalog: {cat.Models.Count} liveries found");
         return cat;
@@ -285,7 +287,8 @@ internal sealed class TrafficRenderer : IAsyncDisposable
     private async Task CreateAsync(Obj o)
     {
         var t = o.Latest;
-        var title = _catalog.Pick(t.Airline, t.Type, t.Id.GetHashCode());
+        // A scheduled flight names its exact model; use it if it's installed.
+        var title = t.Model.Length > 0 && _catalog.Models.Any(m => m.Title == t.Model) ? t.Model : _catalog.Pick(t.Airline, t.Type, t.Id.GetHashCode());
         Log.Write($"Traffic: creating {t.Callsign} ({t.Type}) as \"{title}\"");
         try
         {

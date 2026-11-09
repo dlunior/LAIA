@@ -20,6 +20,7 @@ internal sealed class SimLink : IDisposable
     private TrafficRenderer? _traffic;
     private AigCatalog? _catalog;
     private readonly AirportUploader _airports = new();
+    private readonly ScheduleUploader _schedules = new();
     public int TrafficCount => _traffic?.Count ?? 0;
     private DateTime _lastData = DateTime.MinValue;
 
@@ -95,6 +96,7 @@ internal sealed class SimLink : IDisposable
         ("COM ACTIVE FREQUENCY:1", "MHz"), ("COM STANDBY FREQUENCY:1", "MHz"), ("COM ACTIVE FREQUENCY:2", "MHz"), ("COM STANDBY FREQUENCY:2", "MHz"),
         ("COM TRANSMIT:1", "bool"), ("COM TRANSMIT:2", "bool"), ("TRANSPONDER CODE:1", "number"),
         ("AMBIENT WIND DIRECTION", "degrees"), ("AMBIENT WIND VELOCITY", "knots"),
+        ("ZULU TIME", "seconds"), ("ZULU DAY OF WEEK", "number"),
     };
 
     private async Task RegisterAsync(SimConnectClient sc)
@@ -140,6 +142,9 @@ internal sealed class SimLink : IDisposable
                 _state.Squawk = dec.All(ch => ch <= '7') ? dec : sq.ToString("X4");
                 _state.WindDirection = d.ReadFloat64();
                 _state.WindSpeed = d.ReadFloat64();
+                var zuluSec = d.ReadFloat64();
+                var dow = (int)Math.Round(d.ReadFloat64()); // MSFS: 0 = Sunday
+                _state.ZuluWeekMinute = dow is >= 0 and <= 6 ? ((dow + 6) % 7) * 1440 + zuluSec / 60 : -1;
             }
             else if (d.RequestId == ReqStrings)
             {
@@ -182,6 +187,7 @@ internal sealed class SimLink : IDisposable
                             tr.Update(reply.Traffic, reply.ServerTimeMs / 1000.0, reply.Motion ?? "laia");
                             _airports.Request(reply.NeedAirports, server.BaseUrl, snap.Simulator, ct);
                             if (reply.NeedCatalog && _catalog is { } cat) _ = SendCatalogAsync(server.BaseUrl, cat, ct);
+                            if (_catalog is { } cat2) _schedules.Request(reply.NeedSchedules, server.BaseUrl, cat2, ct);
                         }
                     }
                 }

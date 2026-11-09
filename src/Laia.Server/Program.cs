@@ -27,6 +27,7 @@ builder.Services.AddSingleton<RunwayDb>();
 builder.Services.AddHostedService<RunwayUpdater>();
 builder.Services.AddSingleton<AirportStore>();
 builder.Services.AddSingleton<Updater>();
+builder.Services.AddSingleton<ScheduleStore>();
 builder.Services.AddSingleton<FlightSource>();
 builder.Services.AddSingleton<TrafficEngine>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<TrafficEngine>());
@@ -102,6 +103,7 @@ app.MapPost("/api/sim/state", async (HttpContext ctx, ServerState s, SimBriefSer
     if (st.Connected)
     {
         try { var need = traffic.NeededAirports(st); if (need.Count > 0) reply.NeedAirports = need; } catch { }
+        try { var sch = traffic.NeededSchedules(st); if (sch.Count > 0) reply.NeedSchedules = sch; } catch { }
         reply.NeedCatalog = !src.HasCatalog;
     }
     return Results.Json(reply, jsonOpts);
@@ -119,6 +121,13 @@ app.MapPost("/api/airport", async (HttpContext ctx, AirportStore store) =>
 {
     var d = await JsonSerializer.DeserializeAsync<Laia.Common.Airports.AirportData>(ctx.Request.Body, jsonOpts);
     if (d is null || string.IsNullOrWhiteSpace(d.Icao)) return Results.BadRequest();
+    store.Add(d);
+    return Results.Json(new { ok = true }, jsonOpts);
+});
+app.MapPost("/api/schedule", async (HttpContext ctx, ScheduleStore store) =>
+{
+    var d = await JsonSerializer.DeserializeAsync<Laia.Common.Airports.ScheduleData>(ctx.Request.Body, jsonOpts);
+    if (d is null || string.IsNullOrWhiteSpace(d.Airport)) return Results.BadRequest();
     store.Add(d);
     return Results.Json(new { ok = true }, jsonOpts);
 });

@@ -142,3 +142,31 @@ public sealed class TrafficCatalog
 }
 
 public sealed record CatalogEntry(string Airline, string Type, int Count);
+
+/// <summary>A real-world schedule for one airport (from the AIG flight plans installed on the sim PC).</summary>
+public sealed class ScheduleData
+{
+    public string Airport { get; set; } = "";
+    public string Source { get; set; } = "";
+    public DateTime ReadUtc { get; set; }
+    public List<ScheduleLeg> Legs { get; set; } = new();
+}
+
+/// <summary>
+/// One scheduled flight touching the airport. Times are minutes into the week (Monday 00:00 UTC = 0,
+/// a week is 10,080 minutes), as AIG flight plans store them.
+/// </summary>
+public sealed class ScheduleLeg
+{
+    public string Airline { get; set; } = "";   // the airline whose schedule this is (DAL)
+    public string Operator { get; set; } = "";  // who flies it, for the callsign (EDV for a Delta Connection flight)
+    public string Title { get; set; } = "";     // the exact AIG model and livery
+    public string Type { get; set; } = "";      // ICAO type (B739)
+    public string Reg { get; set; } = "";       // registration: the same airframe arrives and departs again
+    public string Flight { get; set; } = "";    // flight number
+    public string Dep { get; set; } = "";
+    public string Arr { get; set; } = "";
+    public int DepMin { get; set; }
+    public int ArrMin { get; set; }
+    public string Callsign => Operator + Flight.TrimStart('0');
+}

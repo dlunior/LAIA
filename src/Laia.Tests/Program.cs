@@ -179,6 +179,48 @@ Console.WriteLine("== Pushback plans at every gate of the test airport");
     Check(Math.Abs(Geo2.Diff(p.EndHeading, 90)) < 5 || Math.Abs(Geo2.Diff(p.EndHeading, 270)) < 5, "ends lined up on the taxilane");
 }
 
+Console.WriteLine("== Traffic from a real schedule");
+{
+    var apt = new AirportModel(TestAirport.Build(false));
+    var sched = new Laia.Common.Airports.ScheduleData { Airport = "TEST", Source = "AIG" };
+    const int start = 2 * 1440 + 600; // Wednesday 10:00 UTC
+    for (var i = 0; i < 10; i++)
+    {
+        // Each airframe arrives, then leaves again 50 minutes later.
+        sched.Legs.Add(new() { Airline = "DAL", Operator = "DAL", Title = "T", Type = "B739", Reg = $"N{i}DL", Flight = $"{100 + i}", Dep = "KXXX", Arr = "TEST", DepMin = start - 100 + i * 7, ArrMin = start + 6 + i * 7 });
+        sched.Legs.Add(new() { Airline = "DAL", Operator = "DAL", Title = "T", Type = "B739", Reg = $"N{i}DL", Flight = $"{200 + i}", Dep = "TEST", Arr = "KYYY", DepMin = start + 56 + i * 7, ArrMin = start + 150 + i * 7 });
+        // And some aircraft already on the ground leave in the first half hour.
+        sched.Legs.Add(new() { Airline = "UAL", Operator = "UAL", Title = "U", Type = "A320", Reg = $"N{i}UA", Flight = $"{300 + i}", Dep = "TEST", Arr = "KZZZ", DepMin = start + 8 + i * 3, ArrMin = start + 120 });
+    }
+    var log = new List<string>();
+    var world = new TrafficWorld(apt, new TestSource(), seed: 9) { Level = TrafficLevel.Busy, Wind = new Wind(270, 8), Schedule = sched, WeekMinute = start };
+    world.Log = s => log.Add($"{start + world.Time / 60 - start,5:0.0} min {s}");
+    var landedAt = new Dictionary<string, double>();
+    var airborneAt = new Dictionary<string, double>();
+    for (var i = 0; i < 150 * 60 * 4; i++)
+    {
+        world.WeekMinute = start + world.Time / 60;
+        world.Step(0.25);
+        foreach (var l in log.Skip(0)) { }
+        foreach (var f in world.Flights)
+        {
+            if (f.Kind == "arrival" && f.OnGround && !landedAt.ContainsKey(f.Callsign)) landedAt[f.Callsign] = world.Time / 60;
+            if (f.Kind == "departure" && !f.OnGround && !airborneAt.ContainsKey(f.Callsign)) airborneAt[f.Callsign] = world.Time / 60;
+        }
+    }
+    foreach (var line in log.Where(l => l.Contains("schedule") || l.Contains("skipped") || l.Contains("Couldn't")).Take(20)) Console.WriteLine("    " + line);
+    var arrivalErrors = sched.Legs.Where(l => l.Arr == "TEST" && landedAt.ContainsKey(l.Callsign)).Select(l => landedAt[l.Callsign] - (l.ArrMin - start)).ToList();
+    var departureDelays = sched.Legs.Where(l => l.Dep == "TEST" && airborneAt.ContainsKey(l.Callsign)).Select(l => airborneAt[l.Callsign] - (l.DepMin - start)).ToList();
+    Console.WriteLine($"  arrivals landed: {arrivalErrors.Count} of 10, off schedule by {string.Join(", ", arrivalErrors.Select(e => e.ToString("+0;-0")))} min");
+    Console.WriteLine($"  departures airborne: {departureDelays.Count} of 20, minutes after the scheduled time: {string.Join(", ", departureDelays.Select(e => e.ToString("0")))}");
+    Check(arrivalErrors.Count >= 9, "scheduled arrivals land");
+    Check(arrivalErrors.Count > 0 && arrivalErrors.Average(Math.Abs) < 6, "arrivals land close to their scheduled time");
+    Check(departureDelays.Count >= 18, "scheduled departures leave (including the arrived aircraft turning around)");
+    Check(departureDelays.Count > 0 && departureDelays.Min() > -1, "nobody leaves before their scheduled time");
+    var dl = sched.Legs.Where(l => l.Dep == "TEST" && l.Airline == "DAL").Count(l => airborneAt.ContainsKey(l.Callsign));
+    Check(dl >= 9, $"arrived airframes leave again on their next flight ({dl} of 10)");
+}
+
 Console.WriteLine("== Traffic starts even when no installed model fits the small gates");
 {
     var apt = new AirportModel(TestAirport.Build(false));

@@ -9,7 +9,7 @@ namespace Laia.Server;
 /// Without a layout (or for the test buttons at an airport not read yet) a simple runway-only world is used.
 /// </summary>
 public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportStore airports, FlightSource source, SettingsStore settings,
-    SimBriefService simbrief, ServerState state, ILogger<TrafficEngine> log) : BackgroundService
+    SimBriefService simbrief, ServerState state, ScheduleStore schedules, ILogger<TrafficEngine> log) : BackgroundService
 {
     private readonly object _gate = new();
     private TrafficWorld? _world;       // the airport near the user (with layout)
@@ -70,6 +70,12 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         foreach (var w in _retiring) yield return w;
     }
 
+    private static double WeekMinuteNow()
+    {
+        var n = DateTime.UtcNow;
+        return (((int)n.DayOfWeek + 6) % 7) * 1440 + n.TimeOfDay.TotalMinutes;
+    }
+
     private TrafficAircraft ToAircraft(TrafficWorld w, Flight f)
     {
         var (lat, lon) = w.Apt.Map.ToLatLon(f.Pos);
@@ -77,7 +83,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         if (!f.OnGround && f.Rwy is not null && (f.Phase is "final" or "flare" or "climbing" or "takeoff roll")) ground = f.Rwy.ElevationFt;
         return new TrafficAircraft
         {
-            Id = f.Id, Callsign = f.Callsign, Airline = f.Airline, Type = f.Type, Lat = lat, Lon = lon, AltFt = f.AltFt,
+            Id = f.Id, Callsign = f.Callsign, Airline = f.Airline, Type = f.Type, Model = f.Title, Lat = lat, Lon = lon, AltFt = f.AltFt,
             AglFt = f.OnGround ? 0 : Math.Max(0, f.AltFt - ground), OnGround = f.OnGround, TimeMs = _stampMs, Heading = f.Heading,
             Pitch = f.Pitch, Bank = f.Bank, GroundSpeed = f.Gs, VerticalSpeed = f.Vs, GearDown = f.Gear, Phase = f.Phase, Lights = f.Lights,
         };
@@ -99,7 +105,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 departing = w?.DepRwy?.Ident,
                 airportsOnFile = airports.Count,
                 catalog = source.HasCatalog,
-                schedule = source.ScheduleStatus,
+                schedule = w?.Schedule is { } sd ? $"Real {sd.Source} schedule: {sd.Legs.Count} flights a week at {sd.Airport}" : source.ScheduleStatus,
                 flights = Worlds().SelectMany(x => x.Flights.Select(f => new
                 {
                     f.Callsign, f.Type, f.Kind, f.Phase, other = f.Other, runway = f.Rwy?.Ident, route = f.Route,
@@ -120,6 +126,19 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         if (near is { } n && n.nm < 40)
             want.Add(n.ident.Length == 3 && n.ident.All(char.IsLetter) ? "K" + n.ident : n.ident);
         return airports.Missing(want, sim.Simulator ?? "");
+    }
+
+    /// <summary>Real schedules wanted from LAIA Sim: the traffic airport and the flight plan's airports.</summary>
+    public List<string> NeededSchedules(AircraftState sim)
+    {
+        if (settings.ScheduleSource == "airlabs") return new();
+        var want = new List<string>();
+        lock (_gate) if (_world is not null) want.Add(_world.Apt.Icao);
+        var plan = simbrief.Plan;
+        if (plan is not null) { want.Add(plan.Origin); want.Add(plan.Destination); }
+        var list = schedules.Wanted(want);
+        schedules.MarkAsked(list);
+        return list;
     }
 
     // ------------------------------------------------------------------ test buttons
@@ -212,7 +231,12 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                             w.UserPos = w.Apt.Map.ToXY(sim.Lat, sim.Lon);
                             w.UserOnGround = sim.OnGround;
                         }
-                        if (w == _world) w.Level = Level;
+                        if (w == _world)
+                        {
+                            w.Level = Level;
+                            if (w.Schedule is null && settings.ScheduleSource != "airlabs") w.Schedule = schedules.Get(w.Apt.Icao);
+                        }
+                        w.WeekMinute = live && sim!.ZuluWeekMinute >= 0 ? sim.ZuluWeekMinute : WeekMinuteNow();
                         // Don't run traffic while nobody is flying (sim closed): it would all depart unseen.
                         if (live || w.Flights.Any(f => f.Test)) w.Step(dt);
                     }

@@ -62,6 +62,8 @@ public sealed class Flight
     public double RerouteTime = -999;
     public double LastOrbit = -999;
     public string Route = "";               // procedure names for the control page
+    public string Reg = "";                 // registration (scheduled flights: the same airframe flies on)
+    public string Title = "";               // exact model/livery (scheduled flights)
     public bool UserIsObstacle;
 
     public double AglFt(double groundFt) => OnGround ? 0 : Math.Max(0, AltFt - groundFt);
@@ -99,6 +101,10 @@ public sealed class TrafficWorld
     public bool UserOnGround { get; set; }
     public bool Automatic { get; set; } = true;
     public int Movements { get; private set; }
+    /// <summary>The airport's real schedule; when set, traffic follows it instead of made-up flights.</summary>
+    public ScheduleData? Schedule { get; set; }
+    /// <summary>Current time as minutes into the week (Monday 00:00 UTC = 0), from the simulator's clock.</summary>
+    public double WeekMinute { get; set; } = -1;
 
     private int _nextId = 1;
     private double _nextDep = double.NaN, _nextArr = double.NaN, _lastRunwayCheck = -999;
@@ -159,7 +165,11 @@ public sealed class TrafficWorld
                 foreach (var e in Apt.Ends)
                     if (e.Contains(f.Pos, 3)) { f.OnRunway = e.Runway; break; }
         }
-        if (Automatic && Level != TrafficLevel.Off && Apt.HasGround) Schedule();
+        if (Automatic && Level != TrafficLevel.Off && Apt.HasGround)
+        {
+            if (Schedule is { Legs.Count: > 0 } && WeekMinute >= 0) RunSchedule();
+            else Schedule_();
+        }
         if (Level == TrafficLevel.Off) foreach (var f in Flights) if (!f.Test) f.Done = true;
         foreach (var f in Flights.ToList())
         {
@@ -173,7 +183,7 @@ public sealed class TrafficWorld
 
     // ------------------------------------------------------------------ scheduling
 
-    private void Schedule()
+    private void Schedule_()
     {
         var (maxObjects, maxActive, mph, fill) = Budget;
         var gates = UsableSpots().ToList();
@@ -219,6 +229,101 @@ public sealed class TrafficWorld
         }
     }
 
+    // ------------------------------------------------------------------ real schedule
+
+    private readonly HashSet<string> _done = new();
+    private bool _schedStarted;
+
+    /// <summary>Signed minutes from now until a time of the week (-5040..5040).</summary>
+    private double Until(int weekMin) => ((weekMin - WeekMinute) % 10080 + 10080 + 5040) % 10080 - 5040;
+
+    /// <summary>The traffic level thins the real schedule (the same flights each time).</summary>
+    private bool Keep(ScheduleLeg l)
+    {
+        var pct = Level switch { TrafficLevel.Light => 35, TrafficLevel.Normal => 65, _ => 100 };
+        var h = (uint)(l.Callsign + l.Dep + l.Arr + l.DepMin).GetHashCode() % 100;
+        return h < pct;
+    }
+
+    private static string Key(ScheduleLeg l, char kind) => $"{kind}|{l.Reg}|{l.Flight}|{l.DepMin}";
+
+    /// <summary>
+    /// Traffic from the real schedule: aircraft on the ground now are parked at their airline's gates, departures
+    /// push back at their scheduled times, arrivals are placed so they land at theirs, and an arriving airframe
+    /// later leaves again on its next scheduled flight.
+    /// </summary>
+    private void RunSchedule()
+    {
+        var (maxObjects, maxActive, _, _) = Budget;
+        var legs = Schedule!.Legs;
+        var me = Apt.Icao;
+        var deps = legs.Where(l => l.Dep == me && Keep(l)).ToList();
+        var arrs = legs.Where(l => l.Arr == me && Keep(l)).ToList();
+        if (!_schedStarted)
+        {
+            _schedStarted = true;
+            _filled = true;
+            // Made-up aircraft from before the schedule arrived make way for the real ones.
+            foreach (var f in Flights.Where(f => f.Kind == "parked" && f.Phase == "parked" && f.Reg.Length == 0)) f.Done = true;
+            // Aircraft at the gates now: the ones leaving in the next few hours.
+            var parked = Flights.Count(f => f.Kind == "parked");
+            var upcoming = deps.Where(l => Until(l.DepMin) is > 4 and < 240).OrderBy(l => Until(l.DepMin))
+                .GroupBy(l => l.Reg).Select(g => g.First()).ToList();
+            var room = Math.Max(0, maxObjects - maxActive - parked);
+            var placed = 0;
+            foreach (var l in upcoming)
+            {
+                if (placed >= room) break;
+                if (Flights.Any(f => f.Reg == l.Reg && f.Reg.Length > 0)) continue;
+                var perf = Perf.For(l.Type);
+                var gate = FindGate(perf, l.Operator, l.Airline);
+                if (gate is null) continue;
+                try { SpawnParked(gate, l); placed++; } catch (Exception ex) { Log($"Couldn't park {l.Callsign}: {ex.Message}"); }
+            }
+            // Arrivals already on their way in.
+            foreach (var l in arrs.Where(l => Until(l.ArrMin) is >= 1 and <= 13).OrderBy(l => Until(l.ArrMin)))
+            {
+                _done.Add(Key(l, 'A'));
+                SpawnArrival(Math.Clamp(Until(l.ArrMin) * 3.2, 7, 40), false, l);
+            }
+            Log($"{me}: following the real {Schedule.Source} schedule ({deps.Count} departures and {arrs.Count} arrivals a week at this level); {placed} aircraft at the gates waiting for their next flight");
+        }
+        var active = Flights.Count(f => f.Kind != "parked" && !f.Test);
+        // Departures: board a few minutes before, push back on time.
+        foreach (var l in deps)
+        {
+            var u = Until(l.DepMin);
+            if (u > 3 || u < -15) continue;
+            if (!_done.Add(Key(l, 'D'))) continue;
+            if (active >= maxActive) { Log($"{l.Callsign}: skipped (traffic limit)"); continue; }
+            var f = Flights.FirstOrDefault(x => x.Reg == l.Reg && x.Reg.Length > 0 && x.Kind == "parked" && x.Phase == "parked" && x.Spot is not null);
+            if (f is null)
+            {
+                var gate = FindGate(Perf.For(l.Type), l.Operator, l.Airline);
+                if (gate is null) continue;
+                f = SpawnParked(gate, l);
+            }
+            if (StartDeparture(f, Math.Max(20, u * 60), l) is not null) { active++; Movements++; }
+        }
+        // Arrivals: appear about 40 track miles out so they land on time.
+        foreach (var l in arrs)
+        {
+            var u = Until(l.ArrMin);
+            if (u > 13 || u < 1) continue;
+            if (!_done.Add(Key(l, 'A'))) continue;
+            if (active >= maxActive || Flights.Count >= maxObjects) { Log($"{l.Callsign}: skipped (traffic limit)"); continue; }
+            if (SpawnArrival(Math.Clamp(u * 3.2, 7, 40), false, l) is not null) { active++; Movements++; }
+        }
+        // Too many parked aircraft: remove the ones with no flight soon.
+        if (Flights.Count > maxObjects)
+        {
+            var soon = new HashSet<string>(deps.Where(l => Until(l.DepMin) is > 0 and < 120).Select(l => l.Reg));
+            var victim = Flights.Where(f => f.Kind == "parked" && f.Phase == "parked" && !soon.Contains(f.Reg))
+                .OrderByDescending(f => UserPos is { } u2 ? (f.Pos - u2).Length : 0).FirstOrDefault();
+            if (victim is not null) victim.Done = true;
+        }
+    }
+
     private IEnumerable<AirportModel.ParkingSpot> UsableSpots()
     {
         var gates = Apt.Spots.Where(s => s.IsGate).ToList();
@@ -229,12 +334,12 @@ public sealed class TrafficWorld
         !Flights.Any(f => !f.Done && f.Spot is not null && (f.Spot == s || s.Overlaps.Contains(f.Spot))) &&
         !(UserPos is { } u && (u - s.P).Length < s.RadiusM + 25);
 
-    private AirportModel.ParkingSpot? FindGate(Perf p, string airline)
+    private AirportModel.ParkingSpot? FindGate(Perf p, string airline, string? alsoAirline = null)
     {
         var free = UsableSpots().Where(s => SpotFree(s) && s.Size >= p.GateSize && (s.RadiusM <= 0 || s.RadiusM >= p.SpanM / 2 * 0.85)).ToList();
         if (free.Count == 0) return null;
         // The airline's own stands first, then stands nobody claims; other airlines' stands only as a last resort.
-        var own = free.Where(s => s.Airlines.Contains(airline)).ToList();
+        var own = free.Where(s => s.Airlines.Contains(airline) || (alsoAirline is not null && s.Airlines.Contains(alsoAirline))).ToList();
         var open = free.Where(s => s.Airlines.Count == 0).ToList();
         var pool = own.Count > 0 ? own : open.Count > 0 ? open : free;
         // The smallest stand that fits, so the big ones stay free for the big aircraft.
@@ -245,13 +350,15 @@ public sealed class TrafficWorld
 
     private string NewId() => $"{Apt.Icao}{_nextId++:000}";
 
-    private Flight SpawnParked(AirportModel.ParkingSpot s)
+    private Flight SpawnParked(AirportModel.ParkingSpot s, ScheduleLeg? leg = null)
     {
-        var id = Source.NewAircraft(Apt.Icao, s.Size, Rng, s.Airlines.Count > 0 ? s.Airlines : null);
+        var id = leg is not null ? new AircraftIdentity(leg.Operator, leg.Type, leg.Callsign, leg.Arr)
+            : Source.NewAircraft(Apt.Icao, s.Size, Rng, s.Airlines.Count > 0 ? s.Airlines : null);
         var f = new Flight
         {
             Id = NewId(), Callsign = id.Callsign, Airline = id.Airline, Type = id.Type, Other = id.Other, Kind = "parked", P = Perf.For(id.Type),
             Pos = s.P, Heading = s.Heading, AltFt = Apt.ElevationFt, Spot = s, Age = Rng.NextDouble() * 3000,
+            Reg = leg?.Reg ?? "", Title = leg?.Title ?? "",
         };
         f.SetPhase("parked", Time);
         f.Lights = Rng.NextDouble() < 0.5 ? 0 : Nav | Logo;
@@ -262,7 +369,7 @@ public sealed class TrafficWorld
     // ------------------------------------------------------------------ departures
 
     /// <summary>Starts a departure: an aircraft at a gate starts boarding and pushes back after <paramref name="boarding"/> seconds.</summary>
-    public Flight? StartDeparture(Flight? pick, double boarding)
+    public Flight? StartDeparture(Flight? pick, double boarding, ScheduleLeg? leg = null)
     {
         if (DepRwy is null) SelectRunways(true);
         if (DepRwy is null) return null;
@@ -276,9 +383,13 @@ public sealed class TrafficWorld
             if (s is null) return null;
             f = SpawnParked(s);
         }
-        var (cs, other) = Source.NewFlight(Apt.Icao, f.Airline, true, Rng, f.Type);
-        f.Callsign = cs;
-        f.Other = other;
+        if (leg is not null) { f.Callsign = leg.Callsign; f.Other = leg.Arr; }
+        else
+        {
+            var (cs, other) = Source.NewFlight(Apt.Icao, f.Airline, true, Rng, f.Type);
+            f.Callsign = cs;
+            f.Other = other;
+        }
         f.Kind = "departure";
         f.Rwy = DepRwy;
         f.Timer = boarding;
@@ -574,7 +685,7 @@ public sealed class TrafficWorld
     // ------------------------------------------------------------------ arrivals
 
     /// <summary>Spawns an arrival <paramref name="distNm"/> track miles from touchdown.</summary>
-    public Flight? SpawnArrival(double distNm, bool test)
+    public Flight? SpawnArrival(double distNm, bool test, ScheduleLeg? leg = null)
     {
         if (ArrRwy is null) SelectRunways(true);
         var rwy = ArrRwy;
@@ -582,13 +693,25 @@ public sealed class TrafficWorld
         AircraftIdentity id;
         Perf perf;
         var tries = 0;
-        do
+        string cs, other;
+        if (leg is not null)
         {
-            id = Source.NewAircraft(Apt.Icao, 2, Rng);
-            perf = Perf.For(id.Type);
-        } while (rwy.LengthM < perf.MinRunwayM && ++tries < 6);
-        var (cs, other) = Source.NewFlight(Apt.Icao, id.Airline, false, Rng, id.Type);
-        var f = new Flight { Id = NewId(), Callsign = cs, Airline = id.Airline, Type = id.Type, Other = other, Kind = "arrival", P = perf, Rwy = rwy, Test = test };
+            id = new AircraftIdentity(leg.Operator, leg.Type, leg.Callsign, leg.Dep);
+            perf = Perf.For(leg.Type);
+            cs = leg.Callsign;
+            other = leg.Dep;
+        }
+        else
+        {
+            do
+            {
+                id = Source.NewAircraft(Apt.Icao, 2, Rng);
+                perf = Perf.For(id.Type);
+            } while (rwy.LengthM < perf.MinRunwayM && ++tries < 6);
+            (cs, other) = Source.NewFlight(Apt.Icao, id.Airline, false, Rng, id.Type);
+        }
+        var f = new Flight { Id = NewId(), Callsign = cs, Airline = id.Airline, Type = id.Type, Other = other, Kind = "arrival", P = perf, Rwy = rwy, Test = test,
+            Reg = leg?.Reg ?? "", Title = leg?.Title ?? "" };
         f.OnGround = false;
         f.Gear = false;
         BuildArrivalPath(f, null);
