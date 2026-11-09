@@ -108,7 +108,7 @@ Console.WriteLine("== One hour of busy traffic, runway 27 in use (wind 270/12)")
                 {
                     var rate = Math.Abs(Geo2.Diff(l.hdg, f.Heading)) / dt;
                     if (f.Phase != "pushback") maxGroundTurnRate = Math.Max(maxGroundTurnRate, rate);
-                    if (rate > 40 && f.Phase != "pushback") { sharpTurns++; if (sharpTurns <= 5) log.Add($"{TimeSpan.FromSeconds(world.Time):hh\\:mm\\:ss} SHARP TURN {f.Callsign} {l.phase}->{f.Phase}: {rate:0}°/s at {f.Gs:0} kt at ({f.Pos.X:0},{f.Pos.Y:0})"); }
+                    if (rate > 40 && f.Phase != "pushback") { sharpTurns++; if (sharpTurns <= 5) log.Add($"{TimeSpan.FromSeconds(world.Time):hh\\:mm\\:ss} SHARP TURN {f.Callsign} {l.phase}->{f.Phase}: {rate:0}°/s at {f.Gs:0} kt at ({f.Pos.X:0},{f.Pos.Y:0}), heading {l.hdg:0}->{f.Heading:0}, s {f.S:0}/{f.Path?.Length:0}, path " + string.Join(" ", f.Path?.Points.Select(q => $"({q.X:0},{q.Y:0})") ?? Array.Empty<string>())); }
                 }
             }
             if (prevBank.TryGetValue(f.Id, out var pb)) maxBankRate = Math.Max(maxBankRate, Math.Abs(f.Bank - pb) / dt);
