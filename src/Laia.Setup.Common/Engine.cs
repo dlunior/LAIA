@@ -169,8 +169,38 @@ public static class Sys
         File.WriteAllText(path, text);
     }
 
+    /// <summary>
+    /// Program files that are still in use (an app that wouldn't close) can't be overwritten, but Windows does
+    /// let them be renamed. Move them aside so the new files can be written; the old ones are cleaned up next time.
+    /// </summary>
+    public static void MoveAsideLocked(string folder)
+    {
+        if (!Directory.Exists(folder)) return;
+        foreach (var old in Directory.GetFiles(folder, "*.old-*")) { try { File.Delete(old); } catch { } }
+        foreach (var f in Directory.GetFiles(folder).Where(f => f.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) || f.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)))
+        {
+            for (var i = 0; i < 6; i++)
+            {
+                try { File.Delete(f); break; }
+                catch
+                {
+                    if (i < 5) { Thread.Sleep(500); continue; }
+                    try { File.Move(f, $"{f}.old-{DateTime.Now:HHmmss}"); SetupLog.Write($"{Path.GetFileName(f)} was still in use; moved it aside"); }
+                    catch (Exception ex) { SetupLog.Write($"Couldn't move {Path.GetFileName(f)} aside: {ex.Message}"); }
+                }
+            }
+        }
+    }
+
     public static void KillByPath(string folder)
     {
+        // Also by name: if the app runs with different rights, its path can't be read but it can often still be closed.
+        foreach (var p in Process.GetProcessesByName("LaiaSim"))
+        {
+            try { if (p.Id != Environment.ProcessId) { SetupLog.Write($"Closing LaiaSim (pid {p.Id})"); p.Kill(true); p.WaitForExit(5000); } }
+            catch (Exception ex) { SetupLog.Write($"Couldn't close LaiaSim (pid {p.Id}): {ex.Message}"); }
+            finally { p.Dispose(); }
+        }
         foreach (var p in Process.GetProcesses())
         {
             try

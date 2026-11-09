@@ -80,6 +80,7 @@ internal sealed class TrayApp : ApplicationContext
         _sim.Start();
 
         _updates.Changed += () => ui?.Post(_ => RefreshUpdateItem(), null);
+        _updates.ExitRequested += () => ui?.Post(_ => ExitThread(), null);
         _updates.Notify += (title, text) => ui?.Post(_ => _tray.ShowBalloonTip(6000, title, text, ToolTipIcon.Info), null);
         _heartbeat.Tick += async (_, _) =>
         {

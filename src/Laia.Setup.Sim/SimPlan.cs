@@ -47,6 +47,7 @@ internal sealed class SimPlan
         new("Copying LAIA Sim", c =>
         {
             if (!Payload.TryOpen(out var zip)) throw new InvalidOperationException("This setup file is damaged. Please download it again.");
+            Sys.MoveAsideLocked(InstallDir);
             using (zip) Payload.Extract(zip!, InstallDir, (f, n) => c.Report(f, Path.GetFileName(n)));
             return Task.CompletedTask;
         }, weight: 3),

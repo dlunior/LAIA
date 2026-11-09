@@ -23,6 +23,7 @@ internal sealed class Updater
     public static string Current => Application.ProductVersion.Split('+')[0];
     public event Action? Changed;
     public event Action<string, string>? Notify; // title, text
+    public event Action? ExitRequested;
 
     public Updater(Func<ServerInfo?> server) => _server = server;
 
@@ -106,7 +107,13 @@ internal sealed class Updater
                 // held briefly by the virus scanner, so try for a few seconds.
                 for (var i = 0; ; i++)
                 {
-                    try { Process.Start(new ProcessStartInfo(file) { UseShellExecute = true }); break; }
+                    try
+                    {
+                        Process.Start(new ProcessStartInfo(file) { UseShellExecute = true });
+                        Log.Write("Closing LAIA Sim so the installer can replace it");
+                        ExitRequested?.Invoke();
+                        break;
+                    }
                     catch (Exception) when (i < 10) { await Task.Delay(1000); }
                 }
             }
