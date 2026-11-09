@@ -21,7 +21,7 @@ public sealed class FlightSource(SettingsStore settings, ILogger<FlightSource> l
     public bool HasCatalog { get { lock (_gate) return _catalog.Count > 0; } }
     public string ScheduleStatus { get; private set; } = "";
 
-    private sealed record SchedFlight(string Airline, string Callsign, string Other, bool Departure);
+    private sealed record SchedFlight(string Airline, string Callsign, string Other, bool Departure, string When = "");
 
     // Fallback when no AIG models were found: common North American airline types.
     private static readonly CatalogEntry[] Fallback =
@@ -79,7 +79,7 @@ public sealed class FlightSource(SettingsStore settings, ILogger<FlightSource> l
         if (cat.Count == 0) cat = Fallback.Where(e => Perf.For(e.Type).GateSize <= maxGateSize).ToList();
         CatalogEntry pick;
         var sched = Schedule(airport);
-        var airlines = sched.Select(s => s.Airline).Where(a => cat.Any(c => c.Airline == a)).ToList();
+        var airlines = sched.Select(s => s.Airline).Where(a => cat.Any(c => c.Airline == a) && (region is null || region.Contains(a))).ToList();
         if (airlines.Count > 0)
         {
             var airline = airlines[rng.Next(airlines.Count)];
@@ -168,7 +168,17 @@ public sealed class FlightSource(SettingsStore settings, ILogger<FlightSource> l
                     var other = dep ? S("arr_icao") : S("dep_icao");
                     // Skip codeshares (the same flight sold under another airline's number).
                     if (airline.Length != 3 || cs.Length < 4 || S("cs_flight_iata").Length > 0 || S("cs_airline_iata").Length > 0 || S("cs_flight_number").Length > 0) continue;
-                    list.Add(new SchedFlight(airline, cs, other, dep));
+                    // AirLabs lists codeshares as separate flights at the same minute: keep one per departure time
+                    // and destination, preferring an airline that actually flies in this region.
+                    var when = S(dep ? "dep_time" : "arr_time");
+                    var dup = list.FindIndex(x => x.Departure == dep && x.Other == other && x.When == when && when.Length > 0);
+                    var region = RegionFor(airport);
+                    if (dup >= 0)
+                    {
+                        if (region is not null && !region.Contains(list[dup].Airline) && region.Contains(airline)) list[dup] = new SchedFlight(airline, cs, other, dep, when);
+                        continue;
+                    }
+                    list.Add(new SchedFlight(airline, cs, other, dep, when));
                 }
             }
             lock (_gate) _sched[airport] = list;
