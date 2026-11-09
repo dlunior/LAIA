@@ -145,7 +145,8 @@ internal sealed class TrafficRenderer : IAsyncDisposable
         public uint CreateReq, GroundReq, ObjectId;
         public bool Ready, Removed;
         public string Motion = "laia";
-        public double GroundAlt = double.NaN, CgFt = double.NaN, SmoothGround = double.NaN;
+        public double GroundAlt = double.NaN, CgFt = double.NaN, SmoothGround = double.NaN, StaticPitch;
+        public bool StaticLogged;
         public double LastLights = -100, LastGear = -100, GearPos = -1, GearTime;
         public int SentLights = -1, SentGear = -1;
         public double SentLat, SentLon, SentAlt, SentHdg, LastSent = -100;
@@ -165,6 +166,8 @@ internal sealed class TrafficRenderer : IAsyncDisposable
             await _sc.AddToDataDefinitionAsync(DefPos, n, u, SimDataType.Float64);
         await _sc.AddToDataDefinitionAsync(DefGround, "GROUND ALTITUDE", "feet", SimDataType.Float64);
         await _sc.AddToDataDefinitionAsync(DefGround, "STATIC CG TO GROUND", "feet", SimDataType.Float64);
+        // Each model's natural attitude on its wheels (some sit slightly nose-down); without it the nose gear floats.
+        await _sc.AddToDataDefinitionAsync(DefGround, "STATIC PITCH", "degrees", SimDataType.Float64);
         // The handle alone doesn't move the gear on frozen AI aircraft; the gear positions themselves are settable.
         await _sc.AddToDataDefinitionAsync(DefGear, "GEAR HANDLE POSITION", "bool", SimDataType.Float64);
         await _sc.AddToDataDefinitionAsync(DefGear, "GEAR CENTER POSITION", "percent over 100", SimDataType.Float64);
@@ -327,6 +330,9 @@ internal sealed class TrafficRenderer : IAsyncDisposable
         if (o is null) return;
         o.GroundAlt = d.ReadFloat64();
         o.CgFt = d.ReadFloat64();
+        var sp = d.ReadFloat64();
+        o.StaticPitch = double.IsFinite(sp) && Math.Abs(sp) < 15 ? sp : 0;
+        if (!o.StaticLogged) { o.StaticLogged = true; Log.Write($"Traffic: {o.Latest.Callsign} rests at {o.StaticPitch:0.0}° pitch, CG {o.CgFt:0.0} ft above the ground"); }
     }
 
     private async Task RemoveAsync(Obj o)
@@ -480,7 +486,10 @@ internal sealed class TrafficRenderer : IAsyncDisposable
                     BinaryPrimitives.WriteDoubleLittleEndian(buf.AsSpan(0), p.lat);
                     BinaryPrimitives.WriteDoubleLittleEndian(buf.AsSpan(8), p.lon);
                     BinaryPrimitives.WriteDoubleLittleEndian(buf.AsSpan(16), alt);
-                    BinaryPrimitives.WriteDoubleLittleEndian(buf.AsSpan(24), -p.pitch); // MSFS: positive pitch is nose down
+                    // Our pitch is relative to the aircraft sitting on its wheels; add the model's resting attitude
+                    // near the ground (cfg convention: + nose up). MSFS: positive pitch is nose down.
+                    var restW = p.ground ? 1 : Math.Clamp(1 - p.agl / 100, 0, 1);
+                    BinaryPrimitives.WriteDoubleLittleEndian(buf.AsSpan(24), -(p.pitch + o.StaticPitch * restW));
                     BinaryPrimitives.WriteDoubleLittleEndian(buf.AsSpan(32), p.bank);
                     BinaryPrimitives.WriteDoubleLittleEndian(buf.AsSpan(40), p.hdg);
                     var (gsKt, vsFpm) = Speeds(o, rt);
