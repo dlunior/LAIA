@@ -76,7 +76,16 @@ public sealed class FlightSource(SettingsStore settings, ILogger<FlightSource> l
             var local = cat.Where(e => region.Contains(e.Airline)).ToList();
             if (local.Count > 0) cat = local;
         }
-        if (cat.Count == 0) cat = Fallback.Where(e => Perf.For(e.Type).GateSize <= maxGateSize).ToList();
+        // Nothing small enough for this gate: take the smallest types available rather than nothing.
+        if (cat.Count == 0)
+        {
+            var all = Catalog();
+            var regional = region is null ? all : all.Where(e => region.Contains(e.Airline)).ToList();
+            if (regional.Count == 0) regional = all;
+            var smallest = regional.Min(e => Perf.For(e.Type).GateSize);
+            cat = regional.Where(e => Perf.For(e.Type).GateSize == smallest).ToList();
+        }
+        if (cat.Count == 0) cat = Fallback.ToList();
         CatalogEntry pick;
         var sched = Schedule(airport);
         var airlines = sched.Select(s => s.Airline).Where(a => cat.Any(c => c.Airline == a) && (region is null || region.Contains(a))).ToList();

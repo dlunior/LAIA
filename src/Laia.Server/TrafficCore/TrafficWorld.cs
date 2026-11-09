@@ -177,10 +177,14 @@ public sealed class TrafficWorld
         if (!_filled)
         {
             _filled = true;
-            var want = (int)Math.Min(gates.Count * fill, Math.Max(0, maxObjects - maxActive));
-            foreach (var s in gates.OrderBy(_ => Rng.Next()).Take(want)) SpawnParked(s);
             _nextDep = Time + 20;
             _nextArr = Time + 3;
+            var want = (int)Math.Min(gates.Count * fill, Math.Max(0, maxObjects - maxActive));
+            foreach (var s in gates.OrderBy(_ => Rng.Next()).Take(want))
+            {
+                try { SpawnParked(s); }
+                catch (Exception ex) { Log($"Couldn't park an aircraft at {s.Label}: {ex.Message}"); }
+            }
             Log($"{Apt.Icao}: traffic started with {want} parked aircraft ({gates.Count} usable parking spots)");
         }
         var active = Flights.Count(f => f.Kind != "parked" && !f.Test);

@@ -164,8 +164,27 @@ Console.WriteLine("== Runway-only airport (test buttons without a layout)");
     Check(ok2 && landedAt > 0, $"test arrival lands ({(landedAt > 0 ? (landedAt - 90).ToString("0") + " s after starting" : "never")})");
 }
 
+Console.WriteLine("== Traffic starts even when no installed model fits the small gates");
+{
+    var apt = new AirportModel(TestAirport.Build(false));
+    var world = new TrafficWorld(apt, new BigOnlySource(), seed: 3) { Level = TrafficLevel.Busy, Wind = new Wind(270, 10) };
+    var errors = new List<string>();
+    world.Log = s => { if (s.Contains("Couldn't") || s.Contains("removed")) errors.Add(s); };
+    Exception? crash = null;
+    try { for (var i = 0; i < 600; i++) world.Step(0.25); } catch (Exception ex) { crash = ex; }
+    Check(crash is null, "no crash" + (crash is null ? "" : ": " + crash.Message));
+    Check(world.Flights.Count > 0, $"aircraft were created ({world.Flights.Count})");
+}
+
 Console.WriteLine(failures.Count == 0 ? "TRAFFIC CHECKS PASSED" : $"TRAFFIC CHECKS FAILED: {failures.Count}");
 return failures.Count == 0 ? 0 : 1;
+
+/// <summary>Only offers widebodies, and ignores the gate size it's asked for (like a catalog with nothing small).</summary>
+sealed class BigOnlySource : IFlightSource
+{
+    public AircraftIdentity NewAircraft(string airport, int maxGateSize, Random rng) => new("UAL", "B772", "UAL" + rng.Next(100, 999), "KXXX");
+    public (string callsign, string other) NewFlight(string airport, string airline, bool departure, Random rng) => (airline + rng.Next(100, 999), "KYYY");
+}
 
 sealed class TestSource : IFlightSource
 {
