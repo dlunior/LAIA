@@ -71,6 +71,8 @@ public sealed class AirportModel
         public required string Label;
         public int Access = -1;          // taxi node the spot connects to
         public List<string> Airlines = new(); // ICAO codes of the airlines that use this stand (from the scenery)
+        /// <summary>Alternative stands drawn over this one (e.g. one large stand covering two small ones): only one can be used.</summary>
+        public List<ParkingSpot> Overlaps = new();
         public bool IsGate => Type is 8 or 9 or 10 or 15;
         // By the stand's radius (half the largest wingspan it takes); the type names (small/medium/heavy) vary by scenery.
         public int Size => RadiusM >= 33 ? 2 : RadiusM >= 17 ? 1 : RadiusM > 0 ? 0 : Type switch { 10 or 15 => 2, 9 => 1, _ => 0 };
@@ -226,6 +228,14 @@ public sealed class AirportModel
             }
             if (spot.Access >= 0 && pk.Type is not (6 or 7 or 11 or 12 or 13)) Spots.Add(spot);
         }
+        LinkOverlappingStands();
+    }
+
+    private void LinkOverlappingStands()
+    {
+        foreach (var a in Spots)
+            foreach (var b in Spots)
+                if (a != b && (a.P - b.P).Length < Math.Max(6, (a.RadiusM + b.RadiusM) * 0.7)) a.Overlaps.Add(b);
     }
 
     /// <summary>

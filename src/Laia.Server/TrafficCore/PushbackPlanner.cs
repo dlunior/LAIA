@@ -140,7 +140,7 @@ public sealed class PushbackPlanner(AirportModel apt)
             var q = path.At(s).p;
             foreach (var o in apt.Spots)
             {
-                if (o == spot || (o.P - spot.P).Length < 3) continue;
+                if (o == spot || spot.Overlaps.Contains(o) || (o.P - spot.P).Length < 3) continue;
                 if ((o.P - q).Length < Math.Max(8, o.RadiusM * 0.75)) { p.Problems.Add("passes through " + o.Label); s = double.MaxValue - 1; break; }
             }
         }
@@ -226,7 +226,7 @@ public sealed class PushbackPlanner(AirportModel apt)
     }
 
     /// <summary>Plans a pushback at every stand (for the log): how many are clean, and the problems found.</summary>
-    public string Survey(Perf perf, int targetNode, int examples = 6)
+    public string Survey(Perf perf, int targetNode, int examples = 40)
     {
         int clean = 0, straight = 0, fallback = 0, total = 0;
         var problems = new Dictionary<string, int>();

@@ -185,6 +185,7 @@ public sealed class TrafficWorld
             var want = (int)Math.Min(gates.Count * fill, Math.Max(0, maxObjects - maxActive));
             foreach (var s in gates.OrderBy(_ => Rng.Next()).Take(want))
             {
+                if (!SpotFree(s)) continue; // an overlapping alternative stand is already taken
                 try { SpawnParked(s); }
                 catch (Exception ex) { Log($"Couldn't park an aircraft at {s.Label}: {ex.Message}"); }
             }
@@ -225,7 +226,8 @@ public sealed class TrafficWorld
     }
 
     private bool SpotFree(AirportModel.ParkingSpot s) =>
-        !Flights.Any(f => f.Spot == s && !f.Done) && !(UserPos is { } u && (u - s.P).Length < s.RadiusM + 25);
+        !Flights.Any(f => !f.Done && f.Spot is not null && (f.Spot == s || s.Overlaps.Contains(f.Spot))) &&
+        !(UserPos is { } u && (u - s.P).Length < s.RadiusM + 25);
 
     private AirportModel.ParkingSpot? FindGate(Perf p, string airline)
     {
