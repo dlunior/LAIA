@@ -60,24 +60,29 @@ public static class Updates
         return false;
     }
 
-    /// <summary>Downloads to a temporary name, checks the size, then moves it into place.</summary>
+    /// <summary>
+    /// Downloads straight to the final name and checks the size. (No rename afterwards: antivirus scanners
+    /// briefly lock freshly written .exe files, which made a rename fail with "access denied".)
+    /// </summary>
     public static async Task DownloadAsync(HttpClient http, string url, string path, long expectedSize, CancellationToken ct = default)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        var tmp = path + ".part";
+        for (var i = 0; File.Exists(path) && i < 10; i++)
+        {
+            try { File.Delete(path); } catch when (i < 9) { await Task.Delay(500, ct); }
+        }
         using (var resp = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct))
         {
             resp.EnsureSuccessStatusCode();
             await using var src = await resp.Content.ReadAsStreamAsync(ct);
-            await using var dst = File.Create(tmp);
+            await using var dst = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
             await src.CopyToAsync(dst, ct);
         }
-        var got = new FileInfo(tmp).Length;
+        var got = new FileInfo(path).Length;
         if (expectedSize > 0 && got != expectedSize)
         {
-            File.Delete(tmp);
+            try { File.Delete(path); } catch { }
             throw new InvalidOperationException($"Download was incomplete ({got:N0} of {expectedSize:N0} bytes)");
         }
-        File.Move(tmp, path, true);
     }
 }

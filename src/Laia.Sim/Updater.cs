@@ -97,17 +97,24 @@ internal sealed class Updater
         {
             try
             {
-                var file = Path.Combine(Path.GetTempPath(), $"LAIA-Sim-Setup-{_latest.Version}.exe");
+                var file = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LAIA", "updates",
+                    $"LAIA-Sim-Setup-{_latest.Version}-{DateTime.Now:HHmmss}.exe");
                 Notify?.Invoke("Updating LAIA Sim", $"Downloading {_latest.Version}…");
                 await Updates.DownloadAsync(_github, _latest.SimUrl!, file, _latest.SimSize);
                 Log.Write($"Starting the LAIA Sim {_latest.Version} installer");
-                // The installer closes this app, installs, and starts the new version.
-                Process.Start(new ProcessStartInfo(file) { UseShellExecute = true });
+                // The installer closes this app, installs, and starts the new version. A freshly downloaded file can be
+                // held briefly by the virus scanner, so try for a few seconds.
+                for (var i = 0; ; i++)
+                {
+                    try { Process.Start(new ProcessStartInfo(file) { UseShellExecute = true }); break; }
+                    catch (Exception) when (i < 10) { await Task.Delay(1000); }
+                }
             }
             catch (Exception ex)
             {
-                Log.Write("LAIA Sim update failed: " + ex.Message);
-                Notify?.Invoke("LAIA", "Couldn't download the update: " + ex.Message);
+                Log.Write("LAIA Sim update failed: " + ex);
+                Notify?.Invoke("LAIA", "Couldn't install the LAIA Sim update: " + ex.Message + " Opening the download page instead.");
+                try { Process.Start(new ProcessStartInfo("https://github.com/dlunior/LAIA/releases") { UseShellExecute = true }); } catch { }
             }
         }
         else if (!ServerUpdate) Notify?.Invoke("LAIA", $"Both PCs are up to date ({_latest.Version}).");
