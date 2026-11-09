@@ -67,9 +67,21 @@ public sealed class FlightSource(SettingsStore settings, ILogger<FlightSource> l
         _ => null,
     } : null;
 
-    public AircraftIdentity NewAircraft(string airport, int maxGateSize, Random rng)
+    public AircraftIdentity NewAircraft(string airport, int maxGateSize, Random rng, IReadOnlyCollection<string>? airlines = null)
     {
         var cat = Catalog().Where(e => Perf.For(e.Type).GateSize <= maxGateSize).ToList();
+        // A stand that belongs to particular airlines gets one of theirs (if a model is installed).
+        if (airlines is { Count: > 0 })
+        {
+            var mine = cat.Where(e => airlines.Contains(e.Airline)).ToList();
+            if (mine.Count > 0)
+            {
+                var g = mine.GroupBy(e => e.Airline).ToList();
+                var pickOwn = WeightedPick(g[rng.Next(g.Count)].ToList(), rng);
+                var (ocs, oother) = NewFlight(airport, pickOwn.Airline, true, rng);
+                return new AircraftIdentity(pickOwn.Airline, pickOwn.Type, ocs, oother);
+            }
+        }
         var region = RegionFor(airport);
         if (region is not null)
         {
@@ -88,10 +100,10 @@ public sealed class FlightSource(SettingsStore settings, ILogger<FlightSource> l
         if (cat.Count == 0) cat = Fallback.ToList();
         CatalogEntry pick;
         var sched = Schedule(airport);
-        var airlines = sched.Select(s => s.Airline).Where(a => cat.Any(c => c.Airline == a) && (region is null || region.Contains(a))).ToList();
-        if (airlines.Count > 0)
+        var schedAirlines = sched.Select(s => s.Airline).Where(a => cat.Any(c => c.Airline == a) && (region is null || region.Contains(a))).ToList();
+        if (schedAirlines.Count > 0)
         {
-            var airline = airlines[rng.Next(airlines.Count)];
+            var airline = schedAirlines[rng.Next(schedAirlines.Count)];
             var types = cat.Where(c => c.Airline == airline).ToList();
             pick = WeightedPick(types, rng);
         }

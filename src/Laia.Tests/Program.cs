@@ -164,6 +164,20 @@ Console.WriteLine("== Runway-only airport (test buttons without a layout)");
     Check(ok2 && landedAt > 0, $"test arrival lands ({(landedAt > 0 ? (landedAt - 90).ToString("0") + " s after starting" : "never")})");
 }
 
+Console.WriteLine("== Pushback plans at every gate of the test airport");
+{
+    var apt = new AirportModel(TestAirport.Build(false));
+    var world = new TrafficWorld(apt, new TestSource(), seed: 5) { Wind = new Wind(270, 10) };
+    var survey = world.PushbackSurvey();
+    Console.WriteLine("  " + survey);
+    Check(survey.Contains("16 clean"), "a clean pushback at every gate");
+    var planner = new PushbackPlanner(apt);
+    var p = planner.Plan(apt.Spots[5], Perf.Narrowbody, -1);
+    Console.WriteLine("  gate 6: " + p.Describe());
+    Check(p.TurnStart >= 25, $"pushes straight back before turning ({p.TurnStart:0} m)");
+    Check(Math.Abs(Geo2.Diff(p.EndHeading, 90)) < 5 || Math.Abs(Geo2.Diff(p.EndHeading, 270)) < 5, "ends lined up on the taxilane");
+}
+
 Console.WriteLine("== Traffic starts even when no installed model fits the small gates");
 {
     var apt = new AirportModel(TestAirport.Build(false));
@@ -182,14 +196,14 @@ return failures.Count == 0 ? 0 : 1;
 /// <summary>Only offers widebodies, and ignores the gate size it's asked for (like a catalog with nothing small).</summary>
 sealed class BigOnlySource : IFlightSource
 {
-    public AircraftIdentity NewAircraft(string airport, int maxGateSize, Random rng) => new("UAL", "B772", "UAL" + rng.Next(100, 999), "KXXX");
+    public AircraftIdentity NewAircraft(string airport, int maxGateSize, Random rng, IReadOnlyCollection<string>? airlines = null) => new("UAL", "B772", "UAL" + rng.Next(100, 999), "KXXX");
     public (string callsign, string other) NewFlight(string airport, string airline, bool departure, Random rng) => (airline + rng.Next(100, 999), "KYYY");
 }
 
 sealed class TestSource : IFlightSource
 {
     private static readonly (string a, string t)[] Types = { ("DAL", "B739"), ("UAL", "A320"), ("AAL", "A321"), ("SKW", "E75L"), ("DAL", "A333"), ("UAL", "B772"), ("SWA", "B737") };
-    public AircraftIdentity NewAircraft(string airport, int maxGateSize, Random rng)
+    public AircraftIdentity NewAircraft(string airport, int maxGateSize, Random rng, IReadOnlyCollection<string>? airlines = null)
     {
         var ok = Types.Where(x => Perf.For(x.t).GateSize <= maxGateSize).ToArray();
         var (a, t) = ok[rng.Next(ok.Length)];

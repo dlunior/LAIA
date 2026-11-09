@@ -9,8 +9,11 @@ public sealed record AircraftIdentity(string Airline, string Type, string Callsi
 /// <summary>Supplies believable airlines, types and flight numbers (from installed models and schedules).</summary>
 public interface IFlightSource
 {
-    /// <summary>A new aircraft (airline + type) that fits a gate of the given size (0 small, 1 medium, 2 heavy).</summary>
-    AircraftIdentity NewAircraft(string airport, int maxGateSize, Random rng);
+    /// <summary>
+    /// A new aircraft (airline + type) that fits a gate of the given size (0 small, 1 medium, 2 heavy), from one of
+    /// the given airlines when possible (the airlines the stand belongs to).
+    /// </summary>
+    AircraftIdentity NewAircraft(string airport, int maxGateSize, Random rng, IReadOnlyCollection<string>? airlines = null);
     /// <summary>A flight number and the other airport for this airline's next departure or arrival.</summary>
     (string callsign, string other) NewFlight(string airport, string airline, bool departure, Random rng);
 }
@@ -228,11 +231,13 @@ public sealed class TrafficWorld
     {
         var free = UsableSpots().Where(s => SpotFree(s) && s.Size >= p.GateSize && (s.RadiusM <= 0 || s.RadiusM >= p.SpanM / 2 * 0.85)).ToList();
         if (free.Count == 0) return null;
-        // Prefer the smallest gate that fits (heavies keep the big gates), then the airline's own gates.
-        var minSize = free.Min(s => s.Size);
-        var pool = free.Where(s => s.Size == minSize).ToList();
-        var own = pool.Where(s => Apt.Data.Parkings[s.Index].Airlines.Contains(airline, StringComparer.OrdinalIgnoreCase)).ToList();
-        if (own.Count > 0) pool = own;
+        // The airline's own stands first, then stands nobody claims; other airlines' stands only as a last resort.
+        var own = free.Where(s => s.Airlines.Contains(airline)).ToList();
+        var open = free.Where(s => s.Airlines.Count == 0).ToList();
+        var pool = own.Count > 0 ? own : open.Count > 0 ? open : free;
+        // The smallest stand that fits, so the big ones stay free for the big aircraft.
+        var minSize = pool.Min(s => s.Size);
+        pool = pool.Where(s => s.Size == minSize).ToList();
         return pool[Rng.Next(pool.Count)];
     }
 
@@ -240,7 +245,7 @@ public sealed class TrafficWorld
 
     private Flight SpawnParked(AirportModel.ParkingSpot s)
     {
-        var id = Source.NewAircraft(Apt.Icao, s.Size, Rng);
+        var id = Source.NewAircraft(Apt.Icao, s.Size, Rng, s.Airlines.Count > 0 ? s.Airlines : null);
         var f = new Flight
         {
             Id = NewId(), Callsign = id.Callsign, Airline = id.Airline, Type = id.Type, Other = id.Other, Kind = "parked", P = Perf.For(id.Type),
@@ -279,91 +284,35 @@ public sealed class TrafficWorld
         return f;
     }
 
+    private PushbackPlanner? _pushPlanner;
+
     private void StartPushback(Flight f)
     {
         var s = f.Spot!;
-        var face = V2.FromBearing(s.Heading);
-        var access = s.Access >= 0 ? Apt.Nodes[s.Access] : s.P - face * 60;
-        // Which way the aircraft should face after pushback: toward the first part of its taxi route.
         var hold = PickRunwayEntry(f.Rwy!, out var entry);
-        var route = hold >= 0 && s.Access >= 0 ? Apt.Route(s.Access, hold) : null;
-        V2 towardRoute;
-        if (route is not null && route.Count >= 2) towardRoute = (Apt.Nodes[route[1]] - access).Unit;
-        else towardRoute = (f.Rwy!.Threshold - access).Unit;
-        // Push straight back to the taxilane, then swing the tail so the nose points along the route.
-        var back = Math.Clamp(V2.Dot(access - s.P, face * -1), Math.Max(15, f.P.LengthM * 0.5), 90);
-        var p1 = s.P - face * back;
-        // Tail swings away from the route direction (never back toward the gate).
-        var swing = towardRoute;
-        if (Math.Abs(V2.Dot(swing, face)) > 0.7)
-        {
-            // The route continues straight ahead or back past the gate: push tail-sideways onto the taxilane,
-            // toward the side the route then goes.
-            var later = route is not null && route.Count >= 3 ? Apt.Nodes[route[2]] - access : face.Perp;
-            swing = V2.Dot(face.Perp, later) >= 0 ? face.Perp : face.Perp * -1;
-        }
-        var end = p1 - swing * Math.Max(30, f.P.LengthM * 0.8);
-        f.Path = new PathGeom(new List<V2> { s.P, p1, end }, _ => Math.Max(18, f.P.LengthM * 0.5), 0.5);
+        _pushPlanner ??= new PushbackPlanner(Apt);
+        var plan = _pushPlanner.Plan(s, f.P, hold);
+        f.Path = new PathGeom(plan.Points, _ => plan.Radius, 0.5);
         f.S = 0;
         f.Reverse = true;
-        f.MaxKt = 3;
+        f.MaxKt = 3.5;                 // about 1.8 m/s, a real tug's pace
         f.HoldNode = hold;
         f.EntryNode = entry;
-        f.StartNode = s.Access;
+        f.StartNode = plan.EndNode >= 0 ? plan.EndNode : s.Access;
         f.Stops.Clear();
         f.Spot = null; // the gate is free once the aircraft leaves it
+        f.Timer = 1.5; // brakes off, then the push starts
         f.SetPhase("pushback", Time);
+        Log($"{f.Callsign}: pushing back from {s.Label} ({plan.Describe()})");
     }
 
-    /// <summary>A new taxi route from where the aircraft is, avoiding the area around another aircraft.</summary>
-    private bool Reroute(Flight f, Flight other)
+    /// <summary>For the log: plans a pushback at every stand of this airport and summarises.</summary>
+    public string PushbackSurvey()
     {
-        int dest;
-        if (f.Phase == "taxi") dest = f.HoldNode;
-        else if (f.Phase == "taxi in" && f.Spot is not null) dest = f.Spot.Access;
-        else return false;
-        if (dest < 0) return false;
-        var avoid = new HashSet<int>();
-        for (var i = 0; i < Apt.TaxiPointCount; i++) if ((Apt.Nodes[i] - other.Pos).Length < 70) avoid.Add(i);
-        var from = -1; var best = double.MaxValue;
-        for (var i = 0; i < Apt.TaxiPointCount; i++)
-        {
-            if (avoid.Contains(i) || Apt.Adj[i].Count == 0 || Apt.NodeRunway[i] >= 0) continue;
-            var d = (Apt.Nodes[i] - f.Pos).Length;
-            if (d < best) { best = d; from = i; }
-        }
-        if (from < 0 || best > 150) return false;
-        var route = Apt.Route(from, dest, ActiveRunways(), avoid);
-        if (route is null) return false;
-        var pts = new List<V2> { f.Pos };
-        var fwd = V2.FromBearing(f.Heading);
-        if (V2.Dot(Apt.Nodes[route[0]] - f.Pos, fwd) < 0)
-            pts.Add(f.Pos + fwd * 25 + fwd.Perp * 30); // turn around in a teardrop rather than on the spot
-        var offset = pts.Count;
-        if (f.Phase == "taxi")
-        {
-            var holdIndex = HoldShortIndex(route, route.Count - 1, f.Rwy!);
-            f.LineupNodes = route.Skip(holdIndex + 1).ToList();
-            route = route.Take(holdIndex + 1).ToList();
-        }
-        pts.AddRange(route.Select(n => Apt.Nodes[n]));
-        if (f.Phase == "taxi in" && f.Spot is { } gate)
-        {
-            pts.Add(gate.P - V2.FromBearing(gate.Heading) * Math.Min(40, Math.Max(15, (gate.P - Apt.Nodes[gate.Access]).Length * 0.5)));
-            pts.Add(gate.P);
-        }
-        SetGroundPath(f, pts, route, offset);
-        Log($"{f.Callsign}: taking another way round {other.Callsign}");
-        return true;
-    }
-
-    /// <summary>No pushback while another aircraft is taxiing or pushing right behind the gate.</summary>
-    private bool PushbackClear(Flight f)
-    {
-        var s = f.Spot;
-        if (s is null) return true;
-        var behind = s.P - V2.FromBearing(s.Heading) * Math.Max(30, f.P.LengthM);
-        return !Flights.Any(o => o != f && o.OnGround && !o.Done && o.Phase is "pushback" or "taxi" or "taxi in" && (o.Pos - behind).Length < 90);
+        if (DepRwy is null) SelectRunways(true);
+        var hold = DepRwy is null ? -1 : PickRunwayEntry(DepRwy, out _);
+        _pushPlanner ??= new PushbackPlanner(Apt);
+        return _pushPlanner.Survey(Perf.Narrowbody, hold);
     }
 
     /// <summary>Where departures enter the runway: the connection nearest the threshold. Returns the hold node.</summary>
@@ -879,6 +828,7 @@ public sealed class TrafficWorld
                 break;
             case "pushback":
                 f.Lights = Nav | Beacon | Logo;
+                if (f.Timer > 0) { f.Timer -= dt; break; }
                 if (MoveGround(f, dt)) { f.SetPhase("engine start", Time); f.Timer = 25 + Rng.NextDouble() * 20; f.Gs = 0; }
                 break;
             case "engine start":
@@ -964,9 +914,10 @@ public sealed class TrafficWorld
             break;
         }
         if (hold is not null) target = Math.Min(target, Math.Sqrt(2 * 0.8 * Math.Max(0, hold.S - f.S)));
-        target = Math.Min(target, Math.Sqrt(2 * (f.Phase == "landing roll" ? 1.2 : 0.7) * Math.Max(0, path.Length - f.S)) + 0.3);
+        // Ease into stops (a sudden stop rocks the aircraft on its nose gear).
+        target = Math.Min(target, Math.Sqrt(2 * (f.Phase == "landing roll" ? 1.2 : f.Reverse ? 0.3 : 0.7) * Math.Max(0, path.Length - f.S)) + 0.12);
         if (f.Phase is not ("landing roll" or "lining up") && Blocked(f, v)) target = 0;
-        var accel = f.Reverse ? 0.3 : 0.6;
+        var accel = f.Reverse ? 0.25 : 0.6;
         v += Math.Clamp(target - v, -brake * dt, accel * dt);
         v = Math.Max(0, v);
         var ns = f.S + v * dt;

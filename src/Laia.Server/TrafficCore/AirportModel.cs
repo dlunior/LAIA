@@ -52,6 +52,10 @@ public sealed class AirportModel
     public bool[] NodeHoldShort { get; private set; } = Array.Empty<bool>();
     public List<GraphEdge>[] Adj { get; private set; } = Array.Empty<List<GraphEdge>>();
     public List<ParkingSpot> Spots { get; } = new();
+    /// <summary>Vehicle service roads (the road behind the gates marks where a pushback may start turning).</summary>
+    public List<(V2 a, V2 b)> Roads { get; } = new();
+    /// <summary>All taxi lines (taxiways and apron lanes) as segments between graph nodes.</summary>
+    public List<GraphEdge> TaxiLines { get; } = new();
     public AirportData Data { get; }
     public string Calibration { get; private set; } = "";
     public bool HasGround => Spots.Count > 0 && Nodes.Length > 0;
@@ -66,8 +70,10 @@ public sealed class AirportModel
         public required int Type;
         public required string Label;
         public int Access = -1;          // taxi node the spot connects to
+        public List<string> Airlines = new(); // ICAO codes of the airlines that use this stand (from the scenery)
         public bool IsGate => Type is 8 or 9 or 10 or 15;
-        public int Size => Type switch { 10 or 15 => 2, 9 => 1, 8 => 0, _ => RadiusM >= 30 ? 2 : RadiusM >= 18 ? 1 : 0 };
+        // By the stand's radius (half the largest wingspan it takes); the type names (small/medium/heavy) vary by scenery.
+        public int Size => RadiusM >= 33 ? 2 : RadiusM >= 17 ? 1 : RadiusM > 0 ? 0 : Type switch { 10 or 15 => 2, 9 => 1, _ => 0 };
     }
 
     public AirportModel(AirportData d)
@@ -176,6 +182,11 @@ public sealed class AirportModel
         for (var i = 0; i < Adj.Length; i++) Adj[i] = new List<GraphEdge>();
         foreach (var p in d.Paths)
         {
+            if (p.Type is 6 or 7)
+            {
+                if (p.Start >= 0 && p.Start < np && p.End >= 0 && p.End < np) Roads.Add((Nodes[p.Start], Nodes[p.End]));
+                continue;
+            }
             if (p.Type is not (1 or 2 or 3 or 4)) continue;
             var a = p.Start;
             var b = p.Type == 3 ? np + p.End : p.End;
@@ -185,13 +196,15 @@ public sealed class AirportModel
             if (len < 0.1 || len > 5000) continue;
             var name = p.NameIndex >= 0 && p.NameIndex < d.TaxiNames.Count ? d.TaxiNames[p.NameIndex] : "";
             Adj[a].Add(new GraphEdge { A = a, B = b, Len = len, Type = p.Type, Name = name });
+            if (p.Type is 1 or 4) TaxiLines.Add(new GraphEdge { A = a, B = b, Len = len, Type = p.Type, Name = name });
             Adj[b].Add(new GraphEdge { A = b, B = a, Len = len, Type = p.Type, Name = name });
         }
         for (var k = 0; k < nk; k++)
         {
             var pk = d.Parkings[k];
             var node = np + k;
-            var spot = new ParkingSpot { Index = k, Node = node, P = Nodes[node], Heading = Geo2.Norm(pk.Heading), RadiusM = pk.RadiusM, Type = pk.Type, Label = pk.Label() };
+            var spot = new ParkingSpot { Index = k, Node = node, P = Nodes[node], Heading = Geo2.Norm(pk.Heading), RadiusM = pk.RadiusM, Type = pk.Type, Label = pk.Label(),
+                Airlines = pk.Airlines.Select(AirlineCodes.ToIcao).Where(c => c.Length == 3).Distinct().ToList() };
             var link = Adj[node].Where(e => e.B < np).OrderBy(e => e.Len).FirstOrDefault();
             if (link is not null) spot.Access = link.B;
             else
@@ -238,7 +251,8 @@ public sealed class AirportModel
                 if (avoidNodes is not null && avoidNodes.Contains(v) && v != to) continue;
                 var cost = e.Len;
                 // Prefer named taxiways; apron alleys and lead-ins only to reach a gate.
-                cost *= e.Type switch { 2 => 8, 4 => 3, 3 => 4, _ => e.Name.Length == 0 ? 1.5 : 1.0 };
+                // Named taxiways (A, B, AA, D5…) are preferred; numbered or unnamed lines are usually apron lanes.
+                cost *= e.Type switch { 2 => 8, 3 => 4, _ => IsTaxiway(e.Name) ? 1.0 : 2.5 };
                 if (NodeRunway[v] >= 0 && avoidRunways is not null && avoidRunways.Contains(NodeRunway[v])) cost += 400; // crossing an active runway
                 var nd = dist[u] + cost;
                 if (dist.TryGetValue(v, out var old) && old <= nd) continue;
@@ -253,6 +267,8 @@ public sealed class AirportModel
         path.Reverse();
         return path;
     }
+
+    public static bool IsTaxiway(string name) => name.Length > 0 && char.IsLetter(name[0]);
 
     /// <summary>Taxi nodes that sit on a runway's centreline area and connect off it: (runway node, off-runway node).</summary>
     public IEnumerable<(int on, int off)> RunwayLinks(int runway)
@@ -346,5 +362,29 @@ public sealed class AirportModel
             }
         }
         return pts;
+    }
+}
+
+/// <summary>Scenery lists stand airlines by ICAO (DAL) or IATA (DL) code; LAIA works in ICAO.</summary>
+public static class AirlineCodes
+{
+    private static readonly Dictionary<string, string> Iata = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["DL"] = "DAL", ["AA"] = "AAL", ["UA"] = "UAL", ["WN"] = "SWA", ["B6"] = "JBU", ["AS"] = "ASA", ["NK"] = "NKS", ["F9"] = "FFT",
+        ["OO"] = "SKW", ["YX"] = "RPA", ["MQ"] = "ENY", ["9E"] = "EDV", ["OH"] = "JIA", ["PT"] = "PDT", ["G4"] = "AAY", ["SY"] = "SCX",
+        ["HA"] = "HAL", ["MX"] = "MXY", ["QX"] = "QXE", ["G7"] = "GJS", ["YV"] = "ASH", ["C5"] = "UCA", ["ZW"] = "AWI", ["AC"] = "ACA",
+        ["WS"] = "WJA", ["QK"] = "JZA", ["PD"] = "POE", ["TS"] = "TSC", ["WG"] = "SWG", ["F8"] = "FLE", ["XP"] = "VXP", ["BA"] = "BAW",
+        ["LH"] = "DLH", ["AF"] = "AFR", ["KL"] = "KLM", ["IB"] = "IBE", ["VS"] = "VIR", ["EI"] = "EIN", ["LX"] = "SWR", ["TK"] = "THY",
+        ["EK"] = "UAE", ["QR"] = "QTR", ["EY"] = "ETD", ["AM"] = "AMX", ["Y4"] = "VOI", ["CM"] = "CMP", ["AV"] = "AVA", ["FX"] = "FDX",
+        ["5X"] = "UPS", ["U2"] = "EZY", ["FR"] = "RYR", ["SK"] = "SAS", ["AY"] = "FIN", ["OS"] = "AUA", ["TP"] = "TAP", ["AZ"] = "ITY",
+        ["SN"] = "BEL", ["LO"] = "LOT", ["W6"] = "WZZ", ["NH"] = "ANA", ["JL"] = "JAL", ["CX"] = "CPA", ["SQ"] = "SIA", ["KE"] = "KAL",
+        ["QF"] = "QFA", ["NZ"] = "ANZ", ["LA"] = "LAN", ["ET"] = "ETH",
+    };
+
+    public static string ToIcao(string code)
+    {
+        code = (code ?? "").Trim().ToUpperInvariant();
+        if (code.Length == 3 && code.All(char.IsLetter)) return code;
+        return Iata.TryGetValue(code, out var icao) ? icao : "";
     }
 }

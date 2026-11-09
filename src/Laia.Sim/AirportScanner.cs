@@ -13,7 +13,7 @@ namespace Laia.Sim;
 /// </summary>
 internal sealed class AirportScanner : IAsyncDisposable
 {
-    private const uint DefLayout = 1, DefProcedures = 2;
+    private const uint DefLayout = 1, DefProcedures = 2, DefAirlines = 3;
     private SimConnectClient? _sc;
     private Task? _run;
     private readonly CancellationTokenSource _cts = new();
@@ -21,7 +21,8 @@ internal sealed class AirportScanner : IAsyncDisposable
     private readonly Dictionary<uint, Pending> _pending = new();
     private readonly HashSet<uint> _procDefSends = new();
     private readonly Dictionary<uint, string> _sentFields = new();
-    private bool _procedureFieldsRejected;
+    private bool _procedureFieldsRejected, _airlineFieldsRejected;
+    private readonly HashSet<uint> _airlineDefSends = new();
     private uint _nextReq = 100;
 
     private sealed class Pending
@@ -55,7 +56,12 @@ internal sealed class AirportScanner : IAsyncDisposable
         sc.SimException += (code, sendId) =>
         {
             string? field;
-            lock (_gate) { _sentFields.TryGetValue(sendId, out field); if (_procDefSends.Contains(sendId)) _procedureFieldsRejected = true; }
+            lock (_gate)
+            {
+                _sentFields.TryGetValue(sendId, out field);
+                if (_procDefSends.Contains(sendId)) _procedureFieldsRejected = true;
+                if (_airlineDefSends.Contains(sendId)) _airlineFieldsRejected = true;
+            }
             Log.Write($"Airport data: SimConnect exception {code} on packet {sendId}{(field is null ? "" : " (" + field + ")")}");
         };
         _sc = sc;
@@ -64,7 +70,12 @@ internal sealed class AirportScanner : IAsyncDisposable
         async Task Add(uint def, string f)
         {
             var id = await sc.AddToFacilityDefinitionAsync(def, f);
-            lock (_gate) { _sentFields[id] = $"definition {def}: {f}"; if (def == DefProcedures) _procDefSends.Add(id); }
+            lock (_gate)
+            {
+                _sentFields[id] = $"definition {def}: {f}";
+                if (def == DefProcedures) _procDefSends.Add(id);
+                if (def == DefAirlines) _airlineDefSends.Add(id);
+            }
         }
 
         // --- Layout: airport, runways, taxi points, parking, taxi paths, taxiway names
@@ -78,6 +89,10 @@ internal sealed class AirportScanner : IAsyncDisposable
                      "OPEN TAXI_NAME", "NAME", "CLOSE TAXI_NAME",
                      "CLOSE AIRPORT" })
             await Add(DefLayout, f);
+
+        // --- Which airlines use each parking spot (separate, so a problem here can't spoil the layout)
+        foreach (var f in new[] { "OPEN AIRPORT", "N_TAXI_PARKINGS", "OPEN TAXI_PARKING", "N_AIRLINES", "OPEN AIRLINE", "NAME", "CLOSE AIRLINE", "CLOSE TAXI_PARKING", "CLOSE AIRPORT" })
+            await Add(DefAirlines, f);
 
         // --- Procedures: SIDs, STARs and approaches with their legs
         async Task Legs(string list)
@@ -135,6 +150,22 @@ internal sealed class AirportScanner : IAsyncDisposable
         apt.Points = layout.Root.Children.Where(c => c.Value is TaxiPoint).OrderBy(c => c.Index).Select(c => (TaxiPoint)c.Value!).ToList();
         apt.Parkings = layout.Root.Children.Where(c => c.Value is Parking).OrderBy(c => c.Index).Select(c => (Parking)c.Value!).ToList();
         apt.Paths = layout.Root.Children.Where(c => c.Value is TaxiPath).OrderBy(c => c.Index).Select(c => (TaxiPath)c.Value!).ToList();
+
+        bool airlinesRejected;
+        lock (_gate) airlinesRejected = _airlineFieldsRejected;
+        if (!airlinesRejected)
+        {
+            var al = await RequestAsync(DefAirlines, icao, TimeSpan.FromSeconds(30), ct);
+            var withAirlines = 0;
+            if (al?.Root is { } aroot)
+                foreach (var pk in aroot.Children.Where(c => c.Type == 15))
+                {
+                    if (pk.Index >= apt.Parkings.Count) continue;
+                    var codes = pk.Children.Select(c => c.Value as string).Where(v => !string.IsNullOrWhiteSpace(v)).Select(v => v!.Trim().ToUpperInvariant()).Distinct().ToList();
+                    if (codes.Count > 0) { apt.Parkings[(int)pk.Index].Airlines = codes; withAirlines++; }
+                }
+            Log.Write($"Airport data: {icao} has airline codes on {withAirlines} of {apt.Parkings.Count} parking spots");
+        }
 
         bool rejected;
         lock (_gate) rejected = _procedureFieldsRejected;
@@ -220,6 +251,8 @@ internal sealed class AirportScanner : IAsyncDisposable
 
     private static object? Parse(uint def, FacilityRecord r)
     {
+        if (def == DefAirlines)
+            return r.Type switch { 0 => null, 15 => null, _ => r.Str(8) }; // airline record: NAME
         switch (r.Type)
         {
             case 0 when def == DefLayout: // AIRPORT

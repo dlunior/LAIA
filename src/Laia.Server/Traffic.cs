@@ -169,6 +169,12 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 _world.SelectRunways(true);
                 log.LogInformation("Traffic airport: {icao} {name} ({nm:0} nm away); taxi map {cal}; {desc}", n.model.Icao, n.model.Name, n.nm, n.model.Calibration, n.model.Describe());
                 _testWorld = null;
+                var w = _world;
+                _ = Task.Run(() =>
+                {
+                    try { var r = w.PushbackSurvey(); log.LogInformation("{icao}: {survey}", w.Apt.Icao, r); }
+                    catch (Exception ex) { log.LogWarning("Pushback survey failed: {msg}", ex.Message); }
+                });
             }
         }
         else if (_world is not null && sim.Connected)
