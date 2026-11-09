@@ -108,7 +108,7 @@ Console.WriteLine("== One hour of busy traffic, runway 27 in use (wind 270/12)")
                 {
                     var rate = Math.Abs(Geo2.Diff(l.hdg, f.Heading)) / dt;
                     if (f.Phase != "pushback") maxGroundTurnRate = Math.Max(maxGroundTurnRate, rate);
-                    if (rate > 40 && f.Phase != "pushback") { sharpTurns++; if (sharpTurns <= 5) log.Add($"{TimeSpan.FromSeconds(world.Time):hh\\:mm\\:ss} SHARP TURN {f.Callsign} {f.Phase}: {rate:0}°/s at {f.Gs:0} kt"); }
+                    if (rate > 40 && f.Phase != "pushback") { sharpTurns++; if (sharpTurns <= 5) log.Add($"{TimeSpan.FromSeconds(world.Time):hh\\:mm\\:ss} SHARP TURN {f.Callsign} {l.phase}->{f.Phase}: {rate:0}°/s at {f.Gs:0} kt at ({f.Pos.X:0},{f.Pos.Y:0})"); }
                 }
             }
             if (prevBank.TryGetValue(f.Id, out var pb)) maxBankRate = Math.Max(maxBankRate, Math.Abs(f.Bank - pb) / dt);
@@ -139,6 +139,7 @@ Console.WriteLine("== One hour of busy traffic, runway 27 in use (wind 270/12)")
     Check(jumps == 0, $"no jumps in movement ({jumps})");
     Check(closeCalls < 20, $"aircraft keep their distance on the ground ({closeCalls} moments closer than 12 m)");
     Check(stuck == 0, $"no aircraft stuck for 15 minutes ({stuck})");
+    Check(sharpTurns == 0, $"no sudden turns on the ground ({sharpTurns}, fastest {maxGroundTurnRate:0}°/s)");
     Check(maxBankRate <= 5.5, $"bank changes gently ({maxBankRate:0.0}°/s)");
     Check(!log.Any(l => l.Contains("removed")), "no errors in the traffic logic");
     Check(seenPhases.Contains("pushback") && seenPhases.Contains("lined up") && seenPhases.Contains("flare") && seenPhases.Contains("at gate") || seenPhases.Contains("parked"),

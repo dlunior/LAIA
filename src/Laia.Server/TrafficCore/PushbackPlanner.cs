@@ -49,23 +49,8 @@ public sealed class PushbackPlanner(AirportModel apt)
                 var turn = Geo2.Diff(back.Bearing, m1.Bearing);
                 if (Math.Abs(turn) > 120) continue;
                 var aheadNode = dir > 0 ? line.B : line.A;
-                if (Math.Abs(turn) < 4)
-                {
-                    // Line runs straight back from the stand: a straight push onto it.
-                    if (Math.Abs(V2.Cross(u, s0 - a)) > 3) continue;
-                    {
-                        foreach (var target in new[] { V2.Dot(a - s0, back), V2.Dot(b - s0, back) })
-                        {
-                            var dist = Math.Max(target, wingDist);
-                            if (dist < 10 || dist > 200) continue;
-                            var end = s0 + back * dist;
-                            var p = new PushPlan { Points = new() { s0, end }, Radius = rcomf, End = end, EndHeading = h.Bearing, EndNode = aheadNode, Kind = "straight", TurnStart = dist };
-                            if (!WithinLine(end, a, b, u, 3)) continue;
-                            cands.Add(Score(p, spot, perf, roadDist, wingDist, rcomf, rmin, Math.Abs(turn), 0));
-                        }
-                    }
-                    continue;
-                }
+                // A line straight behind the stand would leave the nose pointing back at the gate: always end with a turn.
+                if (Math.Abs(turn) < 15) continue;
                 // Where the straight push meets the line: the corner of the turn.
                 var n = new V2(-u.Y, u.X);
                 var denom = V2.Dot(n, back);
