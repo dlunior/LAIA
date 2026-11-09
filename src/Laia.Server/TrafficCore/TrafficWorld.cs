@@ -929,7 +929,8 @@ public sealed class TrafficWorld
             f.AltFt = f.OnRunway >= 0 && f.Rwy is not null ? f.Rwy.ElevationFt : Apt.ElevationFt;
             f.Vs = 0;
             f.Bank = 0;
-            if (f.Phase is not ("takeoff roll" or "landing roll")) f.Pitch += Math.Clamp(0 - f.Pitch, -2 * dt, 2 * dt);
+            // Nose comes down: on the ground generally, and 1.5 s after touchdown on the landing roll.
+            if (f.Phase != "takeoff roll" && !(f.Phase == "landing roll" && Time - f.PhaseTime < 1.5)) f.Pitch += Math.Clamp(0 - f.Pitch, -2.5 * dt, 2.5 * dt);
         }
         if (f.Reserve >= 0 && f.Phase is "taxi" or "taxi in")
         {
@@ -1168,7 +1169,8 @@ public sealed class TrafficWorld
         MoveAir(f, dt);
         var fpa = Math.Atan2(f.Vs, Math.Max(60, f.Gs) * 101.27) * 180 / Math.PI;
         var alpha = Math.Clamp(2.5 + (250 - f.Ias) / 30, 2.5, 6.5);
-        var pitchTarget = f.Phase == "flare" ? Math.Min(6, alpha + 1) : fpa + alpha;
+        // Real airliners: about 2-3° nose up on final, 4-5° in the flare.
+        var pitchTarget = f.Phase == "flare" ? 4.5 : Math.Min(fpa + alpha, f.Gear ? 3.0 : 8.0);
         f.Pitch += Math.Clamp(pitchTarget - f.Pitch, -2 * dt, 2 * dt);
         if (f.S >= f.Path!.Length - 1) f.Done = true;
     }

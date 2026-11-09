@@ -146,7 +146,7 @@ internal sealed class TrafficRenderer : IAsyncDisposable
         public bool Ready, Removed;
         public string Motion = "laia";
         public double GroundAlt = double.NaN, CgFt = double.NaN, SmoothGround = double.NaN;
-        public double LastLights = -100, LastGear = -100;
+        public double LastLights = -100, LastGear = -100, GearPos = -1, GearTime;
         public int SentLights = -1, SentGear = -1;
         public double SentLat, SentLon, SentAlt, SentHdg, LastSent = -100;
     }
@@ -165,7 +165,11 @@ internal sealed class TrafficRenderer : IAsyncDisposable
             await _sc.AddToDataDefinitionAsync(DefPos, n, u, SimDataType.Float64);
         await _sc.AddToDataDefinitionAsync(DefGround, "GROUND ALTITUDE", "feet", SimDataType.Float64);
         await _sc.AddToDataDefinitionAsync(DefGround, "STATIC CG TO GROUND", "feet", SimDataType.Float64);
+        // The handle alone doesn't move the gear on frozen AI aircraft; the gear positions themselves are settable.
         await _sc.AddToDataDefinitionAsync(DefGear, "GEAR HANDLE POSITION", "bool", SimDataType.Float64);
+        await _sc.AddToDataDefinitionAsync(DefGear, "GEAR CENTER POSITION", "percent over 100", SimDataType.Float64);
+        await _sc.AddToDataDefinitionAsync(DefGear, "GEAR LEFT POSITION", "percent over 100", SimDataType.Float64);
+        await _sc.AddToDataDefinitionAsync(DefGear, "GEAR RIGHT POSITION", "percent over 100", SimDataType.Float64);
         await _sc.AddToDataDefinitionAsync(DefWaypoints, "AI WAYPOINT LIST", "number", SimDataType.Waypoint);
         await _sc.MapClientEventToSimEventAsync(EvFreezeLatLon, "FREEZE_LATITUDE_LONGITUDE_SET");
         await _sc.MapClientEventToSimEventAsync(EvFreezeAlt, "FREEZE_ALTITUDE_SET");
@@ -385,7 +389,7 @@ internal sealed class TrafficRenderer : IAsyncDisposable
     private async Task RenderLoop(CancellationToken ct)
     {
         var buf = new byte[72];
-        var gear = new byte[8];
+        var gear = new byte[32];
         var lastFrame = Now;
         var frameClock = double.NaN;
         var avgDt = 0.0;
@@ -504,13 +508,21 @@ internal sealed class TrafficRenderer : IAsyncDisposable
                         }
                         // Gear: the gear command (what a pilot's lever does) when it changes and every few seconds,
                         // plus the handle position for models that read that.
+                        // The gear travels over about 8 seconds, like the real thing.
                         var g = t.GearDown ? 1 : 0;
-                        if (g != o.SentGear || now - o.LastGear > 3)
+                        var gdt = Math.Clamp(now - o.GearTime, 0, 1);
+                        o.GearTime = now;
+                        var moving = o.GearPos >= 0 && Math.Abs(o.GearPos - g) > 0.001;
+                        o.GearPos = o.GearPos < 0 ? g : o.GearPos + Math.Clamp(g - o.GearPos, -gdt / 8, gdt / 8);
+                        if (g != o.SentGear || moving && now - o.LastGear > 0.1 || now - o.LastGear > 3)
                         {
+                            if (g != o.SentGear) await _sc.TransmitClientEventAsync(o.ObjectId, g == 1 ? EvGearDown : EvGearUp, 0);
                             o.SentGear = g;
                             o.LastGear = now;
-                            await _sc.TransmitClientEventAsync(o.ObjectId, g == 1 ? EvGearDown : EvGearUp, 0);
-                            BinaryPrimitives.WriteDoubleLittleEndian(gear, t.GearDown ? 1 : 0);
+                            BinaryPrimitives.WriteDoubleLittleEndian(gear, g);
+                            BinaryPrimitives.WriteDoubleLittleEndian(gear.AsSpan(8), o.GearPos);
+                            BinaryPrimitives.WriteDoubleLittleEndian(gear.AsSpan(16), o.GearPos);
+                            BinaryPrimitives.WriteDoubleLittleEndian(gear.AsSpan(24), o.GearPos);
                             await _sc.SetDataOnSimObjectAsync(DefGear, o.ObjectId, gear.ToArray());
                         }
                     }
