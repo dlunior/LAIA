@@ -255,15 +255,143 @@ public sealed class FlightSource(SettingsStore settings, ILogger<FlightSource> l
     public RealGates? Gates(string airport)
     {
         Schedule(airport); // fetches (once per 6 hours) when there's an AirLabs key
+        _ = PoolAsync();   // the SimRouteGen gate pool (free; checked every 6 hours)
         lock (_gate)
         {
             var g = GatesFor(airport);
-            if (g.ByAirline.Count == 0) return null;
-            // A copy for the traffic to use, made again only when something new was learned.
-            if (!_gateCopies.TryGetValue(airport, out var c) || c.Version != g.Version)
-                _gateCopies[airport] = c = JsonSerializer.Deserialize<RealGates>(JsonSerializer.Serialize(g))!;
+            var pool = _pool?.GetValueOrDefault(PoolCode(airport));
+            if (g.ByAirline.Count == 0 && (pool is null || pool.Count == 0)) return null;
+            // A copy for the traffic to use (AirLabs + the pool), made again only when something new came in.
+            var version = g.Version * 100000 + _poolVersion;
+            if (!_gateCopies.TryGetValue(airport, out var c) || c.Version != version)
+            {
+                c = JsonSerializer.Deserialize<RealGates>(JsonSerializer.Serialize(g))!;
+                c.ByAirline = new(c.ByAirline, StringComparer.OrdinalIgnoreCase);
+                c.ByFlight = new(c.ByFlight, StringComparer.OrdinalIgnoreCase);
+                var sources = new List<string>();
+                if (g.ByAirline.Count > 0) sources.Add("AirLabs");
+                if (pool is { Count: > 0 })
+                {
+                    sources.Add("SimRouteGen");
+                    foreach (var e in pool)
+                    {
+                        if (!c.ByAirline.TryGetValue(e.Airline, out var gates)) c.ByAirline[e.Airline] = gates = new(StringComparer.OrdinalIgnoreCase);
+                        var key = RealGates.Key(e.Terminal, e.Gate);
+                        gates[key] = gates.GetValueOrDefault(key) + Math.Max(1, e.Count);
+                    }
+                }
+                c.Source = string.Join(" + ", sources);
+                c.Version = version;
+                _gateCopies[airport] = c;
+            }
             return c;
         }
+    }
+
+    // ------------------------------------------------------------------ SimRouteGen's shared gate pool
+
+    /// <summary>
+    /// The gates every copy of SimRouteGen has seen in real flight data (AeroAPI), shared on its Cloudflare Worker:
+    /// airline, airport, gate and how often it was seen, with each airline's terminal. Free to download; the
+    /// version is checked every 6 hours and the pool downloaded again only when it changed.
+    /// </summary>
+    private sealed record PoolGate(string Airline, string Gate, string Terminal, int Count);
+    private Dictionary<string, List<PoolGate>>? _pool;   // IATA airport → gates
+    private int _poolVersion;
+    private DateTime _poolChecked = DateTime.MinValue;
+    private int _poolBusy;
+    private string PoolBase => (settings.Get("routegen_pool_url") ?? "https://dfg.dlunior10.workers.dev").TrimEnd('/');
+    private static string PoolFile => Path.Combine(Paths.DataDir, "cache", "simroutegen-pool.json");
+
+    /// <summary>The pool's airport code (IATA): KLGA → LGA, CYUL → YUL.</summary>
+    private static string PoolCode(string icao)
+    {
+        icao = icao.ToUpperInvariant();
+        if (icao.Length == 4 && (icao[0] == 'K' || (icao[0] == 'C' && icao[1] == 'Y'))) return icao[1..];
+        return icao;
+    }
+
+    // SimRouteGen's airline keys → ICAO.
+    private static readonly Dictionary<string, string> PoolAirlines = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["DL"] = "DAL", ["DLNA"] = "DAL", ["AA"] = "AAL", ["UA"] = "UAL", ["WN"] = "SWA", ["AS"] = "ASA", ["HA"] = "HAL",
+        ["B6"] = "JBU", ["AC"] = "ACA", ["WS"] = "WJA", ["F9"] = "FFT", ["NK"] = "NKS",
+    };
+
+    private async Task PoolAsync()
+    {
+        if (DateTime.UtcNow - _poolChecked < TimeSpan.FromHours(6) || Interlocked.CompareExchange(ref _poolBusy, 1, 0) != 0) return;
+        try
+        {
+            _poolChecked = DateTime.UtcNow;
+            string? body = null, version = null;
+            if (_pool is null && File.Exists(PoolFile)) body = await File.ReadAllTextAsync(PoolFile); // the last copy, straight away
+            if (body is not null) LoadPool(body, "on file");
+            try
+            {
+                using var meta = JsonDocument.Parse(await Http.GetStringAsync(PoolBase + "/shared?v=1"));
+                version = meta.RootElement.TryGetProperty("version", out var v) ? v.ToString() : null;
+            }
+            catch (Exception ex)
+            {
+                log.LogInformation("SimRouteGen gate pool not reachable: {msg}", ex.Message);
+                _poolChecked = DateTime.UtcNow - TimeSpan.FromHours(5.5); // try again in half an hour
+                return;
+            }
+            if (version is null || version == _poolVersionText) return;
+            var snap = await Http.GetStringAsync(PoolBase + "/shared?ver=" + Uri.EscapeDataString(version));
+            Directory.CreateDirectory(Path.GetDirectoryName(PoolFile)!);
+            await File.WriteAllTextAsync(PoolFile, snap);
+            LoadPool(snap, "downloaded");
+        }
+        catch (Exception ex) { log.LogWarning("SimRouteGen gate pool failed: {msg}", ex.Message); }
+        finally { Interlocked.Exchange(ref _poolBusy, 0); }
+    }
+
+    private string? _poolVersionText;
+
+    private void LoadPool(string json, string how)
+    {
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+        var cut = DateTimeOffset.UtcNow.AddDays(-183).ToUnixTimeMilliseconds(); // the pool's own six-month life
+        static string Str(JsonElement a, int i) => a.GetArrayLength() > i ? (a[i].ValueKind == JsonValueKind.String ? a[i].GetString() ?? "" : a[i].ValueKind == JsonValueKind.Number ? a[i].ToString() : "") : "";
+        static double Num(JsonElement a, int i) => a.GetArrayLength() > i && a[i].ValueKind == JsonValueKind.Number ? a[i].GetDouble() : double.TryParse(Str(a, i), out var d) ? d : 0;
+        // Terminals: [airline, airport, terminal, time] — the newest per airline and airport.
+        var terminals = new Dictionary<string, (string term, double t)>(StringComparer.OrdinalIgnoreCase);
+        if (root.TryGetProperty("m", out var m) && m.ValueKind == JsonValueKind.Array)
+            foreach (var r in m.EnumerateArray())
+            {
+                if (r.ValueKind != JsonValueKind.Array) continue;
+                var k = Str(r, 0) + "|" + Str(r, 1);
+                var t = Num(r, 3);
+                if (!terminals.TryGetValue(k, out var old) || t >= old.t) terminals[k] = (Str(r, 2), t);
+            }
+        // Gates: [airline, airport, gate, times seen, last seen].
+        var pool = new Dictionary<string, List<PoolGate>>(StringComparer.OrdinalIgnoreCase);
+        var n = 0;
+        if (root.TryGetProperty("g", out var g) && g.ValueKind == JsonValueKind.Array)
+            foreach (var r in g.EnumerateArray())
+            {
+                if (r.ValueKind != JsonValueKind.Array) continue;
+                if (Num(r, 4) > 0 && Num(r, 4) < cut) continue;
+                var al = Str(r, 0);
+                var airline = PoolAirlines.TryGetValue(al, out var ic) ? ic : AirlineCodes.ToIcao(al);
+                var ap = Str(r, 1).ToUpperInvariant();
+                var gate = Str(r, 2).Trim();
+                if (airline.Length != 3 || ap.Length == 0 || gate.Length == 0) continue;
+                var term = terminals.TryGetValue(al + "|" + ap, out var tt) ? tt.term : "";
+                if (!pool.TryGetValue(ap, out var list)) pool[ap] = list = new();
+                list.Add(new PoolGate(airline, gate, term, (int)Math.Max(1, Num(r, 3))));
+                n++;
+            }
+        lock (_gate)
+        {
+            _pool = pool;
+            _poolVersion++;
+            _poolVersionText = root.TryGetProperty("version", out var v) ? v.ToString() : _poolVersionText;
+        }
+        log.LogInformation("SimRouteGen gate pool ({how}): {n} gates at {a} airports", how, n, pool.Count);
     }
 
     private readonly Dictionary<string, RealGates> _gateCopies = new(StringComparer.OrdinalIgnoreCase);
