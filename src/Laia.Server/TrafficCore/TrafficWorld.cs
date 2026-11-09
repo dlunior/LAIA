@@ -383,7 +383,15 @@ public sealed class TrafficWorld
         var start = f.Pos;
         var from = f.StartNode >= 0 ? f.StartNode : Apt.NearestNode(start);
         if (f.HoldNode < 0 || from < 0) { Log($"{f.Callsign}: no taxi route to runway {f.Rwy?.Ident}"); return false; }
-        var route = Apt.Route(from, f.HoldNode, ActiveRunways());
+        // Carry on the way the nose points: don't plan back through the points just behind the aircraft.
+        var nose = V2.FromBearing(f.Heading);
+        var behind = new HashSet<int>();
+        for (var i = 0; i < Apt.TaxiPointCount; i++)
+        {
+            var v = Apt.Nodes[i] - start;
+            if (v.Length < 40 && V2.Dot(v, nose) < -2 && i != from) behind.Add(i);
+        }
+        var route = Apt.Route(from, f.HoldNode, ActiveRunways(), behind) ?? Apt.Route(from, f.HoldNode, ActiveRunways());
         if (route is null) { Log($"{f.Callsign}: no taxi route to runway {f.Rwy!.Ident}"); return false; }
         // Stop at the painted hold-short line, not at the edge of the runway.
         var holdIndex = HoldShortIndex(route, route.Count - 1, f.Rwy!);
