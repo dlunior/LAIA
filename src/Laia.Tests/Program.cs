@@ -221,6 +221,43 @@ Console.WriteLine("== Traffic from a real schedule");
     Check(dl >= 9, $"arrived airframes leave again on their next flight ({dl} of 10)");
 }
 
+Console.WriteLine("== Real gates override the scenery's gate assignments");
+{
+    var apt = new AirportModel(TestAirport.Build(false));
+    // The scenery (wrongly) gives gates A10-A12 to Delta.
+    foreach (var sp in apt.Spots.Where(sp => sp.Label is "Gate A10" or "Gate A11" or "Gate A12")) sp.Airlines = new() { "DAL" };
+    var real = new RealGates { Airport = "TEST", Source = "AirLabs" };
+    foreach (var gnum in new[] { "2", "3", "4" }) real.Add("DAL", "", "2026-11-11", "A", gnum);
+    foreach (var gnum in new[] { "A10", "A11", "A12" }) real.Add("UAL", "", "2026-11-11", "", gnum);
+    real.Add("DAL", "DAL150", "2026-11-11", "A", "15");
+    real.Add("DAL", "", "2026-11-12", "C", "99");
+    var plan = new GatePlan(apt, real);
+    Console.WriteLine("  " + plan.Describe());
+    Check(RealGates.Match(apt, "A", "7").Select(x => x.Label).SequenceEqual(new[] { "Gate A7" }), "terminal letter + gate number finds the stand");
+    Check(RealGates.Match(apt, "", "A7").Select(x => x.Label).SequenceEqual(new[] { "Gate A7" }), "gate with its own letter finds the stand");
+    Check(RealGates.Match(apt, "B", "7").Count == 0, "a gate in another terminal isn't matched to the wrong letter");
+    Check(plan.Unmatched.Contains("C|99"), "gates not in the scenery are reported");
+
+    var sched = new Laia.Common.Airports.ScheduleData { Airport = "TEST", Source = "AIG" };
+    const int start = 2 * 1440 + 600;
+    for (var i = 0; i < 5; i++)
+    {
+        sched.Legs.Add(new() { Airline = "DAL", Operator = "DAL", Title = "T", Type = "B739", Reg = $"N{i}DL", Flight = $"{150 + i}", Dep = "TEST", Arr = "KYYY", DepMin = start + 30 + i * 5, ArrMin = start + 150 });
+        sched.Legs.Add(new() { Airline = "UAL", Operator = "UAL", Title = "U", Type = "A320", Reg = $"N{i}UA", Flight = $"{300 + i}", Dep = "TEST", Arr = "KZZZ", DepMin = start + 32 + i * 5, ArrMin = start + 120 });
+    }
+    var world = new TrafficWorld(apt, new TestSource(), seed: 5) { Level = TrafficLevel.Busy, Wind = new Wind(270, 8), Schedule = sched, WeekMinute = start, Gates = real };
+    var log = new List<string>();
+    world.Log = s => log.Add(s);
+    for (var i = 0; i < 40; i++) { world.WeekMinute = start + world.Time / 60; world.Step(0.25); }
+    int Num(string label) => int.Parse(new string(label.Where(char.IsDigit).ToArray()));
+    var at = world.Flights.Where(f => f.Spot is not null).Select(f => (f.Callsign, f.Airline, gate: f.Spot!.Label)).ToList();
+    Console.WriteLine("  parked: " + string.Join(", ", at.Select(a => $"{a.Callsign} {a.gate}")));
+    Check(at.Any(a => a.Callsign == "DAL150" && a.gate == "Gate A15"), "a flight with a known real gate parks at exactly that gate");
+    Check(at.Where(a => a.Airline == "DAL" && a.Callsign != "DAL150").All(a => Num(a.gate) <= 5), "Delta parks at its real gates (or next to them), not the scenery's");
+    Check(at.Where(a => a.Airline == "UAL").All(a => Num(a.gate) is >= 9 and <= 13), "United parks at its real gates (or next to them)");
+    Check(log.Any(l => l.Contains("real gates from AirLabs")), "the real-gate plan is logged");
+}
+
 Console.WriteLine("== Traffic starts even when no installed model fits the small gates");
 {
     var apt = new AirportModel(TestAirport.Build(false));

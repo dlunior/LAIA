@@ -65,6 +65,7 @@ public sealed class Flight
     public string Route = "";               // procedure names for the control page
     public string Reg = "";                 // registration (scheduled flights: the same airframe flies on)
     public string Title = "";               // exact model/livery (scheduled flights)
+    public string? Brand;                   // the airline whose flight it is (DAL for a Delta Connection flight), when known
     public bool UserIsObstacle;
 
     public double AglFt(double groundFt) => OnGround ? 0 : Math.Max(0, AltFt - groundFt);
@@ -106,6 +107,41 @@ public sealed class TrafficWorld
     public ScheduleData? Schedule { get; set; }
     /// <summary>Current time as minutes into the week (Monday 00:00 UTC = 0), from the simulator's clock.</summary>
     public double WeekMinute { get; set; } = -1;
+    /// <summary>The gates the airlines really use here (learned from real flight data); overrides the scenery's assignments.</summary>
+    public RealGates? Gates { get; set; }
+    private GatePlan? _plan;
+    private RealGates? _planFrom;
+    private int _planVersion = -1;
+
+    /// <summary>The current real-gate plan for this airport's scenery (null without real gate data).</summary>
+    public GatePlan? Plan
+    {
+        get
+        {
+            var g = Gates;
+            if (g is null) return null;
+            if (!ReferenceEquals(g, _planFrom) || g.Version != _planVersion)
+            {
+                _planFrom = g;
+                _planVersion = g.Version;
+                try { _plan = new GatePlan(Apt, g); Log($"{Apt.Icao}: real gates from {g.Source}: {_plan.Describe()}"); }
+                catch (Exception ex) { _plan = null; Log($"{Apt.Icao}: real gates couldn't be used: {ex.Message}"); }
+            }
+            return _plan;
+        }
+    }
+
+    /// <summary>
+    /// Who uses a stand: the airlines really seen there; without real data for the stand, the scenery's airlines
+    /// (except airlines whose real gates are known to be elsewhere).
+    /// </summary>
+    public IReadOnlyList<string> AirlinesAt(AirportModel.ParkingSpot s)
+    {
+        var plan = Plan;
+        if (plan is null) return s.Airlines;
+        if (plan.Owners.TryGetValue(s, out var o)) return o;
+        return s.Airlines.Where(a => !plan.Knows(a)).ToList();
+    }
 
     private int _nextId = 1;
     private double _nextDep = double.NaN, _nextArr = double.NaN, _lastRunwayCheck = -999;
@@ -277,7 +313,7 @@ public sealed class TrafficWorld
                 if (placed >= room) break;
                 if (Flights.Any(f => f.Reg == l.Reg && f.Reg.Length > 0)) continue;
                 var perf = Perf.For(l.Type);
-                var gate = FindGate(perf, l.Operator, l.Airline);
+                var gate = FindGate(perf, l.Operator, l.Airline, l.Callsign);
                 if (gate is null) continue;
                 try { SpawnParked(gate, l); placed++; } catch (Exception ex) { Log($"Couldn't park {l.Callsign}: {ex.Message}"); }
             }
@@ -300,7 +336,7 @@ public sealed class TrafficWorld
             var f = Flights.FirstOrDefault(x => x.Reg == l.Reg && x.Reg.Length > 0 && x.Kind == "parked" && x.Phase == "parked" && x.Spot is not null);
             if (f is null)
             {
-                var gate = FindGate(Perf.For(l.Type), l.Operator, l.Airline);
+                var gate = FindGate(Perf.For(l.Type), l.Operator, l.Airline, l.Callsign);
                 if (gate is null) continue;
                 f = SpawnParked(gate, l);
             }
@@ -335,14 +371,33 @@ public sealed class TrafficWorld
         !Flights.Any(f => !f.Done && f.Spot is not null && (f.Spot == s || s.Overlaps.Contains(f.Spot))) &&
         !(UserPos is { } u && (u - s.P).Length < s.RadiusM + 25);
 
-    private AirportModel.ParkingSpot? FindGate(Perf p, string airline, string? alsoAirline = null)
+    private AirportModel.ParkingSpot? FindGate(Perf p, string airline, string? alsoAirline = null, string? callsign = null)
     {
         var free = UsableSpots().Where(s => SpotFree(s) && s.Size >= p.GateSize && (s.RadiusM <= 0 || s.RadiusM >= p.SpanM / 2 * 0.85)).ToList();
         if (free.Count == 0) return null;
-        // The airline's own stands first, then stands nobody claims; other airlines' stands only as a last resort.
-        var own = free.Where(s => s.Airlines.Contains(airline) || (alsoAirline is not null && s.Airlines.Contains(alsoAirline))).ToList();
-        var open = free.Where(s => s.Airlines.Count == 0).ToList();
-        var pool = own.Count > 0 ? own : open.Count > 0 ? open : free;
+        var plan = Plan;
+        // Today's real gate of this very flight.
+        if (plan is not null && callsign is not null && plan.ByFlight.TryGetValue(callsign, out var exact))
+        {
+            var hit = exact.FirstOrDefault(free.Contains);
+            if (hit is not null) return hit;
+        }
+        // The brand's own stands first (a Delta Connection flight at Delta's gates), then the operator's,
+        // then stands next to the airline's real gates, then stands nobody uses; other airlines' stands last.
+        var pools = new List<List<AirportModel.ParkingSpot>>();
+        if (alsoAirline is not null && alsoAirline != airline) pools.Add(free.Where(s => AirlinesAt(s).Contains(alsoAirline)).ToList());
+        pools.Add(free.Where(s => AirlinesAt(s).Contains(airline)).ToList());
+        if (plan is not null)
+        {
+            var mine = new List<AirportModel.ParkingSpot>();
+            foreach (var a in new[] { alsoAirline, airline })
+                if (a is not null && plan.ByAirline.TryGetValue(a, out var l)) mine.AddRange(l);
+            if (mine.Count > 0)
+                pools.Add(free.Where(s => AirlinesAt(s).Count == 0 && mine.Any(m => (m.P - s.P).Length < 150)).ToList());
+        }
+        pools.Add(free.Where(s => AirlinesAt(s).Count == 0).ToList());
+        pools.Add(free);
+        var pool = pools.First(x => x.Count > 0);
         // The smallest stand that fits, so the big ones stay free for the big aircraft.
         var minSize = pool.Min(s => s.Size);
         pool = pool.Where(s => s.Size == minSize).ToList();
@@ -354,12 +409,12 @@ public sealed class TrafficWorld
     private Flight SpawnParked(AirportModel.ParkingSpot s, ScheduleLeg? leg = null)
     {
         var id = leg is not null ? new AircraftIdentity(leg.Operator, leg.Type, leg.Callsign, leg.Arr)
-            : Source.NewAircraft(Apt.Icao, s.Size, Rng, s.Airlines.Count > 0 ? s.Airlines : null);
+            : Source.NewAircraft(Apt.Icao, s.Size, Rng, AirlinesAt(s) is { Count: > 0 } al ? al.ToList() : null);
         var f = new Flight
         {
             Id = NewId(), Callsign = id.Callsign, Airline = id.Airline, Type = id.Type, Other = id.Other, Kind = "parked", P = Perf.For(id.Type),
             Pos = s.P, Heading = s.Heading, AltFt = Apt.ElevationFt, Spot = s, Age = Rng.NextDouble() * 3000,
-            Reg = leg?.Reg ?? "", Title = leg?.Title ?? "",
+            Reg = leg?.Reg ?? "", Title = leg?.Title ?? "", Brand = leg?.Airline,
         };
         f.SetPhase("parked", Time);
         f.Lights = Rng.NextDouble() < 0.5 ? 0 : Nav | Logo;
@@ -714,7 +769,7 @@ public sealed class TrafficWorld
             (cs, other) = Source.NewFlight(Apt.Icao, id.Airline, false, Rng, id.Type);
         }
         var f = new Flight { Id = NewId(), Callsign = cs, Airline = id.Airline, Type = id.Type, Other = other, Kind = "arrival", P = perf, Rwy = rwy, Test = test,
-            Reg = leg?.Reg ?? "", Title = leg?.Title ?? "" };
+            Reg = leg?.Reg ?? "", Title = leg?.Title ?? "", Brand = leg?.Airline };
         f.OnGround = false;
         f.Gear = false;
         BuildArrivalPath(f, null);
@@ -952,7 +1007,7 @@ public sealed class TrafficWorld
         AirportModel.ParkingSpot? gate = null;
         if (Apt.HasGround)
         {
-            gate = FindGate(f.P, f.Airline);
+            gate = FindGate(f.P, f.Airline, f.Brand, f.Callsign);
             // Exits on the terminal side (where the gate is) first, then the first one the aircraft can make
             // with normal braking: about 2 m/s², slowing to ~30 kt for a high-speed exit or ~18 kt for a 90° turn.
             var side = gate is null ? 0 : Math.Sign(rwy.Offset(gate.P));
@@ -1144,7 +1199,7 @@ public sealed class TrafficWorld
             f.RerouteTime = Time;
             var old = f.Spot;
             f.Spot = null;
-            var gate = FindGate(f.P, f.Airline);
+            var gate = FindGate(f.P, f.Airline, f.Brand, f.Callsign);
             if (gate is not null && gate != old)
             {
                 f.Spot = gate;

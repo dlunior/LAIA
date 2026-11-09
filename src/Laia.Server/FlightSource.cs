@@ -96,15 +96,37 @@ public sealed class FlightSource(SettingsStore settings, ILogger<FlightSource> l
         return all.Count > 0 ? all[rng.Next(all.Count)] : "KATL";
     }
 
+    private static string CatalogFile => Path.Combine(Paths.DataDir, "catalog.json");
+    private bool _catalogLoaded;
+
     public void SetCatalog(TrafficCatalog c)
     {
         lock (_gate) _catalog = c.Entries.Where(e => e.Airline.Length is 2 or 3 && e.Type.Length >= 3).ToList();
         log.LogInformation("AI model catalog from LAIA Sim: {n} airline/type combinations", _catalog.Count);
+        // Kept on disk, so after a restart the traffic uses the installed models from the start.
+        try { Directory.CreateDirectory(Paths.DataDir); File.WriteAllText(CatalogFile, JsonSerializer.Serialize(c)); } catch { }
     }
+
+    /// <summary>The catalog from the last session, until LAIA Sim sends the current one.</summary>
+    private void LoadCatalog()
+    {
+        if (_catalogLoaded) return;
+        _catalogLoaded = true;
+        try
+        {
+            if (!File.Exists(CatalogFile)) return;
+            var c = JsonSerializer.Deserialize<TrafficCatalog>(File.ReadAllText(CatalogFile));
+            if (c is not null && _catalog.Count == 0) _catalog = c.Entries.Where(e => e.Airline.Length is 2 or 3 && e.Type.Length >= 3).ToList();
+        }
+        catch { }
+    }
+
+    /// <summary>Installed models are known (from LAIA Sim, or from the last session).</summary>
+    public bool CatalogKnown { get { lock (_gate) { LoadCatalog(); return _catalog.Count > 0; } } }
 
     private List<CatalogEntry> Catalog()
     {
-        lock (_gate) return _catalog.Count > 0 ? _catalog : Fallback.ToList();
+        lock (_gate) { LoadCatalog(); return _catalog.Count > 0 ? _catalog : Fallback.ToList(); }
     }
 
     // Airlines that typically fly at airports in each region (used when there's no real schedule).
@@ -217,8 +239,96 @@ public sealed class FlightSource(SettingsStore settings, ILogger<FlightSource> l
         {
             if (_sched.TryGetValue(airport, out var list)) return list;
         }
-        if (settings.ScheduleSource == "airlabs" && !string.IsNullOrEmpty(settings.Get("airlabs_key"))) _ = FetchAsync(airport);
+        if (!string.IsNullOrEmpty(settings.Get("airlabs_key"))) _ = FetchAsync(airport);
         return new List<SchedFlight>();
+    }
+
+    // ------------------------------------------------------------------ real gates
+
+    private readonly Dictionary<string, RealGates> _gates = new(StringComparer.OrdinalIgnoreCase);
+    private static string GatesFile(string airport) => Path.Combine(Paths.DataDir, "gates", airport.ToUpperInvariant() + ".json");
+
+    /// <summary>
+    /// The gates the airlines really use at the airport: learned from AirLabs flight data (each flight's terminal
+    /// and gate) and kept on disk, adding to it every time. Fetches when due (the same two calls as the schedule).
+    /// </summary>
+    public RealGates? Gates(string airport)
+    {
+        Schedule(airport); // fetches (once per 6 hours) when there's an AirLabs key
+        lock (_gate)
+        {
+            var g = GatesFor(airport);
+            if (g.ByAirline.Count == 0) return null;
+            // A copy for the traffic to use, made again only when something new was learned.
+            if (!_gateCopies.TryGetValue(airport, out var c) || c.Version != g.Version)
+                _gateCopies[airport] = c = JsonSerializer.Deserialize<RealGates>(JsonSerializer.Serialize(g))!;
+            return c;
+        }
+    }
+
+    private readonly Dictionary<string, RealGates> _gateCopies = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Call with _gate held.</summary>
+    private RealGates GatesFor(string airport)
+    {
+        if (_gates.TryGetValue(airport, out var g)) return g;
+        try { if (File.Exists(GatesFile(airport))) g = JsonSerializer.Deserialize<RealGates>(File.ReadAllText(GatesFile(airport))); } catch { }
+        g ??= new RealGates { Airport = airport.ToUpperInvariant(), Source = "AirLabs" };
+        g.ByAirline = new(g.ByAirline, StringComparer.OrdinalIgnoreCase);
+        g.ByFlight = new(g.ByFlight, StringComparer.OrdinalIgnoreCase);
+        return _gates[airport] = g;
+    }
+
+    // Regional airlines (IATA) that fly for a mainline brand: their gates count for the brand too.
+    private static readonly HashSet<string> RegionalIata = new() { "OO", "YX", "9E", "MQ", "OH", "PT", "ZW", "YV", "G7", "C5", "QX", "QK", "CP", "9K" };
+
+    private void LearnGates(string airport, bool dep, JsonElement f, Func<string, string> S)
+    {
+        var gate = S(dep ? "dep_gate" : "arr_gate");
+        if (gate.Length == 0) return;
+        var terminal = S(dep ? "dep_terminal" : "arr_terminal");
+        var date = S(dep ? "dep_time" : "arr_time");
+        date = date.Length >= 10 ? date[..10] : date;
+        var airline = S("airline_icao");
+        var cs = S("flight_icao");
+        var csIata = S("cs_airline_iata");
+        lock (_gate)
+        {
+            var g = GatesFor(airport);
+            bool added;
+            if (csIata.Length > 0)
+            {
+                // A codeshare: count the gate for the selling airline only when a regional flies it for them
+                // (a Delta Connection flight at Delta's gates), not for partner codeshares (AA on an Alaska flight).
+                if (!RegionalIata.Contains(csIata)) return;
+                added = g.Add(airline, "", date + cs, terminal, gate);
+            }
+            else added = g.Add(airline, cs, date, terminal, gate);
+            if (added) g.Version++;
+        }
+    }
+
+    private void SaveGates(string airport)
+    {
+        try
+        {
+            RealGates? g;
+            string json;
+            lock (_gate)
+            {
+                g = _gates.GetValueOrDefault(airport);
+                if (g is null || g.ByAirline.Count == 0) return;
+                g.UpdatedUtc = DateTime.UtcNow;
+                json = JsonSerializer.Serialize(g);
+            }
+            Directory.CreateDirectory(Path.GetDirectoryName(GatesFile(airport))!);
+            File.WriteAllText(GatesFile(airport), json);
+            var n = g.ByAirline.Sum(a => a.Value.Values.Sum());
+            log.LogInformation("Real gates at {apt}: {n} flights with a gate so far, {a} airlines ({list})", airport, n, g.ByAirline.Count,
+                string.Join(", ", g.ByAirline.OrderByDescending(a => a.Value.Values.Sum()).Take(10)
+                    .Select(a => $"{a.Key} {string.Join("/", a.Value.OrderByDescending(x => x.Value).Take(4).Select(x => x.Key.Replace("|", " ").Trim()))}")));
+        }
+        catch (Exception ex) { log.LogWarning("Couldn't save real gates for {apt}: {msg}", airport, ex.Message); }
     }
 
     /// <summary>Two AirLabs calls per airport (departures and arrivals), cached on disk for 6 hours.</summary>
@@ -253,6 +363,7 @@ public sealed class FlightSource(SettingsStore settings, ILogger<FlightSource> l
                 foreach (var f in arr.EnumerateArray())
                 {
                     string S(string n) => f.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
+                    LearnGates(airport, dep, f, S);
                     var airline = S("airline_icao");
                     var cs = S("flight_icao");
                     var other = dep ? S("arr_icao") : S("dep_icao");
@@ -272,6 +383,7 @@ public sealed class FlightSource(SettingsStore settings, ILogger<FlightSource> l
                 }
             }
             lock (_gate) _sched[airport] = list;
+            SaveGates(airport);
             ScheduleStatus = $"AirLabs: {list.Count} real flights at {airport} ({AirLabsCalls} calls this session)";
             log.LogInformation("{status}", ScheduleStatus);
         }

@@ -16,6 +16,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     private TrafficWorld? _testWorld;   // runway-only world for test buttons at airports without layout
     private readonly List<TrafficWorld> _retiring = new();
     private long _stampMs;
+    private readonly System.Diagnostics.Stopwatch _started = System.Diagnostics.Stopwatch.StartNew();
 
     public string Motion => "laia";
     public void SetMotion(string mode) { }
@@ -105,7 +106,8 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 departing = w?.DepRwy?.Ident,
                 airportsOnFile = airports.Count,
                 catalog = source.HasCatalog,
-                schedule = w?.Schedule is { } sd ? $"Real {sd.Source} schedule: {sd.Legs.Count} flights a week at {sd.Airport}" : source.ScheduleStatus,
+                schedule = (w?.Schedule is { } sd ? $"Real {sd.Source} schedule: {sd.Legs.Count} flights a week at {sd.Airport}" : source.ScheduleStatus)
+                    + (w?.Plan is { } gp ? $" · real gates: {gp.Matched} of {gp.Gates} found in the scenery" : ""),
                 flights = Worlds().SelectMany(x => x.Flights.Select(f => new
                 {
                     f.Callsign, f.Type, f.Kind, f.Phase, other = f.Other, runway = f.Rwy?.Ident, route = f.Route,
@@ -131,7 +133,6 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     /// <summary>Real schedules wanted from LAIA Sim: the traffic airport and the flight plan's airports.</summary>
     public List<string> NeededSchedules(AircraftState sim)
     {
-        if (settings.ScheduleSource == "airlabs") return new();
         var want = new List<string>();
         lock (_gate) if (_world is not null) want.Add(_world.Apt.Icao);
         var plan = simbrief.Plan;
@@ -182,6 +183,8 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         {
             if (_world is null || _world.Apt != n.model)
             {
+                // Wait (up to a minute) for the list of installed models, so the first aircraft use real liveries.
+                if (!source.CatalogKnown && _started.Elapsed < TimeSpan.FromSeconds(60)) return;
                 if (_world is not null && _world.Flights.Count > 0) _retiring.Add(_world);
                 _world = new TrafficWorld(n.model, source) { Level = Level, Log = s => log.LogInformation("{msg}", s) };
                 _world.Wind = new Wind(sim.WindDirection, sim.WindSpeed);
@@ -234,7 +237,9 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                         if (w == _world)
                         {
                             w.Level = Level;
-                            if (w.Schedule is null && settings.ScheduleSource != "airlabs") w.Schedule = schedules.Get(w.Apt.Icao);
+                            // The installed AIG schedule is the real one to follow (exact models and registrations).
+                            if (w.Schedule is null) w.Schedule = schedules.Get(w.Apt.Icao);
+                            w.Gates = source.Gates(w.Apt.Icao);
                         }
                         w.WeekMinute = live && sim!.ZuluWeekMinute >= 0 ? sim.ZuluWeekMinute : WeekMinuteNow();
                         // Don't run traffic while nobody is flying (sim closed): it would all depart unseen.

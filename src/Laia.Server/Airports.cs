@@ -115,7 +115,7 @@ public sealed class ScheduleStore(ILogger<ScheduleStore> log)
 {
     private readonly object _gate = new();
     private readonly Dictionary<string, ScheduleData> _data = new(StringComparer.OrdinalIgnoreCase);
-    private readonly HashSet<string> _asked = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, (DateTime at, int times)> _asked = new(StringComparer.OrdinalIgnoreCase);
 
     public void Add(ScheduleData d)
     {
@@ -129,8 +129,13 @@ public sealed class ScheduleStore(ILogger<ScheduleStore> log)
     /// <summary>Airports to ask LAIA Sim for (once per session each).</summary>
     public List<string> Wanted(IEnumerable<string> airports)
     {
-        lock (_gate) return airports.Where(a => !string.IsNullOrWhiteSpace(a) && !_data.ContainsKey(a) && !_asked.Contains(a)).Distinct().ToList();
+        // Asked again every 2 minutes until it arrives (LAIA Sim may have been busy or restarting), up to 5 times.
+        lock (_gate) return airports.Where(a => !string.IsNullOrWhiteSpace(a) && !_data.ContainsKey(a) &&
+            (!_asked.TryGetValue(a, out var x) || (x.times < 5 && DateTime.UtcNow - x.at > TimeSpan.FromMinutes(2)))).Distinct().ToList();
     }
 
-    public void MarkAsked(IEnumerable<string> airports) { lock (_gate) foreach (var a in airports) _asked.Add(a); }
+    public void MarkAsked(IEnumerable<string> airports)
+    {
+        lock (_gate) foreach (var a in airports) _asked[a] = (DateTime.UtcNow, _asked.GetValueOrDefault(a).times + 1);
+    }
 }
