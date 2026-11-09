@@ -147,8 +147,8 @@ internal sealed class TrafficRenderer : IAsyncDisposable
         public uint CreateReq, GroundReq, ObjectId;
         public bool Ready, Removed;
         public string Motion = "laia";
-        public double GroundAlt = double.NaN, CgFt = double.NaN, SmoothGround = double.NaN, StaticPitch;
-        public bool StaticLogged;
+        public double GroundAlt = double.NaN, CgFt = double.NaN, SmoothGround = double.NaN, StaticPitch, RestPitch;
+        public bool StaticLogged, RestMeasured, CreatedOnGround;
         public double LastLights = -100, LastGear = -100, GearPos = -1, GearTime;
         public int SentLights = -1, SentGear = -1;
         public double SentLat, SentLon, SentAlt, SentHdg, LastSent = -100;
@@ -170,6 +170,8 @@ internal sealed class TrafficRenderer : IAsyncDisposable
         await _sc.AddToDataDefinitionAsync(DefGround, "STATIC CG TO GROUND", "feet", SimDataType.Float64);
         // Each model's natural attitude on its wheels (some sit slightly nose-down); without it the nose gear floats.
         await _sc.AddToDataDefinitionAsync(DefGround, "STATIC PITCH", "degrees", SimDataType.Float64);
+        // The attitude MSFS gives a freshly placed aircraft on its wheels: measured once, before LAIA moves it.
+        await _sc.AddToDataDefinitionAsync(DefGround, "PLANE PITCH DEGREES", "degrees", SimDataType.Float64);
         // The handle alone doesn't move the gear on frozen AI aircraft; the gear positions themselves are settable.
         await _sc.AddToDataDefinitionAsync(DefGear, "GEAR HANDLE POSITION", "bool", SimDataType.Float64);
         await _sc.AddToDataDefinitionAsync(DefGear, "GEAR CENTER POSITION", "percent over 100", SimDataType.Float64);
@@ -304,6 +306,7 @@ internal sealed class TrafficRenderer : IAsyncDisposable
         lock (_gate) o = _objs.Values.FirstOrDefault(x => x.CreateReq == req);
         if (o is null) { _ = _sc.AIRemoveObjectAsync(objectId, _nextReq++); return; } // removed before it appeared
         o.ObjectId = objectId;
+        o.CreatedOnGround = o.Latest.OnGround;
         if (o.Motion == "msfs")
         {
             // MSFS's AI keeps control and flies the path LAIA sends.
@@ -319,8 +322,13 @@ internal sealed class TrafficRenderer : IAsyncDisposable
             await _sc.TransmitClientEventAsync(objectId, EvFreezeAlt, 1);
             await _sc.TransmitClientEventAsync(objectId, EvFreezeAtt, 1);
             await _sc.RequestDataOnSimObjectAsync(o.GroundReq, DefGround, objectId, SimPeriod.VisualFrame, flags: 1);
-            o.Ready = true;
             Log.Write($"Traffic: {o.Latest.Callsign} is object {objectId}");
+            if (o.CreatedOnGround)
+            {
+                // Wait for MSFS to report how the aircraft sits on its wheels before moving it (at most 1.5 s).
+                _ = Task.Run(async () => { await Task.Delay(1500); o.Ready = true; });
+            }
+            else o.Ready = true;
         }
         catch (Exception ex) { Log.Write("Traffic setup failed: " + ex.Message); }
     }
@@ -334,8 +342,19 @@ internal sealed class TrafficRenderer : IAsyncDisposable
         o.GroundAlt = d.ReadFloat64();
         o.CgFt = d.ReadFloat64();
         var sp = d.ReadFloat64();
+        var pitchNow = d.ReadFloat64();
         o.StaticPitch = double.IsFinite(sp) && Math.Abs(sp) < 15 ? sp : 0;
-        if (!o.StaticLogged) { o.StaticLogged = true; Log.Write($"Traffic: {o.Latest.Callsign} rests at {o.StaticPitch:0.0}° pitch, CG {o.CgFt:0.0} ft above the ground"); }
+        if (!o.RestMeasured && !o.Ready && o.CreatedOnGround && double.IsFinite(pitchNow) && Math.Abs(pitchNow) < 15)
+        {
+            o.RestPitch = pitchNow; // MSFS convention: positive is nose down
+            o.RestMeasured = true;
+            o.Ready = true;
+        }
+        if (!o.StaticLogged && (o.RestMeasured || !o.CreatedOnGround))
+        {
+            o.StaticLogged = true;
+            Log.Write($"Traffic: {o.Latest.Callsign} sits at {(o.RestMeasured ? o.RestPitch.ToString("0.00") + "° (measured, + is nose down)" : "unknown")} pitch; static pitch {o.StaticPitch:0.00}°; CG {o.CgFt:0.0} ft");
+        }
     }
 
     private async Task RemoveAsync(Obj o)
@@ -492,7 +511,10 @@ internal sealed class TrafficRenderer : IAsyncDisposable
                     // Our pitch is relative to the aircraft sitting on its wheels; add the model's resting attitude
                     // near the ground (cfg convention: + nose up). MSFS: positive pitch is nose down.
                     var restW = p.ground ? 1 : Math.Clamp(1 - p.agl / 100, 0, 1);
-                    BinaryPrimitives.WriteDoubleLittleEndian(buf.AsSpan(24), -(p.pitch + o.StaticPitch * restW));
+                    // Resting attitude: measured when the aircraft was placed on the ground; otherwise the model's static
+                    // pitch (the earlier sign made noses ride higher, so it's applied the other way round).
+                    var rest = o.RestMeasured ? o.RestPitch : o.StaticPitch;
+                    BinaryPrimitives.WriteDoubleLittleEndian(buf.AsSpan(24), -p.pitch + rest * restW);
                     BinaryPrimitives.WriteDoubleLittleEndian(buf.AsSpan(32), p.bank);
                     BinaryPrimitives.WriteDoubleLittleEndian(buf.AsSpan(40), p.hdg);
                     var (gsKt, vsFpm) = Speeds(o, rt);

@@ -58,7 +58,8 @@ public sealed class Flight
     public double BlockedFor;
     public Flight? BlockedBy, Ignore;
     public double IgnoreUntil;
-    public bool LandingChecked, WentAround;
+    public bool LandingChecked, WentAround, BlockedByUser;
+    public double StuckFor;
     public double RerouteTime = -999;
     public double LastOrbit = -999;
     public string Route = "";               // procedure names for the control page
@@ -420,7 +421,9 @@ public sealed class TrafficWorld
     }
 
     /// <summary>A new taxi route from where the aircraft is, avoiding the area around another aircraft.</summary>
-    private bool Reroute(Flight f, Flight other)
+    private bool Reroute(Flight f, Flight other) => Reroute(f, other.Pos, other.Callsign);
+
+    private bool Reroute(Flight f, V2 otherPos, string otherName)
     {
         int dest;
         if (f.Phase == "taxi") dest = f.HoldNode;
@@ -428,7 +431,7 @@ public sealed class TrafficWorld
         else return false;
         if (dest < 0) return false;
         var avoid = new HashSet<int>();
-        for (var i = 0; i < Apt.TaxiPointCount; i++) if ((Apt.Nodes[i] - other.Pos).Length < 70) avoid.Add(i);
+        for (var i = 0; i < Apt.TaxiPointCount; i++) if ((Apt.Nodes[i] - otherPos).Length < 70) avoid.Add(i);
         var from = -1; var best = double.MaxValue;
         for (var i = 0; i < Apt.TaxiPointCount; i++)
         {
@@ -457,7 +460,7 @@ public sealed class TrafficWorld
             pts.Add(gate.P);
         }
         SetGroundPath(f, pts, route, offset);
-        Log($"{f.Callsign}: taking another way round {other.Callsign}");
+        Log($"{f.Callsign}: taking another way round {otherName}");
         return true;
     }
 
@@ -1026,6 +1029,7 @@ public sealed class TrafficWorld
             case "taxi":
                 f.Lights = Nav | Beacon | Logo | Taxi;
                 if (MoveGround(f, dt)) { f.SetPhase("holding short", Time); f.Gs = 0; }
+                else Unstick(f, dt);
                 break;
             case "holding short":
                 f.Lights = Nav | Beacon | Logo | Taxi;
@@ -1054,6 +1058,7 @@ public sealed class TrafficWorld
             case "taxi in":
                 f.Lights = f.Phase == "landing roll" && f.Gs > 60 ? Nav | Beacon | Logo | Strobes | Landing : Nav | Beacon | Logo | Taxi;
                 var done = MoveGround(f, dt);
+                if (!done && f.Phase == "taxi in") Unstick(f, dt);
                 if (f.Phase == "landing roll" && f.OnRunway < 0 && f.Gs < 35) { f.SetPhase("taxi in", Time); f.MaxKt = f.P.Heavy ? 16 : 20; }
                 if (f.Phase == "landing roll" && f.Gs < 35) f.MaxKt = Math.Min(f.MaxKt, 30);
                 if (!Apt.HasGround && f.Phase == "landing roll" && f.Gs < 30) { f.Done = true; break; }
@@ -1119,6 +1124,41 @@ public sealed class TrafficWorld
         return f.S >= path.Length - 0.3 && v < 0.3;
     }
 
+    /// <summary>
+    /// Never leave an aircraft stuck on the ground (at any airport): blocked by the user's aircraft → find another way;
+    /// still stuck after 2 minutes on the way in → another gate; after 5 minutes it's removed rather than sitting forever.
+    /// Waiting at a hold line for a runway crossing doesn't count.
+    /// </summary>
+    private void Unstick(Flight f, double dt)
+    {
+        var atHold = f.Stops.Any(st => !st.Cleared && Math.Abs(st.S - f.S) < 3);
+        if (f.Gs > 0.5 || atHold) { f.StuckFor = 0; return; }
+        f.StuckFor += dt;
+        if (f.StuckFor > 20 && f.BlockedByUser && UserPos is { } u && Time - f.RerouteTime > 60)
+        {
+            f.RerouteTime = Time;
+            if (Reroute(f, u, "your aircraft")) { f.StuckFor = 0; return; }
+        }
+        if (f.StuckFor > 120 && f.Phase == "taxi in" && Time - f.RerouteTime > 60)
+        {
+            f.RerouteTime = Time;
+            var old = f.Spot;
+            f.Spot = null;
+            var gate = FindGate(f.P, f.Airline);
+            if (gate is not null && gate != old)
+            {
+                f.Spot = gate;
+                if (Reroute(f, f.Pos + V2.FromBearing(f.Heading) * 40, "the blockage")) { Log($"{f.Callsign}: going to {gate.Label} instead"); f.StuckFor = 0; return; }
+            }
+            f.Spot = old;
+        }
+        if (f.StuckFor > 300)
+        {
+            Log($"{f.Callsign}: stuck for 5 minutes at ({f.Pos.X:0}, {f.Pos.Y:0}), blocked by {f.BlockedBy?.Callsign ?? (f.BlockedByUser ? "your aircraft" : "nothing")}; removed");
+            f.Done = true;
+        }
+    }
+
     private bool CrossingAllowed(int runway, Flight f)
     {
         if (RunwayBusy(runway, f)) return false;
@@ -1170,6 +1210,7 @@ public sealed class TrafficWorld
             var lat = Math.Abs(V2.Cross(mdir, r));
             if (ahead > 0 && ahead < f.P.LengthM / 2 + 60 + v * v / 2.0 && lat < f.P.SpanM / 2 + 25) userBlock = true;
         }
+        f.BlockedByUser = userBlock;
         if (by is null) { f.BlockedBy = null; f.BlockedFor = 0; return userBlock; }
         if (f.BlockedBy == by) f.BlockedFor += 0.25; else { f.BlockedBy = by; f.BlockedFor = 0; }
         // Standoff: both waiting for each other (head-on on a taxilane). The newer flight looks for another way
