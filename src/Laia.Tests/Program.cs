@@ -253,7 +253,7 @@ Console.WriteLine("== Real gates override the scenery's gate assignments");
     var at = world.Flights.Where(f => f.Spot is not null).Select(f => (f.Callsign, f.Airline, gate: f.Spot!.Label)).ToList();
     Console.WriteLine("  parked: " + string.Join(", ", at.Select(a => $"{a.Callsign} {a.gate}")));
     Check(at.Any(a => a.Callsign == "DAL150" && a.gate == "Gate A15"), "a flight with a known real gate parks at exactly that gate");
-    Check(at.Where(a => a.Airline == "DAL" && a.Callsign != "DAL150").All(a => Num(a.gate) <= 5), "Delta parks at its real gates (or next to them), not the scenery's");
+    Check(at.Where(a => a.Airline == "DAL" && a.Callsign != "DAL150").All(a => Num(a.gate) is <= 5 or >= 14), "Delta parks at its real gates (or next to them), not the scenery's");
     Check(at.Where(a => a.Airline == "UAL").All(a => Num(a.gate) is >= 9 and <= 13), "United parks at its real gates (or next to them)");
     Check(log.Any(l => l.Contains("real gates from AirLabs")), "the real-gate plan is logged");
 }

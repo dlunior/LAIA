@@ -35,7 +35,7 @@ public sealed class RealGates
         if (string.IsNullOrWhiteSpace(gate) || airline.Length != 3) return false;
         var key = Key(terminal, gate);
         if (callsign.Length > 0) ByFlight[callsign] = key;
-        var seenKey = $"{callsign}|{date}|{airline}";
+        var seenKey = callsign.Length > 0 ? $"{callsign}|{date}|{airline}" : $"{date}|{airline}|{key}";
         if (Seen.Contains(seenKey)) return false;
         Seen.Add(seenKey);
         if (Seen.Count > 6000) Seen.RemoveRange(0, Seen.Count - 6000);
