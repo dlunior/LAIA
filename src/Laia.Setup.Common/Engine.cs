@@ -197,7 +197,7 @@ public static class Sys
         // Also by name: if the app runs with different rights, its path can't be read but it can often still be closed.
         foreach (var p in Process.GetProcessesByName("LaiaSim"))
         {
-            try { if (p.Id != Environment.ProcessId) { SetupLog.Write($"Closing LaiaSim (pid {p.Id})"); p.Kill(true); p.WaitForExit(5000); } }
+            try { if (p.Id != Environment.ProcessId) { SetupLog.Write($"Closing LaiaSim (pid {p.Id})"); p.Kill(); p.WaitForExit(5000); } }
             catch (Exception ex) { SetupLog.Write($"Couldn't close LaiaSim (pid {p.Id}): {ex.Message}"); }
             finally { p.Dispose(); }
         }
@@ -209,7 +209,7 @@ public static class Sys
                 if (file is not null && file.StartsWith(folder, StringComparison.OrdinalIgnoreCase) && p.Id != Environment.ProcessId)
                 {
                     SetupLog.Write($"Closing {Path.GetFileName(file)} (pid {p.Id})");
-                    p.Kill(true);
+                    p.Kill();
                     p.WaitForExit(5000);
                 }
             }
