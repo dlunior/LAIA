@@ -1498,6 +1498,8 @@ public sealed class TrafficWorld
             speeds.AddRange(starPts.Select(p => p.SpeedKt));
             if (appPts.Count > 0) { route.AddRange(appPts.Select(p => p.P)); speeds.AddRange(appPts.Select(p => p.SpeedKt)); }
             else route.AddRange(Vectors(route[^1], rwy));
+            while (speeds.Count < route.Count) speeds.Add(0);
+            ShapeFinal(route, speeds, rwy);
         }
         var thrIndex = route.Count;
         route.Add(rwy.Threshold);
@@ -1723,7 +1725,15 @@ public sealed class TrafficWorld
         return (a + ab * t - p).Length;
     }
 
-    /// <summary>Radar vectors to final: a downwind and base if needed, intercepting about 8 miles out at 30-40°.</summary>
+    /// <summary>Where vectored arrivals join the final: about 9.5 nm out (best practice 8–10 nm).</summary>
+    private const double JoinNm = 9.5;
+
+    /// <summary>
+    /// Radar vectors to final the way a controller gives them (7110.65 5-9-2): a downwind, a base leg at right angles
+    /// to the final, then an intercept heading about 25° to the final approach course, joining about 9.5 nm out
+    /// (at least 2 nm outside the approach gate). From behind, inside a 30° cone, it's a straight-in to the join point.
+    /// Coming from beyond the airport, it goes round the side rather than over the field.
+    /// </summary>
     private static List<V2> Vectors(V2 from, RunwayEnd rwy)
     {
         var nm = Geo2.MPerNm;
@@ -1733,24 +1743,75 @@ public sealed class TrafficWorld
         var off = rwy.Offset(from);
         var side = off >= 0 ? 1.0 : -1.0;
         var thr = rwy.Threshold;
+        var join = thr - dir * (JoinNm * nm);
         var pts = new List<V2>();
-        var straightIn = along < -10 * nm && Math.Abs(off) < Math.Abs(along) * Math.Tan(30 * Math.PI / 180);
-        if (!straightIn)
+        // Straight in: behind the join point and inside a 30° intercept cone.
+        if (along < -(JoinNm + 2) * nm && Math.Abs(off) <= (-along - JoinNm * nm) * Math.Tan(30 * Math.PI / 180))
         {
-            if (along > -10 * nm)
-            {
-                // Wrong side of the final approach course: fly a downwind first. Coming from beyond the
-                // airport, go around its side rather than over it.
-                if (along > 3 * nm && Math.Abs(off) < 5 * nm)
-                    pts.Add(thr + left * (side * 6 * nm) + dir * Math.Min(along, 12 * nm));
-                pts.Add(thr + left * (side * 5 * nm) + dir * Math.Min(along, 3 * nm));
-                pts.Add(thr + left * (side * 5 * nm) - dir * (11 * nm));
-            }
-            pts.Add(thr + left * (side * 3 * nm) - dir * (12.5 * nm));
+            pts.Add(join);
+            return pts;
         }
-        pts.Add(thr - dir * (8 * nm));
-        pts.Add(thr - dir * (4 * nm));
+        const double baseNm = 12.5, endOfBaseNm = 1.6;   // base 12.5 nm out; turn to intercept 1.6 nm from the course (≈ 28°)
+        if (along > -baseNm * nm)
+        {
+            var dw = Math.Clamp(Math.Abs(off), 3 * nm, 6 * nm);
+            // From beyond the airport, close to its extended centreline: go round its side first.
+            if (along > 3 * nm && Math.Abs(off) < 5 * nm)
+                pts.Add(thr + left * (side * 5 * nm) + dir * Math.Min(along, 12 * nm));
+            if (along > -6 * nm) pts.Add(thr + left * (side * dw) + dir * Math.Min(along, 2 * nm));   // on the downwind
+            pts.Add(thr + left * (side * dw) - dir * (baseNm * nm));                        // turn base
+        }
+        else
+        {
+            // Beyond the base turn but off to the side: a base from about where it is.
+            pts.Add(thr + left * (side * Math.Clamp(Math.Abs(off), 3 * nm, 8 * nm)) - dir * (Math.Min(-along, 16 * nm)));
+        }
+        pts.Add(thr + left * (side * endOfBaseNm * nm) - dir * (baseNm * nm));             // end of base: intercept heading
+        pts.Add(join);
         return pts;
+    }
+
+    /// <summary>
+    /// Fixes how a route joins the final approach course: a published transition that hooks onto the final with a
+    /// hairpin, or joins it far out from the side (Orlando's ILS 36L "via EXBAN" turning 180° onto a 13 nm final), is
+    /// replaced by a downwind, base and an intercept heading about 25° to the course 8–10 nm out — what a controller
+    /// does when the arrival doesn't feed straight into the approach. Straight-in joins are left alone.
+    /// </summary>
+    private static void ShapeFinal(List<V2> route, List<double> speeds, RunwayEnd rwy)
+    {
+        var nm = Geo2.MPerNm;
+        if (route.Count < 3) return;
+        bool OnFinal(V2 p) => Math.Abs(rwy.Offset(p)) < 0.3 * nm && rwy.Along(p) < -0.3 * nm;
+        if (!OnFinal(route[^1])) return;                       // a curved final (LGA's RNAV X): leave it as published
+        var k = route.Count - 1;
+        while (k > 0 && OnFinal(route[k - 1])) k--;
+        if (k == 0) return;
+        var joinNm = -rwy.Along(route[k]) / nm;
+        var inc = route[k] - route[k - 1];
+        if (inc.Length < 1) return;
+        var angle = Math.Abs(Geo2.Diff(inc.Bearing, rwy.Heading));
+        // A short final joined from the side by design (LGA's RNAV Y 31 at MANLL, 4 nm out) is the procedure: keep it.
+        if (joinNm < 6) return;
+        if (angle <= 35 && !(joinNm > 11.5 && angle > 15)) return;
+        // Keep the route up to where it's still out on its own (not yet in the hook beyond the base turn).
+        var m = k - 1;
+        while (m > 0)
+        {
+            var a = rwy.Along(route[m]); var o = Math.Abs(rwy.Offset(route[m]));
+            if (!(a < -11 * nm && o < 7 * nm) && o >= 1 * nm) break;
+            m--;
+        }
+        var vec = Vectors(route[m], rwy);
+        var tail = new List<(V2 p, double kt)>();
+        for (var i = k; i < route.Count; i++)
+            if (-rwy.Along(route[i]) < JoinNm * nm - 300) tail.Add((route[i], i < speeds.Count ? speeds[i] : 0));
+        var newRoute = route.Take(m + 1).Concat(vec).Concat(tail.Select(t => t.p)).ToList();
+        var newSpeeds = speeds.Take(Math.Min(m + 1, speeds.Count)).ToList();
+        while (newSpeeds.Count < m + 1) newSpeeds.Add(0);
+        newSpeeds.AddRange(vec.Select(_ => 0.0));
+        newSpeeds.AddRange(tail.Select(t => t.kt));
+        route.Clear(); route.AddRange(newRoute);
+        speeds.Clear(); speeds.AddRange(newSpeeds);
     }
 
     private double ArrivalSpeed(Flight f, double d)
@@ -2246,20 +2307,42 @@ public sealed class TrafficWorld
         f.BlockedByUser = userBlock;
         if (by is null) { f.BlockedBy = null; f.BlockedFor = 0; return userBlock; }
         if (f.BlockedBy == by) f.BlockedFor += 0.25; else { f.BlockedBy = by; f.BlockedFor = 0; }
-        // Standoff: both waiting for each other (head-on on a taxilane). The newer flight looks for another way
-        // round; if there is none, the older one eventually goes.
-        if (by.BlockedBy == f && f.BlockedFor > 8 && string.CompareOrdinal(f.Id, by.Id) > 0 && Time - f.RerouteTime > 60)
+        // Standoff: aircraft all waiting for each other — two head-on on a taxilane, or three or four in a ring at an
+        // intersection (Orlando: a long pushback into the taxiway jammed three 737s). The newer flights look for
+        // another way round; if there is none, the oldest one in the ring eventually goes.
+        var ring = Ring(f);
+        if (ring is not null)
         {
-            f.RerouteTime = Time;
-            if (Reroute(f, by)) { f.BlockedBy = null; f.BlockedFor = 0; return false; }
-        }
-        if (by.BlockedBy == f && f.BlockedFor > 20 && string.CompareOrdinal(f.Id, by.Id) < 0)
-        {
-            f.Ignore = by;
-            f.IgnoreUntil = Time + 45;
-            return userBlock;
+            var oldest = ring.OrderBy(x => x.Id, StringComparer.Ordinal).First();
+            if (f != oldest && f.BlockedFor > 8 && Time - f.RerouteTime > 60)
+            {
+                f.RerouteTime = Time;
+                if (Reroute(f, by)) { f.BlockedBy = null; f.BlockedFor = 0; return false; }
+            }
+            if (f == oldest && f.BlockedFor > 20)
+            {
+                if (f.BlockedFor < 20.3) Log($"{f.Callsign}: standoff with {string.Join(", ", ring.Where(x => x != f).Select(x => x.Callsign))}; going first");
+                f.Ignore = by;
+                f.IgnoreUntil = Time + 45;
+                return userBlock;
+            }
         }
         return true;
+    }
+
+    /// <summary>The ring of ground aircraft each waiting for the next, back to this one (null if there's no ring).</summary>
+    private static List<Flight>? Ring(Flight f)
+    {
+        var ring = new List<Flight> { f };
+        var x = f.BlockedBy;
+        for (var i = 0; i < 5 && x is not null; i++)
+        {
+            if (x == f) return ring;
+            if (ring.Contains(x)) return null;
+            ring.Add(x);
+            x = x.BlockedBy;
+        }
+        return null;
     }
 
     private void TakeoffRoll(Flight f, double dt)

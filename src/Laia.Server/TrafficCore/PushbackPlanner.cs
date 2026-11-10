@@ -56,7 +56,9 @@ public sealed class PushbackPlanner(AirportModel apt)
                 var denom = V2.Dot(n, back);
                 if (Math.Abs(denom) < 0.05) continue;
                 var sc = V2.Dot(n, a - s0) / denom;   // distance back to the corner
-                if (sc < 5 || sc > 250) continue;
+                // A tug pushes onto the taxilane behind the stand, not a long way out onto a taxiway (MCO: 205 m pushes
+                // into the taxiway jammed the traffic): at most about 100 m straight back.
+                if (sc < 5 || sc > Math.Max(100, perf.LengthM * 2.2)) continue;
                 var corner = s0 + back * sc;
                 if (!WithinLine(corner, a, b, u, 40)) continue;
                 foreach (var r in new[] { rcomf, rmin * 1.15, rcomf * 1.4 })
@@ -211,7 +213,7 @@ public sealed class PushbackPlanner(AirportModel apt)
         PushPlan? best = null;
         foreach (var side in new[] { 1.0, -1.0 })
         {
-            var l1 = Math.Max(wingDist, 20);
+            var l1 = Math.Clamp(wingDist, 20, Math.Max(60, perf.LengthM * 1.3));
             var corner = spot.P + back * (l1 + rcomf);
             var m1 = face.Perp * side;
             var end = corner + m1 * (rcomf + 20);

@@ -581,6 +581,56 @@ Console.WriteLine("== Several runways from the ATIS, and STARs/SIDs chosen by wh
     Check(outs.Count > 0 && outs.All(f => f!.Rwy!.Ident == "27"), "a ramp outside the runways departs from the runway on its own side");
 }
 
+Console.WriteLine("== Vectors to final: downwind, base, a 20–30° intercept 8–10 nm out (no hairpins, no needless long finals)");
+{
+    var nm = Geo2.MPerNm;
+    var data = TestAirport.Build(false);
+    data.Arrivals.Clear(); data.Approaches.Clear();
+    var map = new LocalMap(data.Lat, data.Lon);
+    Laia.Common.Airports.ProcedureLeg Fix(string name, double x, double y, int type = 18)
+    {
+        var (la, lo) = map.ToLatLon(new V2(x, y));
+        return new() { Type = type, Fix = name, Lat = la, Lon = lo };
+    }
+    // Like Orlando's ILS 36L "via EXBAN": a downwind transition that hooks 180° onto a 14 nm final.
+    data.Arrivals.Add(new() { Name = "WEST1", Legs = { Fix("WESTA", -35 * nm, 8 * nm, 15), Fix("WESTB", -14 * nm, 4 * nm) } });
+    data.Approaches.Add(new() { Type = 4, Runway = "27",
+        Transitions = { new() { Name = "HOOKX", Legs = { Fix("HOOKX", -10 * nm, 4 * nm, 15), Fix("HOOKY", 10 * nm, 4 * nm), Fix("IF27", 1500 + 14 * nm, 0) } } },
+        FinalLegs = { Fix("IF27", 1500 + 14 * nm, 0, 15), Fix("FF27", 1500 + 5 * nm, 0), Fix("RW27", 1500, 0) } });
+    // And plain vectors from the far side of the field (no approach transition reaches).
+    var data2 = TestAirport.Build(false);
+    data2.Arrivals.Clear();
+    data2.Arrivals.Add(new() { Name = "EAST1", Legs = { Fix("EASTA", 40 * nm, 20 * nm, 15), Fix("EASTB", 16 * nm, 12 * nm) } });
+    foreach (var (name, d) in new[] { ("hooking transition", data), ("vectors", data2) })
+    {
+        var world = new TrafficWorld(new AirportModel(d), new TestSource(), seed: 6) { Automatic = false, Wind = new Wind(270, 10) };
+        world.SelectRunways(true);
+        var f = world.SpawnArrival(45, true)!;
+        var rwy = f.Rwy!;
+        // Walk back from the threshold along the final course to where the aircraft joins it.
+        var sJoin = f.ThrS;
+        while (sJoin > 200)
+        {
+            var (p, dir, _) = f.Path!.At(sJoin - 100);
+            if (Math.Abs(rwy.Offset(p)) > 0.15 * nm || Math.Abs(Geo2.Diff(dir, rwy.Heading)) > 3) break;
+            sJoin -= 100;
+        }
+        var joinNm = -rwy.Along(f.Path!.At(sJoin).p) / nm;
+        var before = f.Path.At(Math.Max(0, sJoin - 0.8 * nm)).dir;
+        var cut = Math.Abs(Geo2.Diff(before, rwy.Heading));
+        double maxTurn = 0, prev = double.NaN;
+        for (var s2 = Math.Max(0, sJoin - 6 * nm); s2 < f.ThrS; s2 += 100)
+        {
+            var dd = f.Path.At(s2).dir;
+            if (!double.IsNaN(prev)) maxTurn = Math.Max(maxTurn, Math.Abs(Geo2.Diff(dd, prev)));
+            prev = dd;
+        }
+        Console.WriteLine($"  {name}: {f.Route}; joins {joinNm:0.0} nm out at {cut:0}°");
+        Check(joinNm is >= 7.5 and <= 10.5, $"{name}: joins the final 8–10 nm out ({joinNm:0.0} nm)");
+        Check(cut <= 32, $"{name}: intercepts the final at no more than 30° ({cut:0}°)");
+    }
+}
+
 Console.WriteLine("== After a go-around, the aircraft comes back around and lands normally");
 {
     var apt = new AirportModel(TestAirport.Build(false));
