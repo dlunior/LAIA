@@ -2156,7 +2156,7 @@ public sealed class TrafficWorld
                 f.Lights = f.Phase == "landing roll" && f.Gs > 60 ? Nav | Beacon | Logo | Strobes | Landing : Nav | Beacon | Logo | Taxi;
                 var done = MoveGround(f, dt);
                 if (!done && f.Phase == "taxi in") Unstick(f, dt);
-                if (f.Phase == "landing roll" && f.OnRunway < 0 && f.Gs < 35)
+                if (f.Phase == "landing roll" && f.OnRunway < 0 && f.Gs < 45)
                 {
                     // How long it really took to clear: spacing on this runway learns from it.
                     var rot = Time - f.PhaseTime;
@@ -2231,7 +2231,7 @@ public sealed class TrafficWorld
         if (hold is not null) target = Math.Min(target, Math.Sqrt(2 * 0.8 * Math.Max(0, hold.S - f.S)));
         // Ease into stops (a sudden stop rocks the aircraft on its nose gear).
         target = Math.Min(target, Math.Sqrt(2 * (f.Phase == "landing roll" ? 1.2 : f.Reverse ? 0.3 : 0.7) * Math.Max(0, path.Length - f.S)) + 0.12);
-        if (f.Phase is not ("landing roll" or "lining up") && Blocked(f, v)) target = 0;
+        if ((f.Phase is not ("landing roll" or "lining up") || (f.Phase == "landing roll" && f.OnRunway < 0)) && Blocked(f, v)) target = 0;
         // Blocked() may have given the aircraft a new route round the other one: carry on along it next step,
         // not along the old one (which would put it back where the old route started for a moment).
         if (!ReferenceEquals(path, f.Path)) { var (np, nd, _) = f.Path!.At(f.S); f.Pos = np; f.Heading = f.Reverse ? Geo2.Norm(nd + 180) : nd; return false; }
