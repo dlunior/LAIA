@@ -1012,8 +1012,12 @@ public sealed class TrafficWorld
     private readonly Dictionary<int, Flight> _lastDep = new();
     private readonly Dictionary<(RunwayEnd, bool), double> _rot = new();
     private readonly Dictionary<RunwayEnd, double> _rotSeen = new();
-    /// <summary>Speeds a landing aircraft turns off at (m/s): about 35 kt onto a high-speed (angled) exit, 20 kt onto a 90° one.</summary>
-    private const double ExitSpeedFast = 18, ExitSpeedSquare = 10;
+    /// <summary>
+    /// Speeds a landing aircraft turns off at (m/s): about 45 kt onto a high-speed (rapid exit) taxiway — designed for
+    /// 50 kt wet (ICAO Annex 14 3.8.15, code 3–4) and up to 60 kt dry; crews typically enter at 40–60 kt and slow on
+    /// it — and about 20 kt onto a 90° one. The exit's own curve still limits the speed (scenery arcs can be tight).
+    /// </summary>
+    private const double ExitSpeedFast = 23, ExitSpeedSquare = 10;
 
     /// <summary>
     /// Seconds a landing aircraft occupies this runway: braking at about 2 m/s² from touchdown (~400 m in) to the
@@ -2065,7 +2069,7 @@ public sealed class TrafficWorld
         {
             gate = FindGate(f.P, f.Airline, f.Brand, f.Callsign);
             // Exits on the terminal side (where the gate is) first, then the first one the aircraft can make
-            // with normal braking (about 2 m/s²): a high-speed exit is taken at about 35 kt, a 90° one at about 20 kt.
+            // with normal braking (about 2 m/s²): a high-speed exit is taken at about 45 kt, a 90° one at about 20 kt.
             var side = gate is null ? 0 : Math.Sign(rwy.Offset(gate.P));
             double Needed(double dot) { var vx = dot > 0.5 ? ExitSpeedFast : ExitSpeedSquare; return tdAlong + Math.Max(250, (v0 * v0 - vx * vx) / (2 * 2.0)); }
             var links = Apt.RunwayLinks(rwy.Runway)
@@ -2225,7 +2229,7 @@ public sealed class TrafficWorld
         {
             // Brake to a fast taxi (about 40 kt) and keep it to the exit; the exit's curve sets the turn-off speed.
             // Crawling the rest of the way at 30 kt kept Orlando's 36L arrivals on the runway for 70 s.
-            var roll = f.OnRunway >= 0 ? Math.Max(f.MaxKt * Kt, 20.0) : f.MaxKt * Kt;
+            var roll = f.OnRunway >= 0 ? Math.Max(f.MaxKt * Kt, ExitSpeedFast) : f.MaxKt * Kt;
             target = Math.Min(target, Math.Max(roll, v - 2.0 * dt));
         }
         // Runway crossings: ask for clearance on the way, stop at the hold line if not given.
