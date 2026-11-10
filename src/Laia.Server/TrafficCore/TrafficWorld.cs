@@ -1357,13 +1357,13 @@ public sealed class TrafficWorld
     /// final approach groundspeed, or the leader's runway occupancy (about 50 s to land and turn off) plus a margin,
     /// whichever is larger; more when departures are waiting to go between the arrivals.
     /// </summary>
-    private double ThresholdGapNeeded(Flight leader, Flight f)
+    private double ThresholdGapNeeded(Flight leader, Flight f, bool forDepartures = true)
     {
         var gs = Math.Max(90, f.P.Vapp - Wind.Headwind(f.Rwy!.Heading));
         var wake = Cwt.MilesBehind(leader.Wake, f.Wake) / gs * 3600;
         var occupancy = 50 + 15;
         var single = DepRwy is null || DepRwy.Runway == f.Rwy.Runway;
-        return Math.Max(wake, occupancy) + 10 + (DeparturesWaiting ? (single ? 70 : 30) : 0);
+        return Math.Max(wake, occupancy) + 10 + (forDepartures && DeparturesWaiting ? (single ? 70 : 30) : 0);
     }
 
     /// <summary>
@@ -1905,7 +1905,9 @@ public sealed class TrafficWorld
                     target = Math.Min(target, Math.Round(want / 5) * 5);
                 }
                 // Speed can't make it: hold (far out), a 360 (12–15 nm) or an early break-off (5–12 nm), as a controller would.
-                var short_ = needSec - gapSec;
+                // Only for real spacing (wake, radar, runway occupancy): gaps for departures are made with speed, never
+                // by breaking someone off.
+                var short_ = ThresholdGapNeeded(leader, f, forDepartures: false) - gapSec;
                 var tooClose = gap < needNm - 0.5;
                 if ((short_ > 45 || tooClose) && dth > 15 && Time - f.LastHold > 300 && Time - f.LastOrbit > 120) { Hold(f, $"{gap:0.0} nm behind {leader.Callsign}, {short_:0} s short at the runway"); return; }
                 if ((short_ > 45 || tooClose) && dth > 12 && dth <= 15 && Time - f.LastOrbit > 240) { Orbit(f, $"{gap:0.0} nm behind {leader.Callsign}"); return; }
