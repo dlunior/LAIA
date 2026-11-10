@@ -170,6 +170,35 @@ An interactive map on the ATC PC's control page, which works from any PC, tablet
 - **Layers to switch on and off:** the drawn-traffic radius (40 nm), sector boundaries with the open splits and their frequencies, the airspace layer (250 nm), runways in use, and holding patterns.
 - **Style:** a dark map, as in SimRouteGen. Updated about once a second.
 
+### Step 2c: Guidance for the user in traffic mode (no AI ATC)
+In traffic mode, with no AI ATC, the user still needs to know where they fit, so they can fly to it, and when to stop or wait on the ground. The user's decision, 9 Nov 2026.
+These are hints, not clearances: the wording is plain ("aim for", "wait", "after the landing A321"), never ATC phraseology.
+
+**In the air**
+- **Sequence:** "#4 for runway 22, following DAL1132 (A321), 7 nm ahead".
+- **What to aim for:**
+  - A target time at the next fix ("cross CAMRN at 21:42, you're 40 s early").
+  - A target speed now and the next speed step ("250 kt now, plan 210 by CAMRN, 170 by 5 nm final").
+  - The expected STAR, approach and runway, from the runway in use.
+- **Who's waiting for you:** the aircraft holding or being slowed for your slot ("UAL455 holding at BRAND for you, 4 min").
+- **When the slot changes:** a short note explaining why, for example "#5 now, a 777 needs extra spacing ahead of you". This is as rare as the sequence-stability rules allow.
+
+**On the ground**
+- **Pushback:** "wait, DAL455 is taxiing behind you", or "clear to push, tail to the south".
+- **Stop or give way:** "stop, UAL22 crossing ahead on B from the left", or "give way to the A321 on your right".
+- **Runway crossings and hold short:** "hold short of 13, departure rolling", or "cross now, next arrival is 6 nm out".
+- **Departure:** "#2 for departure behind the E175", "line up after the landing A321", or "go: arrival is 7 nm out".
+
+**Where it shows**
+- A small always-on-top LAIA Sim window on the sim PC, which also works in VR.
+- The live map, on a tablet or phone.
+- Optionally spoken by a neutral "first officer" voice (not the controller), so the user doesn't have to look.
+- Later, possibly an in-sim toolbar panel (an MSFS Community package).
+
+**The AI works around the user too**
+- On the ground, the AI gives way to the user as it does today.
+- In the air, the sequence fits around the user's actual progress. If the user ignores the guidance, the AI adapts, within the stability rules.
+
 ### Step 3: Every aircraft in the sky
 - **What LAIA Sim reads:** every other aircraft MSFS knows about within about 100 nm (injected, live traffic, multiplayer), plus the user's aircraft. It sends them to the server as traffic LAIA can't control.
 - **How they're used:** their paths are predicted, and LAIA's flights are sequenced and spaced around them.
