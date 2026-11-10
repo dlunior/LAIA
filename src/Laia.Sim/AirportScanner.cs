@@ -288,7 +288,7 @@ internal sealed class AirportScanner : IAsyncDisposable
                 var type = r.I32();
                 var suffix = r.I32();
                 var rwy = AirportRunway.Ident(r.I32(), r.I32());
-                return new Approach { Type = type, Suffix = suffix is > 32 and < 127 ? ((char)suffix).ToString().Trim() : "", Runway = rwy };
+                return new Approach { Type = type, Suffix = suffix is > 32 and < 127 and not 48 ? ((char)suffix).ToString().Trim() : "", Runway = rwy };
             }
             case 7 or 8: // APPROACH_LEG / FINAL_APPROACH_LEG
             {

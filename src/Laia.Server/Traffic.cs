@@ -9,7 +9,7 @@ namespace Laia.Server;
 /// Without a layout (or for the test buttons at an airport not read yet) a simple runway-only world is used.
 /// </summary>
 public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportStore airports, FlightSource source, SettingsStore settings,
-    SimBriefService simbrief, ServerState state, ScheduleStore schedules, NetworkStore network, ILogger<TrafficEngine> log) : BackgroundService
+    SimBriefService simbrief, ServerState state, ScheduleStore schedules, NetworkStore network, WorldAirports worldAirports, ILogger<TrafficEngine> log) : BackgroundService
 {
     private readonly object _gate = new();
     private AtisReader? _atisReader;
@@ -126,7 +126,9 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 var ends = new List<object>();
                 foreach (var e in w.Apt.Ends)
                 {
-                    var use = e == w.ArrRwy && e == w.DepRwy ? "landing and departing" : e == w.ArrRwy ? "landing" : e == w.DepRwy ? "departing" : null;
+                    bool L(RunwayEnd x) => x == w.ArrRwy || w.ArrRwys.Contains(x);
+                    bool D(RunwayEnd x) => x == w.DepRwy || w.DepRwys.Contains(x);
+                    var use = L(e) && D(e) ? "landing and departing" : L(e) ? "landing" : D(e) ? "departing" : null;
                     var (tla, tlo) = w.Apt.Map.ToLatLon(e.Threshold);
                     var (ela, elo) = w.Apt.Map.ToLatLon(e.FarEnd);
                     ends.Add(new { ident = e.Ident, use, thr = new[] { tla, tlo }, end = new[] { ela, elo } });
@@ -233,10 +235,10 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 airport = w?.Apt.Icao,
                 airportName = w?.Apt.Name,
                 layout = w is null ? null : $"{w.Apt.Spots.Count} parking spots, {w.Apt.Data.Departures.Count} SIDs, {w.Apt.Data.Arrivals.Count} STARs, {w.Apt.Data.Approaches.Count} approaches",
-                landing = w?.ArrRwy?.Ident,
+                landing = w is null ? null : string.Join(", ", w.ArrRwys.Select(e => e.Ident).DefaultIfEmpty(w.ArrRwy?.Ident ?? "")),
                 approach = w?.ApproachInUse,
                 atis = w?.Atis.CodeArr is { } code ? $"real ATIS info {code}" : w is null ? null : "no ATIS: runways from the wind",
-                departing = w?.DepRwy?.Ident,
+                departing = w is null ? null : string.Join(", ", w.DepRwys.Select(e => e.Ident).DefaultIfEmpty(w.DepRwy?.Ident ?? "")),
                 airportsOnFile = airports.Count,
                 catalog = source.HasCatalog,
                 schedule = (w?.PeakInfo is { } pk ? pk + " · " : "") + (w?.Schedule is { } sd ? $"Real {sd.Source} schedule: {sd.Legs.Count} flights a week at {sd.Airport}" : source.ScheduleStatus)
@@ -375,6 +377,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                             if (w.Schedule is null) w.Schedule = schedules.Get(w.Apt.Icao);
                             w.Gates = source.Gates(w.Apt.Icao);
                             w.Atis = Atis.Get(w.Apt.Icao);
+                            w.Locate ??= code => worldAirports.Find(code) is { } p ? (p.lat, p.lon) : null;
                         }
                         w.WeekMinute = live && sim!.ZuluWeekMinute >= 0 ? sim.ZuluWeekMinute : WeekMinuteNow();
                         // Don't run traffic while nobody is flying (sim closed): it would all depart unseen.

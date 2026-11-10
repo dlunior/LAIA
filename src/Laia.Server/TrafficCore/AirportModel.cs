@@ -82,6 +82,8 @@ public sealed class AirportModel
     {
         Data = d;
         Icao = d.Icao;
+        // The sim's "no suffix" comes through as "0" (it showed as "ILS 36L 0").
+        foreach (var ap in d.Approaches) if (ap.Suffix is "0" || ap.Suffix.Trim().Length == 0) ap.Suffix = "";
         Name = d.Name;
         Map = new LocalMap(d.Lat, d.Lon);
         ElevationFt = d.ElevationM * Geo2.FtPerM;

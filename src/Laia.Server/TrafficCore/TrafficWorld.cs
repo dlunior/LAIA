@@ -125,6 +125,12 @@ public sealed class TrafficWorld
     }
     private TrafficLevel _level = TrafficLevel.Normal;
     public RunwayEnd? ArrRwy { get; private set; }
+    /// <summary>Every landing runway in use (the ATIS can name several, e.g. Orlando's 35L and 36L); ArrRwy is the main one.</summary>
+    public List<RunwayEnd> ArrRwys { get; private set; } = new();
+    /// <summary>Every departure runway in use; DepRwy is the main one.</summary>
+    public List<RunwayEnd> DepRwys { get; private set; } = new();
+    /// <summary>Where an airport is (lat, lon), for choosing the STAR from the origin and the SID towards the destination.</summary>
+    public Func<string, (double lat, double lon)?>? Locate { get; set; }
 
     private AtisInfo _atis = new();
     /// <summary>What the real ATIS says is in use: it decides the runways and the approach; the wind is only the fallback.</summary>
@@ -146,9 +152,7 @@ public sealed class TrafficWorld
     public List<string> AtisDeparting => _atis.Departing;
     /// <summary>The one approach every arrival to the landing runway flies (never a mix), e.g. "RNAV Y 31".</summary>
     public string? ApproachInUse { get; private set; }
-    private Approach? _app;
-    private RunwayEnd? _appRwy;
-    private string _appKey = "";
+    private readonly Dictionary<RunwayEnd, (Approach? app, string key, string? label)> _apps = new();
     private const double MinFinalNm = 1.2; // LGA's RNAV X 31 turns onto its final only 1.6 nm out
     public RunwayEnd? DepRwy { get; private set; }
     public V2? UserPos { get; set; }
@@ -238,15 +242,21 @@ public sealed class TrafficWorld
         usable = usable.Where(e => !_atis.Closed.Contains(e.Ident)).ToList();
         if (usable.Count == 0) return;
         // The real ATIS always decides when it names the runways; the wind is only the fallback.
-        var atisArr = AtisLanding.Where(id => !_atis.Closed.Contains(id)).Select(id => Apt.Ends.FirstOrDefault(e => e.Ident == id)).Where(e => e is not null).Select(e => e!).OrderByDescending(e => e.LengthM).FirstOrDefault();
-        if (atisArr is not null)
+        // Every runway it names is used: several landing runways (Orlando lands 35L and 36L) and several departure runways.
+        List<RunwayEnd> Ends(IEnumerable<string> ids) => ids.Where(id => !_atis.Closed.Contains(id))
+            .Select(id => Apt.Ends.FirstOrDefault(e => e.Ident == id)).Where(e => e is not null).Select(e => e!).Distinct().OrderByDescending(e => e.LengthM).ToList();
+        var atisArrs = Ends(AtisLanding);
+        if (atisArrs.Count > 0)
         {
-            var atisDep = AtisDeparting.Select(id => Apt.Ends.FirstOrDefault(e => e.Ident == id)).Where(e => e is not null).Select(e => e!)
-                .OrderBy(e => e.Runway == atisArr.Runway ? 1 : 0).ThenByDescending(e => e.LengthM).FirstOrDefault() ?? atisArr;
-            if (ArrRwy != atisArr || DepRwy != atisDep)
-                Log($"Runways in use at {Apt.Icao}: landing {atisArr.Ident}, departing {atisDep.Ident} (from the real ATIS{(_atis.CodeArr is { } c ? " info " + c : "")}; wind {Wind.FromDeg:000} at {Wind.Kt:0} kt)");
-            ArrRwy = atisArr;
-            DepRwy = atisDep;
+            var atisDeps = Ends(AtisDeparting);
+            if (atisDeps.Count == 0) atisDeps = new() { atisArrs[0] };
+            // The main departure runway is one not also used for landing, when there is one.
+            atisDeps = atisDeps.OrderBy(e => atisArrs.Any(a => a.Runway == e.Runway) ? 1 : 0).ThenByDescending(e => e.LengthM).ToList();
+            if (!ArrRwys.SequenceEqual(atisArrs) || !DepRwys.SequenceEqual(atisDeps))
+                Log($"Runways in use at {Apt.Icao}: landing {string.Join(", ", atisArrs.Select(e => e.Ident))}, departing {string.Join(", ", atisDeps.Select(e => e.Ident))} (from the real ATIS{(_atis.CodeArr is { } c ? " info " + c : "")}; wind {Wind.FromDeg:000} at {Wind.Kt:0} kt)");
+            ArrRwys = atisArrs; DepRwys = atisDeps;
+            ArrRwy = atisArrs[0];
+            DepRwy = atisDeps[0];
             return;
         }
         RunwayEnd best;
@@ -283,6 +293,8 @@ public sealed class TrafficWorld
         if (ArrRwy != arr || DepRwy != dep) Log($"Runways in use at {Apt.Icao}: landing {arr.Ident}, departing {dep.Ident} (wind {Wind.FromDeg:000} at {Wind.Kt:0} kt)");
         ArrRwy = arr;
         DepRwy = dep;
+        ArrRwys = new() { arr };
+        DepRwys = new() { dep };
     }
 
     private static bool SegmentsCross(V2 a0, V2 a1, V2 b0, V2 b1)
@@ -452,10 +464,10 @@ public sealed class TrafficWorld
     /// Where a new arrival can start: the wanted distance from the runway (nm), moved further out until it's at least
     /// 5 nm from every arrival already flying to the landing runway. -1 if that would be more than 50 nm out.
     /// </summary>
-    private double ArrivalSlot(double wantNm)
+    private double ArrivalSlot(double wantNm, string? origin = null)
     {
         if (ArrRwy is null) SelectRunways(true);
-        var rwy = ArrRwy;
+        var rwy = ArrivalRunwayFor(origin);
         var taken = Flights.Where(o => !o.Done && o.Kind == "arrival" && !o.OnGround && o.Rwy is not null && rwy is not null && o.Rwy.Runway == rwy.Runway)
             .Select(o => o.Phase == "go-around" ? 12.0 : (o.ThrS - o.S) / Geo2.MPerNm).OrderBy(x => x).ToList();
         var d = wantNm;
@@ -525,7 +537,7 @@ public sealed class TrafficWorld
             {
                 if (l.Reg.Length > 0 && Flights.Any(f => !f.Done && f.Reg == l.Reg)) continue;
                 // Spread out along the approach, clear of every arrival already flying, rather than on top of one.
-                var d = ArrivalSlot(Math.Clamp(Until(l.ArrMin) * 3.2, 7, 40));
+                var d = ArrivalSlot(Math.Clamp(Until(l.ArrMin) * 3.2, 7, 40), l.Dep);
                 if (d < 0) break;
                 _done.Add(Key(l, 'A'));
                 SpawnArrival(d, false, l);
@@ -559,7 +571,7 @@ public sealed class TrafficWorld
             if (active >= maxActive || Flights.Count >= maxObjects) { _done.Add(Key(l, 'A')); Log($"{l.Callsign}: skipped (traffic limit)"); continue; }
             // Start clear of every arrival already flying (a little later than scheduled if needed); if there's no
             // room yet, try again on the next step.
-            var d = ArrivalSlot(Math.Clamp(u * 3.2, 7, 40));
+            var d = ArrivalSlot(Math.Clamp(u * 3.2, 7, 40), l.Dep);
             if (d < 0) continue;
             _done.Add(Key(l, 'A'));
             if (SpawnArrival(d, false, l) is not null) { active++; Movements++; }
@@ -671,7 +683,7 @@ public sealed class TrafficWorld
             f.Other = other;
         }
         f.Kind = "departure";
-        f.Rwy = DepRwy;
+        f.Rwy = DepartureRunwayFor(f);
         f.Timer = boarding;
         f.SetPhase("boarding", Time);
         return f;
@@ -889,6 +901,8 @@ public sealed class TrafficWorld
     private HashSet<int> ActiveRunways()
     {
         var set = new HashSet<int>();
+        foreach (var e in ArrRwys) set.Add(e.Runway);
+        foreach (var e in DepRwys) set.Add(e.Runway);
         if (ArrRwy is not null) set.Add(ArrRwy.Runway);
         if (DepRwy is not null) set.Add(DepRwy.Runway);
         return set;
@@ -925,7 +939,7 @@ public sealed class TrafficWorld
     /// </summary>
     private double WakeRemaining(Flight f)
     {
-        var l = _lastDep;
+        var l = f.Rwy is null ? null : _lastDep.GetValueOrDefault(f.Rwy.Runway);
         if (l is null || l.Done || l.Rwy is null || f.Rwy is null || l.Rwy.Runway != f.Rwy.Runway) return 0;
         if (l.OnGround) return 30;                                      // still rolling
         var since = Time - l.LiftoffTime;
@@ -942,7 +956,7 @@ public sealed class TrafficWorld
         return Math.Max(0, Math.Max(wake, Math.Max(radar, runway)));
     }
 
-    private Flight? _lastDep;
+    private readonly Dictionary<int, Flight> _lastDep = new();
 
     private bool LineUpAllowed(Flight f)
     {
@@ -1044,7 +1058,7 @@ public sealed class TrafficWorld
         var rwy = f.Rwy!;
         var pts = new List<AirPoint> { new(rwy.FarEnd, ""), new(rwy.FarEnd + rwy.Dir * Geo2.MPerNm, "") };
         f.DepRoute = "";
-        var sid = PickSid(rwy, out var sidLegs);
+        var sid = PickSid(rwy, f.Other, out var sidLegs);
         if (sid is not null && sidLegs.Count > 0)
         {
             var sp = Apt.LegsToPoints(sidLegs, rwy.FarEnd, rwy.ElevationFt + 400, out _);
@@ -1120,17 +1134,88 @@ public sealed class TrafficWorld
         return lim;
     }
 
-    private Procedure? PickSid(RunwayEnd rwy, out List<ProcedureLeg> legs)
+    private Procedure? PickSid(RunwayEnd rwy, string? dest, out List<ProcedureLeg> legs)
     {
         legs = new List<ProcedureLeg>();
         var cands = Apt.Data.Departures.Where(d => d.RunwayTransitions.Any(t => t.Name == rwy.Ident) || (d.RunwayTransitions.Count == 0 && d.Legs.Count > 0)).ToList();
         if (cands.Count == 0) return null;
-        var sid = cands[Rng.Next(cands.Count)];
-        var rt = sid.RunwayTransitions.FirstOrDefault(t => t.Name == rwy.Ident);
+        // Every SID and exit transition, scored by how well its last fix points towards the destination.
+        var options = new List<(Procedure p, Transition? t, double score)>();
+        var want = BearingTo(dest);
+        foreach (var sid in cands)
+        {
+            var exits = sid.EnrouteTransitions.Count > 0 ? sid.EnrouteTransitions.Select(t => (Transition?)t).ToList() : new List<Transition?> { null };
+            foreach (var t in exits)
+            {
+                var lastT = t?.Legs.LastOrDefault(l => l.Lat != 0 || l.Lon != 0) ?? sid.Legs.LastOrDefault(l => l.Lat != 0 || l.Lon != 0);
+                options.Add((sid, t, Score(want, lastT)));
+            }
+        }
+        var (pick, tr) = Best(options);
+        var rt = pick.RunwayTransitions.FirstOrDefault(t => t.Name == rwy.Ident);
         if (rt is not null) legs.AddRange(rt.Legs);
-        legs.AddRange(sid.Legs);
-        if (sid.EnrouteTransitions.Count > 0) legs.AddRange(sid.EnrouteTransitions[Rng.Next(sid.EnrouteTransitions.Count)].Legs);
-        return sid;
+        legs.AddRange(pick.Legs);
+        if (tr is not null) legs.AddRange(tr.Legs);
+        return pick;
+    }
+
+    /// <summary>Bearing from this airport to another (null if unknown or too close to matter).</summary>
+    private double? BearingTo(string? icao)
+    {
+        if (string.IsNullOrEmpty(icao) || Locate?.Invoke(icao) is not { } p) return null;
+        if (Geo2.DistanceNm(Apt.Data.Lat, Apt.Data.Lon, p.lat, p.lon) < 25) return null;
+        return Geo2.BearingDeg(Apt.Data.Lat, Apt.Data.Lon, p.lat, p.lon);
+    }
+
+    /// <summary>How far (degrees) a procedure's outer fix is from the wanted direction; 0 when the direction is unknown.</summary>
+    private double Score(double? want, ProcedureLeg? fix)
+    {
+        if (want is null || fix is null) return 0;
+        var b = Geo2.BearingDeg(Apt.Data.Lat, Apt.Data.Lon, fix.Lat, fix.Lon);
+        return Math.Abs(Geo2.Diff(b, want.Value));
+    }
+
+    /// <summary>The best-pointing option; a random one among those within 15° of the best (and all of them when the direction is unknown).</summary>
+    private (Procedure p, Transition? t) Best(List<(Procedure p, Transition? t, double score)> options)
+    {
+        var min = options.Min(o => o.score);
+        var good = options.Where(o => o.score <= min + 15).ToList();
+        var o = good[Rng.Next(good.Count)];
+        return (o.p, o.t);
+    }
+
+    /// <summary>
+    /// The landing runway for an arrival from this origin, when several are in use: the runway on the side it comes
+    /// from (a parallel on the east for traffic from the east), evened out so one runway doesn't get all of them.
+    /// </summary>
+    public RunwayEnd? ArrivalRunwayFor(string? origin)
+    {
+        if (ArrRwy is null) SelectRunways(true);
+        var list = ArrRwys.Count > 0 ? ArrRwys : ArrRwy is null ? new() : new List<RunwayEnd> { ArrRwy };
+        if (list.Count <= 1) return list.FirstOrDefault();
+        var axis = list[0].Dir;
+        var lat = list.Select(e => V2.Cross(axis, e.Threshold)).ToList();   // each runway's place across the field
+        var span = Math.Max(1, lat.Max() - lat.Min());
+        var side = BearingTo(origin) is { } b ? V2.Cross(axis, V2.FromBearing(b)) : 0;
+        int Queue(RunwayEnd e) => Flights.Count(o => !o.Done && o.Kind == "arrival" && !o.OnGround && o.Rwy?.Runway == e.Runway);
+        var minQ = list.Min(Queue);
+        return list.Select((e, i) => (e, score: (lat[i] - lat.Average()) / span * 2 * side - 0.6 * (Queue(e) - minQ)))
+            .OrderByDescending(x => x.score).ThenByDescending(x => x.e.LengthM).First().e;
+    }
+
+    /// <summary>
+    /// The departure runway for a flight, when several are in use: the one nearest its gate, preferring one that
+    /// isn't also a landing runway, evened out by the queue.
+    /// </summary>
+    private RunwayEnd? DepartureRunwayFor(Flight f)
+    {
+        var list = DepRwys.Count > 0 ? DepRwys : DepRwy is null ? new() : new List<RunwayEnd> { DepRwy };
+        if (list.Count <= 1) return list.FirstOrDefault() ?? DepRwy;
+        var from = f.Spot?.P ?? f.Pos;
+        int Queue(RunwayEnd e) => Flights.Count(o => !o.Done && o.Kind == "departure" && o.OnGround && o.Rwy?.Runway == e.Runway);
+        return list.Where(e => e.LengthM >= f.P.MinRunwayM).DefaultIfEmpty(list[0])
+            .OrderBy(e => (e.Threshold - from).Length + (ArrRwys.Any(a => a.Runway == e.Runway) ? 1500 : 0) + 600 * Queue(e))
+            .First();
     }
 
     /// <summary>An air route with corners sized for the speed flown there (25° bank).</summary>
@@ -1151,7 +1236,7 @@ public sealed class TrafficWorld
     public Flight? SpawnArrival(double distNm, bool test, ScheduleLeg? leg = null)
     {
         if (ArrRwy is null) SelectRunways(true);
-        var rwy = ArrRwy;
+        var rwy = leg is not null ? ArrivalRunwayFor(leg.Dep) : ArrRwy;
         if (rwy is null) return null;
         AircraftIdentity id;
         Perf perf;
@@ -1243,7 +1328,7 @@ public sealed class TrafficWorld
         }
         else
         {
-            var star = PickStar(rwy, out var starLegs);
+            var star = PickStar(rwy, f.Other, out var starLegs);
             var starPts = star is null ? new List<AirPoint>() : Apt.LegsToPoints(starLegs, V2.FromBearing(Rng.Next(360), 40 * Geo2.MPerNm), 11000, out _);
             // Many STARs run on to a fix at or near the airport and end in "expect radar vectors" (LaGuardia's VADDR1
             // ends right over the field). Real controllers turn the traffic off them well before that, onto a downwind
@@ -1290,13 +1375,28 @@ public sealed class TrafficWorld
             if (speeds[i] >= 100 && speeds[i] < 400) f.SpeedLimits.Add((f.Path.PointS[i], speeds[i]));
     }
 
-    private Procedure? PickStar(RunwayEnd rwy, out List<ProcedureLeg> legs)
+    /// <summary>
+    /// The STAR (and its entry transition) that starts on the side of the airport the flight comes from: an arrival
+    /// from San Juan comes in on a STAR from the southeast, not one from the north.
+    /// </summary>
+    private Procedure? PickStar(RunwayEnd rwy, string? origin, out List<ProcedureLeg> legs)
     {
         legs = new List<ProcedureLeg>();
         var cands = Apt.Data.Arrivals.Where(a => a.RunwayTransitions.Count == 0 || a.RunwayTransitions.Any(t => t.Name == rwy.Ident)).ToList();
         if (cands.Count == 0) return null;
-        var star = cands[Rng.Next(cands.Count)];
-        if (star.EnrouteTransitions.Count > 0) legs.AddRange(star.EnrouteTransitions[Rng.Next(star.EnrouteTransitions.Count)].Legs);
+        var want = BearingTo(origin);
+        var options = new List<(Procedure p, Transition? t, double score)>();
+        foreach (var st in cands)
+        {
+            var entries = st.EnrouteTransitions.Count > 0 ? st.EnrouteTransitions.Select(t => (Transition?)t).ToList() : new List<Transition?> { null };
+            foreach (var t in entries)
+            {
+                var first = t?.Legs.FirstOrDefault(l => l.Lat != 0 || l.Lon != 0) ?? st.Legs.FirstOrDefault(l => l.Lat != 0 || l.Lon != 0);
+                options.Add((st, t, Score(want, first)));
+            }
+        }
+        var (star, tr) = Best(options);
+        if (tr is not null) legs.AddRange(tr.Legs);
         legs.AddRange(star.Legs);
         var rt = star.RunwayTransitions.FirstOrDefault(t => t.Name == rwy.Ident);
         if (rt is not null) legs.AddRange(rt.Legs);
@@ -1442,7 +1542,7 @@ public sealed class TrafficWorld
     private Approach? ApproachFor(RunwayEnd rwy)
     {
         var key = string.Join(";", AtisApproaches.Select(x => $"{x.kind}|{x.suffix}|{x.runway}"));
-        if (_appRwy == rwy && _appKey == key) return _app;
+        if (_apps.TryGetValue(rwy, out var had) && had.key == key) return had.app;
         var apps = Apt.Data.Approaches.Where(a => a.Runway == rwy.Ident && a.FinalLegs.Count > 0 && Flyable(a, rwy)).ToList();
         Approach? pick = null;
         var why = "";
@@ -1459,8 +1559,9 @@ public sealed class TrafficWorld
             why = AtisApproaches.Count > 0 ? "the ATIS names none LAIA can fly here, so the standard choice" : "no ATIS approach known, so the standard choice";
         }
         var label = pick is null ? null : ApproachLabel(pick);
-        if (label != ApproachInUse || _appRwy != rwy) Log($"Approach in use at {Apt.Icao}: {label ?? "none (vectors to final)"} for runway {rwy.Ident} ({why})");
-        _app = pick; _appRwy = rwy; _appKey = key; ApproachInUse = label;
+        if (!_apps.ContainsKey(rwy) || had.label != label) Log($"Approach in use at {Apt.Icao}: {label ?? "none (vectors to final)"} for runway {rwy.Ident} ({why})");
+        _apps[rwy] = (pick, key, label);
+        ApproachInUse = string.Join(", ", (ArrRwys.Count > 0 ? ArrRwys : new List<RunwayEnd> { rwy }).Select(r => _apps.TryGetValue(r, out var x) ? x.label ?? $"vectors {r.Ident}" : null).Where(x => x is not null));
         return pick;
     }
 
@@ -1571,8 +1672,11 @@ public sealed class TrafficWorld
         var gs = Math.Max(90, f.P.Vapp - Wind.Headwind(f.Rwy!.Heading));
         var wake = Cwt.MilesBehind(leader.Wake, f.Wake) / gs * 3600;
         var occupancy = 50 + 15;
-        var single = DepRwy is null || DepRwy.Runway == f.Rwy.Runway;
-        return Math.Max(wake, occupancy) + 10 + (forDepartures && DeparturesWaiting ? (single ? 70 : 30) : 0);
+        var deps = DepRwys.Count > 0 ? DepRwys : DepRwy is null ? new List<RunwayEnd>() : new() { DepRwy };
+        var mixed = deps.Count == 0 || deps.Any(d => d.Runway == f.Rwy.Runway);
+        var crossing = deps.Any(d => Crossing(f.Rwy, d) is not null);
+        var room = mixed ? 70 : crossing ? 30 : 0;
+        return Math.Max(wake, occupancy) + 10 + (forDepartures && DeparturesWaiting ? room : 0);
     }
 
     /// <summary>
@@ -2038,7 +2142,7 @@ public sealed class TrafficWorld
         {
             f.OnGround = false;
             f.LiftoffTime = Time;
-            _lastDep = f;
+            if (f.Rwy is not null) _lastDep[f.Rwy.Runway] = f;
             f.Reserve = -1;
             f.Vs = 600;
             f.SetPhase("climbing", Time);

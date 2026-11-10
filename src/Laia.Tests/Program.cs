@@ -541,6 +541,39 @@ Console.WriteLine("== The real ATIS decides the runways; the wind is only the fa
     Check(byWind == "27" && byAtis == "09" && world.ArrRwy?.Ident == "27", $"the ATIS's runway is used even against the wind, and the wind decides without an ATIS ({byWind} → {byAtis} → {world.ArrRwy?.Ident})");
 }
 
+Console.WriteLine("== Several runways from the ATIS, and STARs/SIDs chosen by where the flight comes from or goes");
+{
+    var nm = Geo2.MPerNm;
+    var data = TestAirport.Build(false);
+    var map = new LocalMap(data.Lat, data.Lon);
+    // A parallel 1,500 m north: 09L/27R (the existing runway stays 09/27).
+    var (pla, plo) = map.ToLatLon(new V2(0, 1500));
+    data.Runways.Add(new AirportRunway { Lat = pla, Lon = plo, ElevationM = 10, Heading = 90, LengthM = 3000, WidthM = 45, PrimaryNumber = 9, PrimaryDesignator = 1, SecondaryNumber = 27, SecondaryDesignator = 2 });
+    Laia.Common.Airports.ProcedureLeg Fix(string name, double x, double y, int type = 18)
+    {
+        var (la, lo) = map.ToLatLon(new V2(x, y));
+        return new() { Type = type, Fix = name, Lat = la, Lon = lo };
+    }
+    data.Arrivals.Add(new() { Name = "NORTH1", Legs = { Fix("NORRR", 0, 40 * nm, 15), Fix("NORMD", 8 * nm, 20 * nm) } });
+    data.Arrivals.Add(new() { Name = "SOUTH1", Legs = { Fix("SOURR", 0, -40 * nm, 15), Fix("SOUMD", 8 * nm, -20 * nm) } });
+    var far = new Dictionary<string, (double, double)?> { ["KNOR"] = map.ToLatLon(new V2(0, 300 * nm)), ["KSOU"] = map.ToLatLon(new V2(0, -300 * nm)) };
+    var world = new TrafficWorld(new AirportModel(data), new TestSource(), seed: 4)
+    {
+        Automatic = false, Wind = new Wind(270, 10), Locate = c => far.TryGetValue(c, out var p) ? p : null,
+    };
+    world.SelectRunways(true);
+    world.AtisText = "TEST ARR INFO A. ILS RWY 27 AND RWY 27R APCHS IN USE. DEPG RWY 27.";
+    Check(string.Join(",", world.ArrRwys.Select(e => e.Ident).OrderBy(x => x)) == "27,27R", $"both landing runways the ATIS names are used ({string.Join(", ", world.ArrRwys.Select(e => e.Ident))})");
+    Laia.Common.Airports.ScheduleLeg Leg(string from, int n) => new() { Airline = "DAL", Operator = "DAL", Type = "A321", Reg = "N" + n, Flight = n.ToString(), Dep = from, Arr = "TEST" };
+    var fromNorth = Enumerable.Range(0, 4).Select(i => world.SpawnArrival(30 + i * 6, false, Leg("KNOR", 100 + i))!).ToList();
+    var fromSouth = Enumerable.Range(0, 4).Select(i => world.SpawnArrival(30 + i * 6, false, Leg("KSOU", 200 + i))!).ToList();
+    Console.WriteLine($"  from the north: {string.Join(" | ", fromNorth.Select(f => f.Rwy!.Ident + " " + f.Route))}");
+    Console.WriteLine($"  from the south: {string.Join(" | ", fromSouth.Select(f => f.Rwy!.Ident + " " + f.Route))}");
+    Check(fromNorth.All(f => f.Route.StartsWith("NORTH1")) && fromSouth.All(f => f.Route.StartsWith("SOUTH1")), "each arrival gets the STAR from its own direction");
+    Check(fromNorth.Count(f => f.Rwy!.Ident == "27R") >= 2 && fromSouth.Count(f => f.Rwy!.Ident == "27") >= 2, "arrivals land on the runway on their side, shared out between the two");
+    Check(world.ApproachInUse is { } ai && ai.Contains("27R") && ai.Contains("ILS 27"), $"an approach for each landing runway ({world.ApproachInUse})");
+}
+
 Console.WriteLine("== After a go-around, the aircraft comes back around and lands normally");
 {
     var apt = new AirportModel(TestAirport.Build(false));
