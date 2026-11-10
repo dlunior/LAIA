@@ -4,7 +4,8 @@ using Laia.Server.TrafficCore;
 namespace Laia.Server;
 
 /// <summary>
-/// The real D-ATIS of US airports (from datis.clowd.io, the public feed of the FAA's digital ATIS), read every
+/// The real D-ATIS of US airports (from atis.info, the public feed of the FAA's digital ATIS that replaced
+/// datis.clowd.io; the old address is kept as a fallback while it still answers), read every
 /// 10 minutes for the traffic airport, so the arrivals fly the approach really in use (LGA's RNAV X or Y 31).
 /// </summary>
 public sealed class AtisReader(ILogger log)
@@ -34,25 +35,53 @@ public sealed class AtisReader(ILogger log)
 
     public string? Text(string icao) { lock (_cache) return _cache.TryGetValue(icao, out var c) ? c.text : null; }
 
+    /// <summary>The ATIS texts in a reply: an array of {type, datis}, or one such object, or {data: [...]}.</summary>
+    internal static List<(string type, string text)> Parts(string json)
+    {
+        var parts = new List<(string, string)>();
+        using var doc = JsonDocument.Parse(json);
+        void One(JsonElement e)
+        {
+            if (e.ValueKind != JsonValueKind.Object) return;
+            foreach (var name in new[] { "datis", "atis", "text" })
+                if (e.TryGetProperty(name, out var d) && d.ValueKind == JsonValueKind.String)
+                {
+                    parts.Add((e.TryGetProperty("type", out var t) && t.ValueKind == JsonValueKind.String ? t.GetString() ?? "" : "", d.GetString() ?? ""));
+                    return;
+                }
+        }
+        var root = doc.RootElement;
+        if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("data", out var data)) root = data;
+        if (root.ValueKind == JsonValueKind.Array) foreach (var e in root.EnumerateArray()) One(e);
+        else One(root);
+        return parts;
+    }
+
     private async Task FetchAsync(string icao)
     {
         var apps = new List<(string, string, string)>();
         var text = "";
         try
         {
-            var json = await Http.GetStringAsync($"https://datis.clowd.io/api/{icao}");
-            using var doc = JsonDocument.Parse(json);
             var parts = new List<(string type, string text)>();
-            if (doc.RootElement.ValueKind == JsonValueKind.Array)
-                foreach (var e in doc.RootElement.EnumerateArray())
-                    if (e.TryGetProperty("datis", out var d) && d.ValueKind == JsonValueKind.String)
-                        parts.Add((e.TryGetProperty("type", out var t) ? t.GetString() ?? "" : "", d.GetString() ?? ""));
+            string? from = null;
+            Exception? lastErr = null;
+            foreach (var url in new[] { $"https://atis.info/api/{icao}", $"https://datis.clowd.io/api/{icao}" })
+            {
+                try
+                {
+                    parts = Parts(await Http.GetStringAsync(url));
+                    if (parts.Count > 0) { from = new Uri(url).Host; break; }
+                }
+                catch (Exception ex) { lastErr = ex; }
+            }
+            if (from is null) throw lastErr ?? new Exception("no ATIS text for this airport");
             // The arrival ATIS (or the combined one) names the approach.
             var arr = parts.Where(p => p.type is "arr" or "combined").Select(p => p.text).ToList();
             if (arr.Count == 0) arr = parts.Select(p => p.text).ToList();
             text = string.Join(" / ", arr);
             apps = TrafficWorld.ParseAtisApproaches(text);
-            log.LogInformation("{icao} D-ATIS: {apps}", icao, apps.Count == 0 ? "no instrument approach named" : string.Join(", ", apps.Select(a => $"{a.Item1}{(a.Item2.Length > 0 ? " " + a.Item2 : "")} {a.Item3}")));
+            log.LogInformation("{icao} D-ATIS ({from}): {apps}", icao, from, apps.Count == 0 ? "no instrument approach named" : string.Join(", ", apps.Select(a => $"{a.Item1}{(a.Item2.Length > 0 ? " " + a.Item2 : "")} {a.Item3}")));
         }
         catch (Exception ex) { log.LogInformation("{icao} D-ATIS not available: {msg}", icao, ex.Message); }
         lock (_cache) { _cache[icao] = (DateTime.UtcNow, apps, text); _busy.Remove(icao); }
