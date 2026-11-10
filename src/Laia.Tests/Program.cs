@@ -340,6 +340,7 @@ Console.WriteLine("== A STAR that ends over the airport is vectored off it, not 
         var (la, lo) = map.ToLatLon(new V2(x, y));
         return new() { Type = type, Fix = name, Lat = la, Lon = lo };
     }
+    data.Arrivals.Clear(); data.Approaches.Clear();
     data.Arrivals.Add(new() { Name = "OVRHD1", Legs = { Fix("NORTH", 0, 35 * nm, 15), Fix("MIDDL", 2 * nm, 20 * nm), Fix("OVERF", 0, 0.4 * nm) } });
     data.Approaches.Add(new() { Type = 4, Runway = "27", FinalLegs = { Fix("FINAL", 10 * nm, 0, 15), Fix("RW27", 1500, 0, 4) } });
     var apt = new AirportModel(data);
@@ -353,7 +354,7 @@ Console.WriteLine("== A STAR that ends over the airport is vectored off it, not 
         route = f.Route;
         // Anything within 3 nm of the field must be on the final approach course (east of the runway, on the centreline).
         foreach (var q in f.Path.Points)
-            if (q.Length < 3 * nm && !(Math.Abs(q.Y) < 600 && q.X > 1300)) bad++;
+            if (q.Length < 3 * nm && !(Math.Abs(q.Y) < 600 && q.X > -1600)) bad++;   // the runway itself and its final are fine
         f.Done = true;
     }
     Console.WriteLine($"  route: {route}");
