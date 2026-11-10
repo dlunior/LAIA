@@ -84,7 +84,7 @@ const COLORS = { user: "#fbbf24", drawn: "#38bdf8", sim: "#7c8aa8", path: "#38bd
 const NM = 1852;
 
 const map = L.map("map", { zoomControl: true, attributionControl: true, preferCanvas: false }).setView([40.7769, -73.874], 11);
-L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png?key=cb1_2job_1_9208e4eed8ce81033c5c07eb", {
   subdomains: "abcd", maxZoom: 19,
   attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>'
 }).addTo(map);
