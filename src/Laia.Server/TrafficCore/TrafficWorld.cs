@@ -1003,6 +1003,8 @@ public sealed class TrafficWorld
     private readonly Dictionary<int, Flight> _lastDep = new();
     private readonly Dictionary<(RunwayEnd, bool), double> _rot = new();
     private readonly Dictionary<RunwayEnd, double> _rotSeen = new();
+    /// <summary>Speeds a landing aircraft turns off at (m/s): about 35 kt onto a high-speed (angled) exit, 20 kt onto a 90° one.</summary>
+    private const double ExitSpeedFast = 18, ExitSpeedSquare = 10;
 
     /// <summary>
     /// Seconds a landing aircraft occupies this runway: braking at about 2 m/s² from touchdown (~400 m in) to the
@@ -1014,7 +1016,7 @@ public sealed class TrafficWorld
         var key = (rwy, p.Heavy);
         if (_rot.TryGetValue(key, out var t)) return t;
         var v0 = (p.Vapp - 5) * Kt;
-        double Needed(double dot) { var vx = dot > 0.5 ? 16.0 : 9.0; return 400 + Math.Max(250, (v0 * v0 - vx * vx) / (2 * 2.0)); }
+        double Needed(double dot) { var vx = dot > 0.5 ? ExitSpeedFast : ExitSpeedSquare; return 400 + Math.Max(250, (v0 * v0 - vx * vx) / (2 * 2.0)); }
         var links = Apt.HasGround ? Apt.RunwayLinks(rwy.Runway)
             .Select(l => (along: rwy.Along(Apt.Nodes[l.on]), dot: V2.Dot((Apt.Nodes[l.off] - Apt.Nodes[l.on]).Unit, rwy.Dir)))
             .Where(l => l.dot > -0.2 && l.along < rwy.LengthM + 30).ToList() : new();
@@ -1022,7 +1024,7 @@ public sealed class TrafficWorld
         if (exit is not { } x) t = 50;
         else
         {
-            var vx = x.Item2 > 0.5 ? 16.0 : 9.0;
+            var vx = x.Item2 > 0.5 ? ExitSpeedFast : ExitSpeedSquare;
             var brake = (v0 - vx) / 2.0;                                     // seconds braking
             var brakeDist = (v0 * v0 - vx * vx) / (2 * 2.0);
             var roll = Math.Max(0, x.Item1 - 400 - brakeDist) / vx;          // rolling on to the exit
@@ -2054,9 +2056,9 @@ public sealed class TrafficWorld
         {
             gate = FindGate(f.P, f.Airline, f.Brand, f.Callsign);
             // Exits on the terminal side (where the gate is) first, then the first one the aircraft can make
-            // with normal braking: about 2 m/s², slowing to ~30 kt for a high-speed exit or ~18 kt for a 90° turn.
+            // with normal braking (about 2 m/s²): a high-speed exit is taken at about 35 kt, a 90° one at about 20 kt.
             var side = gate is null ? 0 : Math.Sign(rwy.Offset(gate.P));
-            double Needed(double dot) { var vx = dot > 0.5 ? 16.0 : 9.0; return tdAlong + Math.Max(250, (v0 * v0 - vx * vx) / (2 * 2.0)); }
+            double Needed(double dot) { var vx = dot > 0.5 ? ExitSpeedFast : ExitSpeedSquare; return tdAlong + Math.Max(250, (v0 * v0 - vx * vx) / (2 * 2.0)); }
             var links = Apt.RunwayLinks(rwy.Runway)
                 .Select(l => (l.on, l.off, along: rwy.Along(Apt.Nodes[l.on]), dir: (Apt.Nodes[l.off] - Apt.Nodes[l.on]).Unit))
                 .Where(l => V2.Dot(l.dir, rwy.Dir) > -0.2 && l.along < rwy.LengthM + 30) // never turn back
@@ -2210,7 +2212,13 @@ public sealed class TrafficWorld
         // turns (sideways acceleration limit), and about 10 kt on the ramp among the gates.
         if (f.Phase is "taxi" or "taxi in" && NearStands(f.Pos, 60)) vmax = Math.Min(vmax, 10 * Kt);
         var target = path.CurveLimit(f.S, f.Phase == "landing roll" ? 2.0 : 1.0, vmax);
-        if (f.Phase == "landing roll") target = Math.Min(target, Math.Max(f.MaxKt * Kt, v - 2.0 * dt));
+        if (f.Phase == "landing roll")
+        {
+            // Brake to a fast taxi (about 40 kt) and keep it to the exit; the exit's curve sets the turn-off speed.
+            // Crawling the rest of the way at 30 kt kept Orlando's 36L arrivals on the runway for 70 s.
+            var roll = f.OnRunway >= 0 ? Math.Max(f.MaxKt * Kt, 20.0) : f.MaxKt * Kt;
+            target = Math.Min(target, Math.Max(roll, v - 2.0 * dt));
+        }
         // Runway crossings: ask for clearance on the way, stop at the hold line if not given.
         Stop? hold = null;
         foreach (var st in f.Stops)
