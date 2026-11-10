@@ -21,6 +21,22 @@ internal static class AigSchedules
         ("PAL Airlines", "PVL"), ("Compass", "CPZ"), ("Silver Airways", "SIL"),
     };
 
+    /// <summary>
+    /// The regional airline flying a livery, only when the title says "opb …" (operated by), as AIG titles do:
+    /// "Alaska Airlines Embraer EMB-175 - opb SkyWest Airlines". A word elsewhere in the title isn't enough:
+    /// American's A321 in the PSA heritage livery is still an American flight, not PSA.
+    /// </summary>
+    internal static string? OperatorOf(string title)
+    {
+        var i = title.IndexOf("opb ", StringComparison.OrdinalIgnoreCase);
+        if (i < 0) i = title.IndexOf("operated by ", StringComparison.OrdinalIgnoreCase);
+        if (i < 0) return null;
+        var rest = title[i..];
+        foreach (var (word, icao) in Operators)
+            if (rest.Contains(word, StringComparison.OrdinalIgnoreCase)) return icao;
+        return null;
+    }
+
     public static string? Folder(string community)
     {
         var direct = Path.Combine(community, "aig-aitraffic-oci", "Traffic Files", "AIGFP");
@@ -85,7 +101,7 @@ internal static class AigSchedules
                             if (!installed.TryGetValue(title, out var model)) { notInstalled++; break; }
                             if (!int.TryParse(xr.GetAttribute("dep-time"), out var dm) || !int.TryParse(xr.GetAttribute("arr-time"), out var am)) break;
                             var airline = info.icao.Length == 3 ? info.icao : model.Airline;
-                            var op = Operators.FirstOrDefault(o => title.Contains(o.word, StringComparison.OrdinalIgnoreCase)).icao ?? airline;
+                            var op = OperatorOf(title) ?? airline;
                             var leg = new ScheduleLeg
                             {
                                 Airline = airline, Operator = op, Title = title, Type = model.Type, Reg = reg,
