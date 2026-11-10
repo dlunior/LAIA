@@ -126,8 +126,8 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 var ends = new List<object>();
                 foreach (var e in w.Apt.Ends)
                 {
-                    bool L(RunwayEnd x) => x == w.ArrRwy || w.ArrRwys.Contains(x);
-                    bool D(RunwayEnd x) => x == w.DepRwy || w.DepRwys.Contains(x);
+                    bool L(TrafficCore.RunwayEnd x) => x == w.ArrRwy || w.ArrRwys.Contains(x);
+                    bool D(TrafficCore.RunwayEnd x) => x == w.DepRwy || w.DepRwys.Contains(x);
                     var use = L(e) && D(e) ? "landing and departing" : L(e) ? "landing" : D(e) ? "departing" : null;
                     var (tla, tlo) = w.Apt.Map.ToLatLon(e.Threshold);
                     var (ela, elo) = w.Apt.Map.ToLatLon(e.FarEnd);
