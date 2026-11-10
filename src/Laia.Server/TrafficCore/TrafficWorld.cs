@@ -368,7 +368,7 @@ public sealed class TrafficWorld
         {
             var sum = 0;
             for (var k = 0; k < win; k++) sum += bins[(b + k) % 672];
-            if (sum > bestSum) { bestSum = sum; best = b; }
+            if (sum >= bestSum) { bestSum = sum; best = b; }   // equal: the later start, so the window begins where the rush does
         }
         _peakStart = best * 15;
         _peakOffset = _peakStart - WeekMinute;
