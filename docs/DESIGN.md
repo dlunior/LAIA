@@ -200,6 +200,38 @@ These are hints, not clearances: the wording is plain ("aim for", "wait", "after
 - On the ground, the AI gives way to the user as it does today.
 - In the air, the sequence fits around the user's actual progress. If the user ignores the guidance, the AI adapts, within the stability rules.
 
+### Step 2d: Flow and runway changes (on the ball when the real world changes)
+LAIA must notice quickly when the real airport changes flow, and switch over logically, as a real facility does. The user's decision, 9 Nov 2026.
+
+**Noticing the change**
+- **At major airports, real-world ATIS comes first:** a new runway configuration in the D-ATIS is the trigger.
+- **Otherwise, live wind (METAR and the sim's weather) against the runway limits:** tailwind over 5 kt or crosswind over 25 kt.
+- **Later, the learned airport profile** (which configuration this airport really uses in this wind), so changes can be anticipated rather than reacted to.
+- **No flip-flopping:** a wind-based change needs the new wind to hold for about 10–15 minutes, unless the current runway is actually out of limits.
+
+**Switching over logically (a planned changeover, not a jump)**
+- **The cut-off:** LAIA picks the last arrival to the old runway and the first arrival to the new one.
+- **Aircraft committed to the old runway keep it:** on final, or inside the sequence freeze where switching would cost more than finishing. Aircraft further out are moved to the new runway's STAR runway transition and approach at a sensible point, not mid-turn.
+- **Departures:** aircraft at the gate or early in their taxi get the new runway and SID, with their taxi rerouted. Aircraft already at the hold short line for the old runway depart from it if it's still within limits.
+- **The sequence is rebuilt once,** for the new configuration. The stability rules still apply.
+- **Sectors and frequencies follow** if the change moves which corridors feed which runway.
+
+**Telling the user**
+- **Traffic mode (no ATC):** plain notes with lead time:
+  - "LGA is changing to land 31 / depart 4"
+  - "you're after the change: expect the ILS 31"
+  - "you're before it: still runway 22"
+
+  On the ground, before taxi: "expect runway 4 for departure now".
+- **ATC mode:**
+  - In the air: an amended clearance or a new expected approach, issued at a sensible moment (not on final, not in the middle of a busy exchange), for example "expect ILS runway 31", or a new STAR runway transition or a new arrival.
+  - On the ground: a new runway and SID, an amended clearance if the route changes, and a new taxi route.
+  - The AI flights get the same kinds of changes on frequency, so the frequency sounds like a real configuration change.
+
+**Changes must be logical**
+- One change per aircraft for a configuration change, never several.
+- Nothing is changed that's already committed, and every change comes with what to expect next.
+
 ### Step 3: Every aircraft in the sky
 - **What LAIA Sim reads:** every other aircraft MSFS knows about within about 100 nm (injected, live traffic, multiplayer), plus the user's aircraft. It sends them to the server as traffic LAIA can't control.
 - **How they're used:** their paths are predicted, and LAIA's flights are sequenced and spaced around them.
