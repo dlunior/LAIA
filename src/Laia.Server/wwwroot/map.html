@@ -179,6 +179,8 @@ function updateRing(d) {
   L.circle([d.user.lat, d.user.lon], { radius: d.drawRadiusNm * NM, color: COLORS.user, weight: 1, opacity: .45, fill: false, dashArray: "6 6" }).addTo(layers.ring);
 }
 
+function fmtEta(s) { s = Math.round(s); return s >= 3600 ? `${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min` : s >= 60 ? `${Math.floor(s / 60)} min ${String(s % 60).padStart(2, "0")} s` : `${s} s`; }
+
 function detailsHtml(f) {
   const rows = [
     ["Aircraft", `${f.type}${f.title ? ` <span class="muted">· ${f.title.replace(/^AIGAIM_/, "")}</span>` : ""}`],
@@ -194,6 +196,7 @@ function detailsHtml(f) {
     ["Drawn in the sim", f.drawn ? "yes" : "no (simulated only)"],
   ];
   if (f.dth != null) rows.splice(5, 0, ["To the runway", `${f.dth} nm`]);
+  if (f.eta != null) rows.splice(6, 0, ["Lands in", `${fmtEta(f.eta)} (${new Date(Date.now() + f.eta * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })})${f.seq ? ` · number ${f.seq} for ${f.runway}` : ""}`]);
   return `<h2>${f.cs} <small>${f.airline}</small></h2>
     <dl>${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>
     <div style="margin-top:8px;display:flex;gap:6px"><button id="bZoomSel">Zoom to it</button><button id="bClose">Close</button></div>`;
@@ -291,7 +294,7 @@ function renderList() {
   $("count").textContent = `(${fl.length} moving, ${(data?.flights || []).length - fl.length} parked)`;
   $("list").innerHTML = fl.map(f => `<div class="row${f.id === selected ? " on" : ""}" data-id="${f.id}">
       <i class="sw" style="background:${colorFor(f)}"></i><span class="cs">${f.cs}</span>
-      <span class="ph">${f.type} · ${phaseText(f)}${f.runway ? " · " + f.runway : ""}</span>
+      <span class="ph">${f.type} · ${phaseText(f)}${f.runway ? " · " + f.runway : ""}${f.eta != null ? ` · #${f.seq} in ${Math.round(f.eta / 60)}m` : ""}</span>
       <span class="num">${f.ground ? f.gs + " kt" : Math.round(f.alt / 100).toString().padStart(3, "0")}</span></div>`).join("");
   for (const row of $("list").querySelectorAll(".row")) row.onclick = () => { select(row.dataset.id); const f = data.flights.find(x => x.id === row.dataset.id); if (f) map.panTo([f.lat, f.lon]); };
 }

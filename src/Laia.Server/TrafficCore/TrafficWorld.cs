@@ -79,6 +79,10 @@ public sealed class Flight
     public string DepRoute = "";
     public double DepCourse = double.NaN;   // the track about 4 nm after the runway end
     public bool StableChecked;
+    /// <summary>Predicted seconds to the threshold (updated every 5 s), its place in the landing order on its runway,
+    /// and the landing times predicted 30, 10 and 5 minutes out (world time), to measure the prediction.</summary>
+    public double EtaSec = double.NaN, EtaAt = -999, Pred30 = double.NaN, Pred10 = double.NaN, Pred5 = double.NaN;
+    public int Seq;
     /// <summary>Cruise level of a flight handed over from the whole sky (0 for one started near the airport).</summary>
     public double CruiseFt;
     /// <summary>The STAR (with its entry transition) or SID (with its exit) chosen with the runway, so the two match.</summary>
@@ -352,6 +356,12 @@ public sealed class TrafficWorld
             catch (Exception ex) { Log($"{f.Callsign}: {ex.Message}; removed"); f.Done = true; }
         }
         foreach (var f in Flights.Where(f => f.Done && f.Spot is not null)) f.Spot = null;
+        // Landing order on each runway, by predicted time.
+        foreach (var g in Flights.Where(f => f.Kind == "arrival" && !f.OnGround && !f.Done && !double.IsNaN(f.EtaSec) && f.Rwy is not null).GroupBy(f => f.Rwy!.Runway))
+        {
+            var i = 0;
+            foreach (var f in g.OrderBy(f => f.EtaSec - (Time - f.EtaAt))) f.Seq = ++i;
+        }
         Flights.RemoveAll(f => f.Done);
     }
 
@@ -830,6 +840,38 @@ public sealed class TrafficWorld
     }
 
     private PushbackPlanner? _pushPlanner;
+
+    private readonly List<double> _err30 = new(), _err10 = new(), _err5 = new();
+
+    /// <summary>For the log at touchdown: how far off the landing time predicted 30, 10 and 5 minutes out was.</summary>
+    private string PredictionReport(Flight f)
+    {
+        if (f.WentAround) return "";
+        var parts = new List<string>();
+        void One(double pred, List<double> errs, string label)
+        {
+            if (double.IsNaN(pred)) return;
+            var err = Time - pred;          // + landed later than predicted
+            errs.Add(err);
+            if (errs.Count > 60) errs.RemoveAt(0);
+            parts.Add($"{label} {err:+0;-0} s");
+        }
+        One(f.Pred30, _err30, "30 min out");
+        One(f.Pred10, _err10, "10 min out");
+        One(f.Pred5, _err5, "5 min out");
+        return parts.Count == 0 ? "" : $" (landing time as predicted {string.Join(", ", parts)})";
+    }
+
+    /// <summary>How accurate the landing-time predictions have been (average miss, recent landings).</summary>
+    public string? PredictionSummary
+    {
+        get
+        {
+            string One(List<double> e, string label) => e.Count == 0 ? "" : $"{label} ±{e.Average(Math.Abs):0} s (n={e.Count})";
+            var s = string.Join(", ", new[] { One(_err30, "30 min out"), One(_err10, "10 min out"), One(_err5, "5 min out") }.Where(x => x.Length > 0));
+            return s.Length == 0 ? null : s;
+        }
+    }
 
     /// <summary>For the log: a route that turns more than a full circle in its first 25 nm is a loop to look into.</summary>
     private void CheckLoops(Flight f, string what)
@@ -2086,7 +2128,9 @@ public sealed class TrafficWorld
             var v = PlannedSpeed(f, d);
             if (d > dth - 1.5) v = Math.Min(v, Math.Max(f.Ias, f.P.Vapp));      // it can't be faster than it is now right away
             if (f.WentAround) v = Math.Min(v, 200);
-            var gs = Wind.Tas(v, Profile(f.Rwy!, d)) - (d < 15 ? hw : hw * 0.5);
+            var alt = Profile(f.Rwy!, d);
+            if (f.CruiseFt > 0) alt = Math.Min(alt, f.CruiseFt);
+            var gs = Wind.Tas(v, alt) - (d < 15 ? hw : hw * 0.5);
             t += Math.Min(step, d) / Math.Max(60, gs) * 3600;
         }
         return t;
@@ -2664,6 +2708,19 @@ public sealed class TrafficWorld
         else
         {
             if (dth < 12 && f.Phase == "arriving") f.SetPhase("approach", Time);
+            // Predict the landing time all the time (every 5 s), and keep what was predicted 30, 10 and 5 minutes out.
+            if (Time - f.EtaAt >= 5)
+            {
+                f.EtaAt = Time;
+                f.EtaSec = EtaToThreshold(f, dth);
+                var land = Time + f.EtaSec;
+                if (!f.WentAround)
+                {
+                    if (double.IsNaN(f.Pred30) && f.EtaSec is <= 1800 and > 1500) f.Pred30 = land;
+                    if (double.IsNaN(f.Pred10) && f.EtaSec is <= 600 and > 480) f.Pred10 = land;
+                    if (double.IsNaN(f.Pred5) && f.EtaSec is <= 300 and > 240) f.Pred5 = land;
+                }
+            }
             if (dth < 5 && f.Phase == "approach") f.SetPhase("final", Time);
             var target = ArrivalSpeed(f, dth);
             // Speed restrictions on the procedure just ahead.
@@ -2772,7 +2829,7 @@ public sealed class TrafficWorld
                 f.MaxKt = 30;
                 MoveAir(f, dt);
                 StartRollout(f);
-                Log($"{f.Callsign}: landed runway {rwy.Ident}{(f.Spot is not null ? ", taxiing to " + f.Spot.Label : "")}");
+                Log($"{f.Callsign}: landed runway {rwy.Ident}{(f.Spot is not null ? ", taxiing to " + f.Spot.Label : "")}{PredictionReport(f)}");
                 return;
             }
         }

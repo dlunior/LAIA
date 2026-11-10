@@ -709,6 +709,10 @@ Console.WriteLine("== Hand-over: a scheduled arrival taken over from the whole s
     Check(over250Low == 0, $"250 kt or less below 10,000 ft ({over250Low:0} kt)");
     Check(maxClimb < 300 && -maxDescent < 4000, "it only descends, at airliner rates");
     Check(holds == 0, "no holding far out on its own");
+    var landAt = world.Time;
+    Console.WriteLine($"  landing time predicted 10 min out: {landAt - f.Pred10:+0;-0} s off; 5 min out: {landAt - f.Pred5:+0;-0} s off; first prediction {(double.IsNaN(f.Pred30) ? "after 30 min out" : $"30 min out: {landAt - f.Pred30:+0;-0} s off")}");
+    Check(!double.IsNaN(f.Pred10) && Math.Abs(landAt - f.Pred10) < 45 && !double.IsNaN(f.Pred5) && Math.Abs(landAt - f.Pred5) < 30,
+        "the landing time is predicted within 45 s from 10 minutes out and 30 s from 5 minutes out (no other traffic)");
 }
 
 Console.WriteLine("== Neighbouring fields: runway traffic only, on the main airport's clock; satellite STARs are a last resort");
