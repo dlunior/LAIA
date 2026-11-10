@@ -163,6 +163,29 @@ airport the user is at) must be as close to the real world as possible:
 - **The user's slot is the most stable,** because the user can't react as instantly as an AI. Once set, it is only moved for a real reason: the user being well off their prediction, or a go-around.
 - **Delay for the user is speed control first, then a small vector or extended downwind. A hold for the user is extremely rare,** only when nothing else can make the spacing. The AI flights take the holds.
 
+### Step 2a: Radar vectors, the make-or-break of realism (top priority)
+
+The user's words (9 Nov 2026): radar vectors matter more for realism than the ground traffic. That means the downwind, the base and the vectors to final, and vectors that never conflict with a neighbouring airport's airspace (LGA arrivals must not tangle with EWR's).
+
+**Learned real vector patterns are built together with the sequencer,** not left for the general learning step. They're taken from the radar-vector part of step 6, using real ADS-B tracks:
+- Downwind, base and final-intercept paths, the altitudes on each, and where controllers extend or turn short, per runway configuration.
+- Each pattern is kept with its normal spread, so the sequencer's choices (extending a downwind, turning base early or late) all fall within what really happens there.
+
+**Each airport stays in its own airspace**
+- **An envelope per airport and configuration:** from the real tracks, LAIA learns the area, and the altitudes, each airport's vectored traffic actually uses. Generated vectors stay inside it.
+- **Other airports' envelopes are respected,** for whichever configuration each neighbour is using at that moment. Around New York, that keeps LGA's downwind clear of EWR's and JFK's finals.
+- **Where real traffic overlaps, it's separated by altitude** (one airport's arrivals over another's), and LAIA uses the same altitudes real controllers do there.
+
+**A cross-airport conflict check**
+- Every planned path is checked against every other airport's planned paths ahead of time, using radar separation (3 nm or 1,000 ft) and the wake rules.
+- A conflict is solved the way the real facility does: an altitude restriction first ("maintain 3,000 until past …"), then a different vector inside the envelope, then speed.
+
+**Before an airport has been learned**
+- The generic vectors are shaped to stay out of neighbouring airports' final approach corridors (the extended centreline out to about 15 nm, within about 3 nm and 3,000 ft).
+- If needed, the pattern is tightened or flown on the other side of the airport rather than crossing them.
+
+**On the map:** the airport envelopes, and any predicted cross-airport conflict and how it was solved, can be switched on as layers.
+
 ### Step 2b: The live map (on the control page)
 An interactive map on the ATC PC's control page, which works from any PC, tablet or phone on the home network.
 - **Colours:** drawn (injected) traffic in one colour, the user in another, and simulated-but-not-drawn traffic in a third. Optionally a fourth for the other traffic from step 3 (injected by other programs, multiplayer).
