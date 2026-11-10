@@ -199,6 +199,15 @@ Console.WriteLine("== Rules: wake categories and crossing runways");
     w.SelectRunways(true);
     Console.WriteLine("  " + string.Join(" | ", lines));
     Check(w.ArrRwy?.Ident == "27" && w.DepRwy?.Ident == "36", $"busy: land 27, depart the crossing runway 36 ({w.ArrRwy?.Ident}/{w.DepRwy?.Ident})");
+    // 7110.65 3-10-4 / 3-9-8: a departure on the crossing runway must be through the intersection before an
+    // arrival crosses its landing threshold.
+    var dep = new Flight { Id = "D1", Callsign = "TST1", Airline = "DAL", Type = "B738", Kind = "departure", P = Perf.For("B738"), Rwy = w.DepRwy, Pos = w.DepRwy!.Threshold };
+    var close = w.SpawnArrival(1.5, true)!;
+    Check(!w.CrossingRunwayClearForTakeoff(dep), "no takeoff on the crossing runway with an arrival 1.5 nm from its threshold");
+    close.Done = true; w.Flights.Remove(close);
+    var far = w.SpawnArrival(7, true)!;
+    Check(w.CrossingRunwayClearForTakeoff(dep), "takeoff on the crossing runway allowed with the next arrival 7 nm out");
+    far.Done = true; w.Flights.Remove(far);
     w.Level = TrafficLevel.Light;
     Check(w.DepRwy?.Ident == "27", $"turning traffic down re-picks the runways: one runway for both ({w.DepRwy?.Ident})");
     w.Level = TrafficLevel.Busy;

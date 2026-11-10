@@ -864,7 +864,7 @@ public sealed class TrafficWorld
     /// A runway that crosses the departure runway (7110.65 3-9-8): don't start the roll if an arrival there would
     /// reach the intersection before this departure is through it, or if a landed aircraft hasn't passed it yet.
     /// </summary>
-    private bool CrossingRunwayClearForTakeoff(Flight f)
+    internal bool CrossingRunwayClearForTakeoff(Flight f)
     {
         var d = f.Rwy!;
         foreach (var end in Apt.Ends)
@@ -878,8 +878,10 @@ public sealed class TrafficWorld
                 if (o == f || o.Done || o.Rwy is null || o.Rwy.Runway != end.Runway) continue;
                 if (o.Kind == "arrival" && !o.OnGround && o.Phase != "go-around")
                 {
-                    var toX = (o.ThrS - o.S + x.Value.alongB) / Math.Max(30, o.Gs * Kt);
-                    if (o.Rwy == end && toX < tPass) return false;
+                    // 7110.65 3-10-4: the arrival may not cross its landing threshold until this departure has passed
+                    // the intersection, so the departure must be through it before the arrival reaches the threshold.
+                    var toThr = (o.ThrS - o.S) / Math.Max(30, o.Gs * Kt);
+                    if (toThr < tPass) return false;
                 }
                 // Landing or taking off on the crossing runway and not yet through the intersection.
                 if (o.OnGround && o.OnRunway == end.Runway && o.Phase is "landing roll" or "takeoff roll" && o.Rwy.Along(o.Pos) < (o.Rwy == end ? x.Value.alongB : end.LengthM - x.Value.alongB) + 30)
@@ -1795,7 +1797,7 @@ public sealed class TrafficWorld
                     if (end.Runway == rwy.Runway) continue;
                     var x = Crossing(rwy, end);
                     if (x is null) continue;
-                    var tArr = toThreshold + x.Value.alongA / Math.Max(30, f.P.Vapp * Kt);
+                    var tArr = toThreshold;   // 3-10-4: through the intersection before this aircraft crosses the threshold
                     var dep = Flights.FirstOrDefault(o => o.Phase == "takeoff roll" && o.Rwy == end && o.Rwy.Along(o.Pos) < x.Value.alongB + 30 &&
                         RollTime(o, x.Value.alongB) - (Time - o.PhaseTime) + 10 > tArr);
                     if (dep is not null) { GoAround(f, $"{dep.Callsign} departing the crossing runway {end.Ident}"); return; }
