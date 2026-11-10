@@ -132,7 +132,7 @@ public static class NetworkModel
     /// <summary>Reads the schedule file: a header line, then one flight per line.</summary>
     public static (List<NetLeg> legs, DateTime readUtc) Parse(Stream gz)
     {
-        using var z = new GZipStream(gz, CompressionMode.Decompress);
+        using var z = new GZipStream(gz, CompressionMode.Decompress, leaveOpen: true);
         using var r = new StreamReader(z, Encoding.UTF8);
         var legs = new List<NetLeg>();
         var read = DateTime.MinValue;

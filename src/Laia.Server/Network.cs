@@ -112,11 +112,12 @@ public sealed class NetworkStore(WorldAirports world, ILogger<NetworkStore> log)
         using var ms = new MemoryStream();
         await body.CopyToAsync(ms, ct);
         ms.Position = 0;
-        var (legs, read) = NetworkModel.Parse(ms);
+        var bytes = ms.ToArray();
+        var (legs, read) = NetworkModel.Parse(new MemoryStream(bytes));
         if (legs.Count == 0) return 0;
         lock (_gate) { _legs = legs; _readUtc = read == DateTime.MinValue ? DateTime.UtcNow : read; _locatedWith = -1; }
-        try { Directory.CreateDirectory(Paths.DataDir); await File.WriteAllBytesAsync(File_, ms.ToArray(), ct); } catch { }
-        log.LogInformation("Network schedule received: {n} flights a week ({kb:N0} kB)", legs.Count, ms.Length / 1024);
+        try { Directory.CreateDirectory(Paths.DataDir); await File.WriteAllBytesAsync(File_, bytes, ct); } catch { }
+        log.LogInformation("Network schedule received: {n} flights a week ({kb:N0} kB)", legs.Count, bytes.Length / 1024);
         return legs.Count;
     }
 

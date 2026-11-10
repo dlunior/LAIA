@@ -573,6 +573,7 @@ Console.WriteLine("== The whole sky: scheduled flights fly logically between the
     NetworkModel.Write(ms, legs, new DateTime(2026, 11, 9, 12, 0, 0, DateTimeKind.Utc));
     ms.Position = 0;
     var (back, read) = NetworkModel.Parse(ms);
+    Check(ms.CanRead, "reading the schedule file leaves the upload open (it's saved afterwards)");
     Check(back.Count == 5 && back[3].DepMin == 10020 && back[3].Type == "B763" && back[0].Flight == "0123" && read.Year == 2026,
         $"the schedule file reads back the same ({back.Count} flights)");
 }
