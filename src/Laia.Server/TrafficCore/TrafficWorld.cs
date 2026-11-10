@@ -891,6 +891,9 @@ public sealed class TrafficWorld
         // (US practice: the departure must be airborne before the arrival crosses the threshold.)
         var needed = Math.Max(WakeRemaining(f), 8) + 25 + 50 + 12;
         if (eta < needed) return false;
+        // Don't line up and wait on the runway while arrivals to a crossing runway keep the takeoff from happening:
+        // only line up when the takeoff can follow the line-up (about 30 s later).
+        if (!CrossingRunwayClearForTakeoff(f, extraSec: 30)) return false;
         Log($"{f.Callsign}: lining up runway {f.Rwy.Ident} (next arrival {(double.IsInfinity(eta) ? "none" : eta.ToString("0") + " s")})");
         return true;
     }
@@ -917,7 +920,8 @@ public sealed class TrafficWorld
     /// A runway that crosses the departure runway (7110.65 3-9-8): don't start the roll if an arrival there would
     /// reach the intersection before this departure is through it, or if a landed aircraft hasn't passed it yet.
     /// </summary>
-    internal bool CrossingRunwayClearForTakeoff(Flight f)
+    /// <param name="extraSec">Extra time needed before the roll starts (lining up first: about 30 s).</param>
+    internal bool CrossingRunwayClearForTakeoff(Flight f, double extraSec = 0)
     {
         var d = f.Rwy!;
         foreach (var end in Apt.Ends)
@@ -925,7 +929,7 @@ public sealed class TrafficWorld
             if (end.Runway == d.Runway) continue;
             var x = Crossing(d, end);
             if (x is null) continue;
-            var tPass = RollTime(f, x.Value.alongA - d.Along(f.Pos)) + 15;
+            var tPass = RollTime(f, x.Value.alongA - d.Along(f.Pos)) + 15 + extraSec;
             foreach (var o in Flights)
             {
                 if (o == f || o.Done || o.Rwy is null || o.Rwy.Runway != end.Runway) continue;
@@ -936,9 +940,14 @@ public sealed class TrafficWorld
                     var toThr = (o.ThrS - o.S) / Math.Max(30, o.Gs * Kt);
                     if (toThr < tPass) return false;
                 }
-                // Landing or taking off on the crossing runway and not yet through the intersection.
-                if (o.OnGround && o.OnRunway == end.Runway && o.Phase is "landing roll" or "takeoff roll" && o.Rwy.Along(o.Pos) < (o.Rwy == end ? x.Value.alongB : end.LengthM - x.Value.alongB) + 30)
-                    return false;
+                // Landing or taking off on the crossing runway and not yet through the intersection — except a landed
+                // aircraft that has finished its landing roll and is turning off before the intersection (3-9-8).
+                var toX = (o.Rwy == end ? x.Value.alongB : end.LengthM - x.Value.alongB) - o.Rwy.Along(o.Pos);
+                if (o.OnGround && o.OnRunway == end.Runway && o.Phase is "landing roll" or "takeoff roll" && toX > -30)
+                {
+                    var turningOffBefore = o.Phase == "landing roll" && o.Gs < 40 && toX > 300;
+                    if (!turningOffBefore) return false;
+                }
             }
         }
         return true;
@@ -1574,7 +1583,8 @@ public sealed class TrafficWorld
         f.S = 0;
     }
 
-    private bool DeparturesWaiting => Flights.Any(o => o.Phase == "holding short" && Time - o.PhaseTime > 40);
+    /// <summary>Departures waiting to go: at the hold line for a while, or lined up and kept waiting.</summary>
+    private bool DeparturesWaiting => Flights.Any(o => (o.Phase == "holding short" && Time - o.PhaseTime > 40) || (o.Phase is "lined up" or "lining up" && Time - o.PhaseTime > 20));
 
     private bool RunwayBusy(int runway, Flight self) =>
         Flights.Any(o => o != self && !o.Done && (o.Reserve == runway || (o.OnRunway == runway && !(o.Kind == "departure" && !o.OnGround))));
