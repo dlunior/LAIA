@@ -1281,8 +1281,7 @@ public sealed class TrafficWorld
                         var tl = new List<ProcedureLeg>(bestT.Legs);
                         tl.AddRange(app.FinalLegs);
                         var tp = Apt.LegsToPoints(tl, e0, 4000, out _);
-                        var tc = tp.FindIndex(p => p.Fix.StartsWith("RW") || rwy.Along(p.P) > -200);
-                        if (tc >= 0) tp.RemoveRange(tc, tp.Count - tc);
+                        TrimAtRunway(tp, rwy);
                         if (tp.Count >= 2)
                         {
                             var lt = tp[^1].P;
@@ -1293,8 +1292,7 @@ public sealed class TrafficWorld
                     }
                     // Otherwise: vectors to the approach's first fix.
                     var app1 = Apt.LegsToPoints(app.FinalLegs, starPts[^1].P, 3000, out _);
-                    var cut1 = app1.FindIndex(p => p.Fix.StartsWith("RW") || rwy.Along(p.P) > -200);
-                    if (cut1 >= 0) app1.RemoveRange(cut1, app1.Count - cut1);
+                    TrimAtRunway(app1, rwy);
                     var label = $"{typeLabel} {rwy.Ident}{(app.Suffix.Length > 0 ? " " + app.Suffix : "")}";
                     if (app1.Count >= 2)
                     {
@@ -1327,8 +1325,7 @@ public sealed class TrafficWorld
             var start = keep > 0 ? starPts[keep - 1].P : rwy.Threshold - rwy.Dir * (15 * Geo2.MPerNm);
             var pts = Apt.LegsToPoints(legs, start, 4000, out _);
             // Keep only the part before the runway, and stop at the runway fix.
-            var cut = pts.FindIndex(p => p.Fix.StartsWith("RW") || rwy.Along(p.P) > -200);
-            if (cut >= 0) pts.RemoveRange(cut, pts.Count - cut);
+            TrimAtRunway(pts, rwy);
             if (pts.Count == 0) continue;
             // The last point must be on the extended centreline (within 25°, at least 2 nm out).
             var lastP = pts[^1].P;
@@ -1339,6 +1336,18 @@ public sealed class TrafficWorld
             return ($"{typeName} {rwy.Ident}{(app.Suffix.Length > 0 ? " " + app.Suffix : "")}", pts);
         }
         return ("", new List<AirPoint>());
+    }
+
+    /// <summary>
+    /// Ends an approach's points before the runway: at the runway fix (RWxx) if it has one, else drops the trailing
+    /// points that lie past the threshold. Points past the threshold earlier in the route are kept — a transition can
+    /// start on the far side of the field (LGA's FEDEM for the RNAV Y 31 is 3 nm beyond runway 31's threshold).
+    /// </summary>
+    private static void TrimAtRunway(List<AirPoint> pts, RunwayEnd rwy)
+    {
+        var rw = pts.FindIndex(p => p.Fix.StartsWith("RW"));
+        if (rw >= 0) pts.RemoveRange(rw, pts.Count - rw);
+        while (pts.Count > 0 && rwy.Along(pts[^1].P) > -200) pts.RemoveAt(pts.Count - 1);
     }
 
     private static double DistToSegment(V2 p, V2 a, V2 b)
