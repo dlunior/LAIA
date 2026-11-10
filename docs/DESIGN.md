@@ -117,6 +117,22 @@ Three layers, with a flight moving smoothly from one to the next:
 
 - **Moving between layers:** a flight entering the airspace layer keeps its position, altitude, speed and schedule. On the ground at an airport without a layout read from MSFS, gate and taxi times are simulated, not drawn.
 - **Arrivals start in cruise:** they're already flying when they reach the airspace layer (top of descent, then the STAR). Departures climb all the way out of the area.
+- **Energy management (the user's lesson, 9 Nov 2026: a jet can't slow down and descend at the same time).** This isn't written in the FAA orders, but it's where AI and app ATC usually fail. LAIA's flight model, its prediction and its instructions all use the same energy budget:
+  - **A descent and a slowdown compete for the same energy:**
+    - Descending at idle on a normal path, a jet holds its speed, or loses it only very slowly.
+    - Slowing down takes a level segment, or a shallower descent: roughly 1 nm per 10 kt in level flight clean, and much more while descending.
+    - Speedbrakes help a little, flaps and gear more, but only at low enough speeds.
+  - **Rules of thumb (pilots' and controllers' practice):**
+    - About 3 nm per 1,000 ft of descent.
+    - Plus about 1 nm per 10 kt of slowing.
+    - A level-off at 10,000 ft (or a shallow section) to get from cruise descent speed down to 250 kt.
+    - Slowing from 250 to 210 to 180 happens in level or shallow pieces of the descent, not on a steep one.
+  - **Planned descents:** every arrival's plan includes its deceleration points and level-offs. The prediction, and so the sequence, knows how long they really take.
+  - **The flight model obeys it:** an aircraft high and fast can't simply slow down and come down at once. It levels or shallows to slow, uses speedbrakes, or needs more track miles. Today's engine lets speed and descent change independently, so this has to be fixed first, as part of step 1.
+  - **Instructions are checked against the energy budget before they're given:**
+    - No "descend to 3,000 and slow to 180" five miles from the turn.
+    - If an aircraft is too high or too fast for what's left, the controller gives track miles (a longer downwind, a wider base) or a stepped plan ("descend to 6,000, then reduce to 210") instead.
+    - The same check applies to guidance for the user in traffic mode and to the user's instructions in ATC mode: if you're high and fast, you get more miles, not an impossible request.
 - **Trajectory prediction** for every flight in the airspace layer: its ETA at each fix and at the runway, from its route, speed profile and winds, recomputed every few seconds.
 **What the user sees (what is drawn in MSFS).** This is the user's decision (9 Nov 2026). Only the user's fields get gate and ground traffic. Neighbouring fields get runway, approach and departure traffic only.
 
