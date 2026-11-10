@@ -199,8 +199,11 @@ Console.WriteLine("== Rules: wake categories and crossing runways");
     w.SelectRunways(true);
     Console.WriteLine("  " + string.Join(" | ", lines));
     Check(w.ArrRwy?.Ident == "27" && w.DepRwy?.Ident == "36", $"busy: land 27, depart the crossing runway 36 ({w.ArrRwy?.Ident}/{w.DepRwy?.Ident})");
-    w.Level = TrafficLevel.Light; w.SelectRunways(true);
-    Check(w.DepRwy?.Ident == "27", $"quiet: one runway for both ({w.DepRwy?.Ident})");
+    w.Level = TrafficLevel.Light;
+    Check(w.DepRwy?.Ident == "27", $"turning traffic down re-picks the runways: one runway for both ({w.DepRwy?.Ident})");
+    w.Level = TrafficLevel.Busy;
+    Check(w.DepRwy?.Ident == "36", $"turning traffic up re-picks the runways: the crossing runway again ({w.DepRwy?.Ident})");
+    w.Level = TrafficLevel.Light;
     w.Level = TrafficLevel.Busy; w.Wind = new Wind(120, 12); w.SelectRunways(true);
     Check(w.ArrRwy?.Ident == "09" || w.ArrRwy?.Ident == "18", $"wind change: landing runway turns into the wind ({w.ArrRwy?.Ident})");
 }

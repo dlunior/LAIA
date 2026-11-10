@@ -106,7 +106,20 @@ public sealed class TrafficWorld
     public List<Flight> Flights { get; } = new();
     public double Time { get; private set; }
     public Wind Wind { get; set; }
-    public TrafficLevel Level { get; set; } = TrafficLevel.Normal;
+    /// <summary>The traffic level. Changing it re-picks the runways (a busy airport may use a second, crossing runway).</summary>
+    public TrafficLevel Level
+    {
+        get => _level;
+        set
+        {
+            if (_level == value) return;
+            var wasBusy = _level is TrafficLevel.Normal or TrafficLevel.Busy;
+            _level = value;
+            var isBusy = value is TrafficLevel.Normal or TrafficLevel.Busy;
+            if (wasBusy != isBusy && ArrRwy is not null) SelectRunways(true);
+        }
+    }
+    private TrafficLevel _level = TrafficLevel.Normal;
     public RunwayEnd? ArrRwy { get; private set; }
     public RunwayEnd? DepRwy { get; private set; }
     public V2? UserPos { get; set; }
