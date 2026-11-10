@@ -1553,10 +1553,12 @@ public sealed class TrafficWorld
     /// </summary>
     private static double Profile(RunwayEnd rwy, double dthNm)
     {
-        // Above 10,000 ft: the same 3° path, with a 3 nm level piece at 10,000 ft to slow to 250 kt (14 CFR 91.117).
+        // Above 10,000 ft: a descent path with a 4 nm level piece at 10,000 ft to slow to 250 kt (14 CFR 91.117).
         var d10 = D10(rwy);
-        if (dthNm > d10 + 3) return ProfileLow(rwy, dthNm - 3);
-        if (dthNm > d10) return 10000;
+        // A slightly shallower plan above it (about 290 ft per nm) puts the top of descent a little early, so the
+        // aircraft reaches 10,000 ft on the path with room to slow, as crews plan (3:1 plus a margin).
+        if (dthNm > d10 + 4) return 10000 + (dthNm - d10 - 4) * 290;
+        if (dthNm > d10) return 10000;   // 4 nm level: 280 → 250 kt at about 10 kt per nm
         return ProfileLow(rwy, dthNm);
     }
 
@@ -1986,7 +1988,7 @@ public sealed class TrafficWorld
     private static double PlannedSpeed(Flight f, double d)
     {
         // Descent speed above 10,000 ft (about 280 kt for jets), slowing to 250 kt on the level piece at 10,000 ft.
-        var high = f.Rwy is not null && d > D10(f.Rwy) + 3;
+        var high = f.Rwy is not null && d > D10(f.Rwy) + 4;
         double t = high ? (f.P.Family == "turboprop" ? 230 : 280) : d > 20 ? 250 : d > 12 ? 210 : d > 7 ? 180 : d > 5 ? 170 : f.P.Vapp;
         if (f.P.Family == "turboprop" && d <= 20) t = Math.Min(t, d > 5 ? 170 : f.P.Vapp);
         if (d < 12) t = Math.Min(t, f.P.Vapp + 10 * Math.Max(0, d - 3));
@@ -2444,6 +2446,9 @@ public sealed class TrafficWorld
         {
             if (o == f || !o.OnGround || o.Done || o.Phase is "parked" or "boarding" or "takeoff roll") continue;
             if (f.Ignore == o && Time < f.IgnoreUntil) continue;
+            // A pushback has the right of way over taxiing traffic (the taxiing aircraft holds for it), so the two
+            // never wait for each other.
+            if (f.Phase == "pushback" && o.Phase is "taxi" or "taxi in") continue;
             var r = o.Pos - f.Pos;
             var dist = r.Length;
             if (dist > 250) continue;
