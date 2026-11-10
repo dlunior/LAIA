@@ -2265,24 +2265,28 @@ public sealed class TrafficWorld
             f.RerouteTime = Time;
             if (Reroute(f, u, "your aircraft")) { f.StuckFor = 0; return; }
         }
-        if (f.StuckFor > 120 && f.Phase == "taxi in" && Time - f.RerouteTime > 60)
-        {
-            f.RerouteTime = Time;
-            var old = f.Spot;
-            f.Spot = null;
-            var gate = FindGate(f.P, f.Airline, f.Brand, f.Callsign);
-            if (gate is not null && gate != old)
-            {
-                f.Spot = gate;
-                if (Reroute(f, f.Pos + V2.FromBearing(f.Heading) * 40, "the blockage")) { Log($"{f.Callsign}: going to {gate.Label} instead"); f.StuckFor = 0; return; }
-            }
-            f.Spot = old;
-        }
+        if (f.StuckFor > 120 && f.Phase == "taxi in" && Time - f.RerouteTime > 60 && TryOtherGate(f)) { f.StuckFor = 0; return; }
         if (f.StuckFor > 300)
         {
             Log($"{f.Callsign}: stuck for 5 minutes at ({f.Pos.X:0}, {f.Pos.Y:0}), blocked by {f.BlockedBy?.Callsign ?? (f.BlockedByUser ? "your aircraft" : "nothing")}; removed");
             f.Done = true;
         }
+    }
+
+    /// <summary>An arriving aircraft that can't get to its gate takes another free gate it can reach.</summary>
+    private bool TryOtherGate(Flight f)
+    {
+        f.RerouteTime = Time;
+        var old = f.Spot;
+        f.Spot = null;
+        var gate = FindGate(f.P, f.Airline, f.Brand, f.Callsign);
+        if (gate is not null && gate != old)
+        {
+            f.Spot = gate;
+            if (Reroute(f, f.Pos + V2.FromBearing(f.Heading) * 40, "the blockage")) { Log($"{f.Callsign}: going to {gate.Label} instead"); return true; }
+        }
+        f.Spot = old;
+        return false;
     }
 
     private bool CrossingAllowed(int runway, Flight f)
@@ -2351,9 +2355,12 @@ public sealed class TrafficWorld
                 f.RerouteTime = Time;
                 if (Reroute(f, by)) { f.BlockedBy = null; f.BlockedFor = 0; return false; }
             }
-            if (f == oldest && f.BlockedFor > 20)
+            // Head-on on a lane with an aircraft going to its gate: it takes another gate it can reach instead.
+            var inbound = ring.FirstOrDefault(x => x.Phase == "taxi in" && x.Spot is not null && Time - x.RerouteTime > 30);
+            if (f.BlockedFor > 12 && inbound is not null && TryOtherGate(inbound)) { inbound.BlockedBy = null; inbound.BlockedFor = 0; f.BlockedFor = 0; return true; }
+            if (f == oldest && f.BlockedFor > 40)
             {
-                if (f.BlockedFor < 20.3) Log($"{f.Callsign}: standoff with {string.Join(", ", ring.Where(x => x != f).Select(x => x.Callsign))}; going first");
+                if (f.BlockedFor < 40.3) Log($"{f.Callsign}: standoff with {string.Join(", ", ring.Where(x => x != f).Select(x => x.Callsign))}; going first");
                 f.Ignore = by;
                 f.IgnoreUntil = Time + 45;
                 return userBlock;
