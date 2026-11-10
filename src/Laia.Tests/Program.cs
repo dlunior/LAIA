@@ -505,6 +505,25 @@ Console.WriteLine("== One approach at a time: the ATIS's, or a fixed choice — 
     Check(nearKeyth < 0.6 && !f2.Route.StartsWith("vectors to the "), $"the X is flown along its curved final, not replaced by a straight-in ({nearKeyth:0.00} nm from its fix)");
 }
 
+Console.WriteLine("== The real ATIS decides the runways; the wind is only the fallback");
+{
+    string L(List<string> l) => string.Join(",", l);
+    var (l1, d1) = TrafficWorld.ParseAtisRunways("LGA ATIS INFO B. 18008KT. ILS RWY 22 APCH IN USE. DEPG RWY 13. NOTAMS... RWY 4 CLSD.");
+    Check(L(l1) == "22" && L(d1) == "13", $"\"ILS RWY 22 APCH IN USE, DEPG RWY 13\" lands 22, departs 13 ({L(l1)} / {L(d1)})");
+    var (l2, d2) = TrafficWorld.ParseAtisRunways("SIMUL ILS APCHS IN USE. LANDING RWYS 4R, 4L. DEPARTING RWY 4L AND 31L.");
+    Check(L(l2) == "04R,04L" && L(d2) == "04L,31L", $"lists of runways are read ({L(l2)} / {L(d2)})");
+    var (l3, d3) = TrafficWorld.ParseAtisRunways("LDG AND DEPG RWY 31.");
+    Check(L(l3) == "31" && L(d3) == "31", $"\"LDG AND DEPG RWY 31\" ({L(l3)} / {L(d3)})");
+    var world = new TrafficWorld(new AirportModel(TestAirport.Build(false)), new TestSource(), seed: 3) { Automatic = false, Wind = new Wind(270, 12) };
+    world.SelectRunways(true);
+    var byWind = world.ArrRwy?.Ident;
+    world.AtisText = "TEST ATIS INFO C. 27012KT. VISUAL APCH RWY 9 IN USE. DEPG RWY 9.";
+    var byAtis = world.ArrRwy?.Ident;
+    world.AtisText = "";
+    world.SelectRunways(true);
+    Check(byWind == "27" && byAtis == "09" && world.ArrRwy?.Ident == "27", $"the ATIS's runway is used even against the wind, and the wind decides without an ATIS ({byWind} → {byAtis} → {world.ArrRwy?.Ident})");
+}
+
 Console.WriteLine("== After a go-around, the aircraft comes back around and lands normally");
 {
     var apt = new AirportModel(TestAirport.Build(false));

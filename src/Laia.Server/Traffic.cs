@@ -373,7 +373,8 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                             // The installed AIG schedule is the real one to follow (exact models and registrations).
                             if (w.Schedule is null) w.Schedule = schedules.Get(w.Apt.Icao);
                             w.Gates = source.Gates(w.Apt.Icao);
-                            w.AtisApproaches = Atis.Approaches(w.Apt.Icao);
+                            Atis.Approaches(w.Apt.Icao); // keeps the ATIS fresh
+                            w.AtisText = Atis.Text(w.Apt.Icao);
                         }
                         w.WeekMinute = live && sim!.ZuluWeekMinute >= 0 ? sim.ZuluWeekMinute : WeekMinuteNow();
                         // Don't run traffic while nobody is flying (sim closed): it would all depart unseen.

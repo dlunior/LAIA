@@ -76,12 +76,13 @@ public sealed class AtisReader(ILogger log)
                 catch (Exception ex) { lastErr = ex; }
             }
             if (from is null) throw lastErr ?? new Exception("no ATIS text for this airport");
-            // The arrival ATIS (or the combined one) names the approach.
-            var arr = parts.Where(p => p.type is "arr" or "combined").Select(p => p.text).ToList();
-            if (arr.Count == 0) arr = parts.Select(p => p.text).ToList();
-            text = string.Join(" / ", arr);
+            // Arrival ATIS first (it names the approach), then the departure one (its departure runways).
+            text = string.Join(" / ", parts.OrderBy(p => p.type == "dep" ? 1 : 0).Select(p => p.text));
             apps = TrafficWorld.ParseAtisApproaches(text);
-            log.LogInformation("{icao} D-ATIS ({from}): {apps}", icao, from, apps.Count == 0 ? "no instrument approach named" : string.Join(", ", apps.Select(a => $"{a.Item1}{(a.Item2.Length > 0 ? " " + a.Item2 : "")} {a.Item3}")));
+            var (ldg, dep) = TrafficWorld.ParseAtisRunways(text);
+            log.LogInformation("{icao} D-ATIS ({from}): landing {ldg}, departing {dep}; approach {apps}", icao, from,
+                ldg.Count == 0 ? "not named" : string.Join(", ", ldg), dep.Count == 0 ? "not named" : string.Join(", ", dep),
+                apps.Count == 0 ? "not named" : string.Join(", ", apps.Select(a => $"{a.Item1}{(a.Item2.Length > 0 ? " " + a.Item2 : "")} {a.Item3}")));
         }
         catch (Exception ex) { log.LogInformation("{icao} D-ATIS not available: {msg}", icao, ex.Message); }
         lock (_cache) { _cache[icao] = (DateTime.UtcNow, apps, text); _busy.Remove(icao); }
