@@ -159,7 +159,9 @@ airport the user is at) must be as close to the real world as possible:
 - **Far out (before the freeze, about 30–40 minutes or ~150 nm from landing):** the order may change, but two aircraft only swap places if it saves real delay (at least about a minute in total), and an aircraft changes position at most a couple of times.
 - **Inside the freeze:** the order is fixed. Only the timing is fine-tuned, and a landing time moves by at most about 30 s per update.
 - **Instructions:** each aircraft gets a new speed or vector at most every 3–5 minutes, except for safety (a real loss of spacing). One clear plan per aircraft (for example "210 knots until DIXIE", or "turn left heading 240, expect direct CAMRN in 10 miles") rather than constant nudges.
-- **The user's slot is the most stable of all,** because the user can't react as instantly as an AI. It is only moved for a real reason (the user being well off their predicted time, or a go-around).
+- **The user gets no priority: a sequence is a sequence (the user's decision).** The user is sequenced like any other flight, in the normal order (by predicted arrival, with wake and runway rules), so others don't always yield to them.
+- **The user's slot is the most stable,** because the user can't react as instantly as an AI. Once set, it is only moved for a real reason: the user being well off their prediction, or a go-around.
+- **Delay for the user is speed control first, then a small vector or extended downwind. A hold for the user is extremely rare,** only when nothing else can make the spacing. The AI flights take the holds.
 
 ### Step 2b: The live map (on the control page)
 An interactive map on the ATC PC's control page, which works from any PC, tablet or phone on the home network.
@@ -176,10 +178,10 @@ These are hints, not clearances: the wording is plain ("aim for", "wait", "after
 
 **In the air**
 - **Sequence:** "#4 for runway 22, following DAL1132 (A321), 7 nm ahead".
-- **No time targets (the user's decision):** a new pilot shouldn't have to hit a time at a fix. The user is the anchor of the sequence and the AI fits around them. The guidance only ever asks for simple things a controller might ask for:
+- **No time targets (the user's decision):** a new pilot shouldn't have to hit a time at a fix. The user still takes their normal turn in the sequence (no priority). The plan is built so the user's part can be flown with simple instructions, and the AI flights do the fine-tuning (exact speeds, vectors, holds). The guidance only ever asks for simple things a controller might ask for:
   - **A speed,** now and next: "210 kt now", "you can keep 250 until CAMRN", "slow to 180, you're catching the A321".
   - **The expected STAR, approach and runway,** from the runway in use.
-  - **Rarely, a simple delay:** "extend your downwind 2 miles", or "expect one turn in the hold at BRAND". Only when spacing can't be made any other way.
+  - **Rarely, a simple delay:** "extend your downwind 2 miles". A hold ("expect one turn in the hold at BRAND") is extremely rare for the user, only when nothing else can make the spacing.
 - **Speed hints are few and steady:** at most one change every few minutes, always a round number, never a constant stream of small corrections.
 - **Who's waiting for you:** the aircraft holding or being slowed for your slot ("UAL455 holding at BRAND for you, 4 min").
 - **When the slot changes:** a short note explaining why, for example "#5 now, a 777 needs extra spacing ahead of you". This is as rare as the sequence-stability rules allow.
@@ -198,7 +200,7 @@ These are hints, not clearances: the wording is plain ("aim for", "wait", "after
 
 **The AI works around the user too**
 - On the ground, the AI gives way to the user as it does today.
-- In the air, the sequence fits around the user's actual progress. If the user ignores the guidance, the AI adapts, within the stability rules.
+- In the air, the user keeps their place in the sequence, which tracks the user's actual progress. If the user ignores the guidance, the AI flights around them adapt, within the stability rules. If the user falls well behind or ahead, they are re-slotted in the normal order, not given priority.
 
 ### Step 2d: Flow and runway changes (on the ball when the real world changes)
 LAIA must notice quickly when the real airport changes flow, and switch over logically, as a real facility does. The user's decision, 9 Nov 2026.
