@@ -291,6 +291,13 @@ The user's words (9 Nov 2026): radar vectors matter more for realism than the gr
 - Downwind, base and final-intercept paths, the altitudes on each, and where controllers extend or turn short, per runway configuration.
 - Each pattern is kept with its normal spread, so the sequencer's choices (extending a downwind, turning base early or late) all fall within what really happens there.
 
+**Published transitions are a guide for the vectors, not a script (the user's guidance, 10 Nov 2026).** An
+approach's published transitions (LGA's RNAV Y 31 via FEDEM, WASBO and so on) show how traffic is meant to flow to
+final: which side the downwind is on, roughly where it turns, which areas it stays clear of. Controllers vector
+along that shape, shortening or extending it as the sequence needs, rather than clearing everyone to fly it exactly.
+- **Now (0.1.71, interim):** with no learned data, arrivals fly the nearest transition as published.
+- **From M5/M6:** the transitions (and, once learned, the real ADS-B tracks) set the shape and envelope of the vectors. The arrival manager then vectors along that shape, with downwind length, base turn and shortcuts chosen for the sequence. The published path is used as-is only when nothing better is known.
+
 **Each airport stays in its own airspace**
 - **An envelope per airport and configuration:** from the real tracks, LAIA learns the area, and the altitudes, each airport's vectored traffic actually uses. Generated vectors stay inside it.
 - **Other airports' envelopes are respected,** for whichever configuration each neighbour is using at that moment. Around New York, that keeps LGA's downwind clear of EWR's and JFK's finals.
