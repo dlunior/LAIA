@@ -79,6 +79,8 @@ public sealed class Flight
     public string DepRoute = "";
     public double DepCourse = double.NaN;   // the track about 4 nm after the runway end
     public bool StableChecked;
+    /// <summary>The STAR (with its entry transition) or SID (with its exit) chosen with the runway, so the two match.</summary>
+    public (Procedure p, Transition? t)? StarPick, SidPick;
     public double LastHold = -999;
 
     public double AglFt(double groundFt) => OnGround ? 0 : Math.Max(0, AltFt - groundFt);
@@ -1058,7 +1060,7 @@ public sealed class TrafficWorld
         var rwy = f.Rwy!;
         var pts = new List<AirPoint> { new(rwy.FarEnd, ""), new(rwy.FarEnd + rwy.Dir * Geo2.MPerNm, "") };
         f.DepRoute = "";
-        var sid = PickSid(rwy, f.Other, out var sidLegs);
+        var sid = PickSid(f, rwy, out var sidLegs);
         if (sid is not null && sidLegs.Count > 0)
         {
             var sp = Apt.LegsToPoints(sidLegs, rwy.FarEnd, rwy.ElevationFt + 400, out _);
@@ -1134,24 +1136,52 @@ public sealed class TrafficWorld
         return lim;
     }
 
-    private Procedure? PickSid(RunwayEnd rwy, string? dest, out List<ProcedureLeg> legs)
+    private static bool Serves(Procedure p, RunwayEnd rwy) => p.RunwayTransitions.Count == 0 || p.RunwayTransitions.Any(t => t.Name == rwy.Ident);
+
+    /// <summary>The SID's outer fix: the last fix of its exit transition (or of the SID itself).</summary>
+    private static ProcedureLeg? ExitFix(Procedure sid, Transition? t) =>
+        t?.Legs.LastOrDefault(l => l.Lat != 0 || l.Lon != 0) ?? sid.Legs.LastOrDefault(l => l.Lat != 0 || l.Lon != 0)
+        ?? sid.RunwayTransitions.SelectMany(r => r.Legs).LastOrDefault(l => l.Lat != 0 || l.Lon != 0);
+
+    /// <summary>The STAR's entry fix: the first fix of its entry transition (or of the STAR itself).</summary>
+    private static ProcedureLeg? EntryFix(Procedure star, Transition? t) =>
+        t?.Legs.FirstOrDefault(l => l.Lat != 0 || l.Lon != 0) ?? star.Legs.FirstOrDefault(l => l.Lat != 0 || l.Lon != 0)
+        ?? star.RunwayTransitions.SelectMany(r => r.Legs).FirstOrDefault(l => l.Lat != 0 || l.Lon != 0);
+
+    /// <summary>The SID and exit (among those serving any of these runways) that best points at the destination.</summary>
+    private (Procedure p, Transition? t)? ChooseSid(IEnumerable<RunwayEnd> rwys, string? dest)
+    {
+        var list = rwys.ToList();
+        var cands = Apt.Data.Departures.Where(d => (d.RunwayTransitions.Count > 0 || d.Legs.Count > 0) && list.Any(r => Serves(d, r))).ToList();
+        if (cands.Count == 0) return null;
+        var want = BearingTo(dest);
+        var options = new List<(Procedure p, Transition? t, double score)>();
+        foreach (var sid in cands)
+            foreach (var t in sid.EnrouteTransitions.Count > 0 ? sid.EnrouteTransitions.Select(t => (Transition?)t).ToList() : new List<Transition?> { null })
+                options.Add((sid, t, Score(want, ExitFix(sid, t))));
+        return Best(options);
+    }
+
+    /// <summary>The STAR and entry (among those serving any of these runways) that starts nearest the origin's direction.</summary>
+    private (Procedure p, Transition? t)? ChooseStar(IEnumerable<RunwayEnd> rwys, string? origin)
+    {
+        var list = rwys.ToList();
+        var cands = Apt.Data.Arrivals.Where(a => list.Any(r => Serves(a, r))).ToList();
+        if (cands.Count == 0) return null;
+        var want = BearingTo(origin);
+        var options = new List<(Procedure p, Transition? t, double score)>();
+        foreach (var st in cands)
+            foreach (var t in st.EnrouteTransitions.Count > 0 ? st.EnrouteTransitions.Select(t => (Transition?)t).ToList() : new List<Transition?> { null })
+                options.Add((st, t, Score(want, EntryFix(st, t))));
+        return Best(options);
+    }
+
+    private Procedure? PickSid(Flight f, RunwayEnd rwy, out List<ProcedureLeg> legs)
     {
         legs = new List<ProcedureLeg>();
-        var cands = Apt.Data.Departures.Where(d => d.RunwayTransitions.Any(t => t.Name == rwy.Ident) || (d.RunwayTransitions.Count == 0 && d.Legs.Count > 0)).ToList();
-        if (cands.Count == 0) return null;
-        // Every SID and exit transition, scored by how well its last fix points towards the destination.
-        var options = new List<(Procedure p, Transition? t, double score)>();
-        var want = BearingTo(dest);
-        foreach (var sid in cands)
-        {
-            var exits = sid.EnrouteTransitions.Count > 0 ? sid.EnrouteTransitions.Select(t => (Transition?)t).ToList() : new List<Transition?> { null };
-            foreach (var t in exits)
-            {
-                var lastT = t?.Legs.LastOrDefault(l => l.Lat != 0 || l.Lon != 0) ?? sid.Legs.LastOrDefault(l => l.Lat != 0 || l.Lon != 0);
-                options.Add((sid, t, Score(want, lastT)));
-            }
-        }
-        var (pick, tr) = Best(options);
+        var choice = f.SidPick is { } sp && Serves(sp.p, rwy) ? sp : ChooseSid(new[] { rwy }, f.Other);
+        if (choice is null) return null;
+        var (pick, tr) = choice.Value;
         var rt = pick.RunwayTransitions.FirstOrDefault(t => t.Name == rwy.Ident);
         if (rt is not null) legs.AddRange(rt.Legs);
         legs.AddRange(pick.Legs);
@@ -1184,38 +1214,78 @@ public sealed class TrafficWorld
         return (o.p, o.t);
     }
 
-    /// <summary>
-    /// The landing runway for an arrival from this origin, when several are in use: the runway on the side it comes
-    /// from (a parallel on the east for traffic from the east), evened out so one runway doesn't get all of them.
-    /// </summary>
-    public RunwayEnd? ArrivalRunwayFor(string? origin)
+    /// <summary>Where each runway sits across the airport, -1 … +1 between the outermost two.</summary>
+    private static List<double> Across(List<RunwayEnd> list, out V2 axis)
     {
-        if (ArrRwy is null) SelectRunways(true);
-        var list = ArrRwys.Count > 0 ? ArrRwys : ArrRwy is null ? new() : new List<RunwayEnd> { ArrRwy };
-        if (list.Count <= 1) return list.FirstOrDefault();
-        var axis = list[0].Dir;
-        var lat = list.Select(e => V2.Cross(axis, e.Threshold)).ToList();   // each runway's place across the field
-        var span = Math.Max(1, lat.Max() - lat.Min());
-        var side = BearingTo(origin) is { } b ? V2.Cross(axis, V2.FromBearing(b)) : 0;
-        int Queue(RunwayEnd e) => Flights.Count(o => !o.Done && o.Kind == "arrival" && !o.OnGround && o.Rwy?.Runway == e.Runway);
-        var minQ = list.Min(Queue);
-        return list.Select((e, i) => (e, score: (lat[i] - lat.Average()) / span * 2 * side - 0.6 * (Queue(e) - minQ)))
-            .OrderByDescending(x => x.score).ThenByDescending(x => x.e.LengthM).First().e;
+        axis = list[0].Dir;
+        var ax = axis;
+        var lat = list.Select(e => V2.Cross(ax, (e.Threshold + e.FarEnd) * 0.5)).ToList();
+        var mid = (lat.Max() + lat.Min()) / 2;
+        var half = Math.Max(1, (lat.Max() - lat.Min()) / 2);
+        return lat.Select(x => (x - mid) / half).ToList();
+    }
+
+    /// <summary>Which side of the airport a fix is on, across the runways: -1 … +1 (0 straight ahead or behind).</summary>
+    private double SideOf(V2 axis, ProcedureLeg? fix)
+    {
+        if (fix is null) return 0;
+        var p = Apt.Map.ToXY(fix.Lat, fix.Lon);
+        return p.Length < 1 ? 0 : V2.Cross(axis, p * (1 / p.Length));
     }
 
     /// <summary>
-    /// The departure runway for a flight, when several are in use: the one nearest its gate, preferring one that
-    /// isn't also a landing runway, evened out by the queue.
+    /// The landing runway and STAR for an arrival from this origin. The STAR comes from the origin's direction, and
+    /// the runway from the STAR's side of the airport, as real approach controls run it (Orlando: PRICY and GRNCH
+    /// from the west land the western runway, SNFLD and MUNGI from the east the eastern one). Only a much longer
+    /// queue on that side moves an arrival to the other runway — the exception, not the rule.
+    /// </summary>
+    public (RunwayEnd? rwy, (Procedure p, Transition? t)? star) PlanArrival(string? origin)
+    {
+        if (ArrRwy is null) SelectRunways(true);
+        var list = ArrRwys.Count > 0 ? ArrRwys : ArrRwy is null ? new() : new List<RunwayEnd> { ArrRwy };
+        if (list.Count == 0) return (null, null);
+        var star = ChooseStar(list, origin);
+        if (list.Count == 1) return (list[0], star);
+        var pos = Across(list, out var axis);
+        var serving = Enumerable.Range(0, list.Count).Where(i => star is null || Serves(star.Value.p, list[i])).ToList();
+        if (serving.Count == 0) serving = Enumerable.Range(0, list.Count).ToList();
+        var side = star is { } st ? SideOf(axis, EntryFix(st.p, st.t)) : BearingTo(origin) is { } b ? V2.Cross(axis, V2.FromBearing(b)) : 0;
+        int Queue(RunwayEnd e) => Flights.Count(o => !o.Done && o.Kind == "arrival" && !o.OnGround && o.Rwy?.Runway == e.Runway);
+        var minQ = serving.Min(i => Queue(list[i]));
+        var best = serving.OrderByDescending(i => pos[i] * side * 2 - 0.25 * (Queue(list[i]) - minQ)).ThenByDescending(i => list[i].LengthM).First();
+        return (list[best], star);
+    }
+
+    public RunwayEnd? ArrivalRunwayFor(string? origin) => PlanArrival(origin).rwy;
+
+    /// <summary>
+    /// The departure runway and SID for a flight: the SID towards its destination, and the runway on that SID's side
+    /// (westbound departures off the western runway). A stand outside the runways (a cargo or FBO ramp on the west)
+    /// uses the runway on its own side whatever the direction. A runway also used for landing is the second choice.
     /// </summary>
     private RunwayEnd? DepartureRunwayFor(Flight f)
     {
-        var list = DepRwys.Count > 0 ? DepRwys : DepRwy is null ? new() : new List<RunwayEnd> { DepRwy };
-        if (list.Count <= 1) return list.FirstOrDefault() ?? DepRwy;
-        var from = f.Spot?.P ?? f.Pos;
+        var all = DepRwys.Count > 0 ? DepRwys : DepRwy is null ? new() : new List<RunwayEnd> { DepRwy };
+        if (all.Count == 0) return DepRwy;
+        var list = all.Where(e => e.LengthM >= f.P.MinRunwayM).ToList();
+        if (list.Count == 0) list = all;
+        var sid = ChooseSid(list, f.Other);
+        f.SidPick = sid;
+        if (list.Count == 1) return list[0];
+        var pos = Across(list, out var axis);
+        var serving = Enumerable.Range(0, list.Count).Where(i => sid is null || Serves(sid.Value.p, list[i])).ToList();
+        if (serving.Count == 0) serving = Enumerable.Range(0, list.Count).ToList();
+        var side = sid is { } sd ? SideOf(axis, ExitFix(sd.p, sd.t)) : BearingTo(f.Other) is { } b ? V2.Cross(axis, V2.FromBearing(b)) : 0;
+        // A stand beyond the outermost runway on one side: that side's runway (no crossing the airport to depart).
+        var gate = f.Spot?.P ?? f.Pos;
+        var lats = list.Select(e => V2.Cross(axis, (e.Threshold + e.FarEnd) * 0.5)).ToList();
+        var g = V2.Cross(axis, gate);
+        var ramp = g < lats.Min() - 150 ? -1.0 : g > lats.Max() + 150 ? 1.0 : 0.0;
         int Queue(RunwayEnd e) => Flights.Count(o => !o.Done && o.Kind == "departure" && o.OnGround && o.Rwy?.Runway == e.Runway);
-        return list.Where(e => e.LengthM >= f.P.MinRunwayM).DefaultIfEmpty(list[0])
-            .OrderBy(e => (e.Threshold - from).Length + (ArrRwys.Any(a => a.Runway == e.Runway) ? 1500 : 0) + 600 * Queue(e))
-            .First();
+        var minQ = serving.Min(i => Queue(list[i]));
+        var best = serving.OrderByDescending(i => pos[i] * side * 2 + pos[i] * ramp * 4 - (ArrRwys.Any(a => a.Runway == list[i].Runway) ? 0.5 : 0) - 0.25 * (Queue(list[i]) - minQ))
+            .ThenByDescending(i => list[i].LengthM).First();
+        return list[best];
     }
 
     /// <summary>An air route with corners sized for the speed flown there (25° bank).</summary>
@@ -1236,7 +1306,8 @@ public sealed class TrafficWorld
     public Flight? SpawnArrival(double distNm, bool test, ScheduleLeg? leg = null)
     {
         if (ArrRwy is null) SelectRunways(true);
-        var rwy = leg is not null ? ArrivalRunwayFor(leg.Dep) : ArrRwy;
+        var plan = leg is not null ? PlanArrival(leg.Dep) : (ArrRwy, null);
+        var rwy = plan.Item1;
         if (rwy is null) return null;
         AircraftIdentity id;
         Perf perf;
@@ -1257,9 +1328,12 @@ public sealed class TrafficWorld
                 perf = Perf.For(id.Type);
             } while (rwy.LengthM < perf.MinRunwayM && ++tries < 6);
             (cs, other) = Source.NewFlight(Apt.Icao, id.Airline, false, Rng, id.Type);
+            plan = PlanArrival(other);
+            if (plan.Item1 is { } r2 && r2.LengthM >= perf.MinRunwayM) rwy = r2;
         }
         var f = new Flight { Id = NewId(), Callsign = cs, Airline = id.Airline, Type = id.Type, Other = other, Kind = "arrival", P = perf, Rwy = rwy, Test = test,
             Reg = leg?.Reg ?? "", Title = leg?.Title ?? "", Brand = leg?.Airline };
+        f.StarPick = plan.Item2;
         f.OnGround = false;
         f.Gear = false;
         BuildArrivalPath(f, null);
@@ -1328,7 +1402,7 @@ public sealed class TrafficWorld
         }
         else
         {
-            var star = PickStar(rwy, f.Other, out var starLegs);
+            var star = PickStar(f, rwy, out var starLegs);
             var starPts = star is null ? new List<AirPoint>() : Apt.LegsToPoints(starLegs, V2.FromBearing(Rng.Next(360), 40 * Geo2.MPerNm), 11000, out _);
             // Many STARs run on to a fix at or near the airport and end in "expect radar vectors" (LaGuardia's VADDR1
             // ends right over the field). Real controllers turn the traffic off them well before that, onto a downwind
@@ -1379,23 +1453,12 @@ public sealed class TrafficWorld
     /// The STAR (and its entry transition) that starts on the side of the airport the flight comes from: an arrival
     /// from San Juan comes in on a STAR from the southeast, not one from the north.
     /// </summary>
-    private Procedure? PickStar(RunwayEnd rwy, string? origin, out List<ProcedureLeg> legs)
+    private Procedure? PickStar(Flight f, RunwayEnd rwy, out List<ProcedureLeg> legs)
     {
         legs = new List<ProcedureLeg>();
-        var cands = Apt.Data.Arrivals.Where(a => a.RunwayTransitions.Count == 0 || a.RunwayTransitions.Any(t => t.Name == rwy.Ident)).ToList();
-        if (cands.Count == 0) return null;
-        var want = BearingTo(origin);
-        var options = new List<(Procedure p, Transition? t, double score)>();
-        foreach (var st in cands)
-        {
-            var entries = st.EnrouteTransitions.Count > 0 ? st.EnrouteTransitions.Select(t => (Transition?)t).ToList() : new List<Transition?> { null };
-            foreach (var t in entries)
-            {
-                var first = t?.Legs.FirstOrDefault(l => l.Lat != 0 || l.Lon != 0) ?? st.Legs.FirstOrDefault(l => l.Lat != 0 || l.Lon != 0);
-                options.Add((st, t, Score(want, first)));
-            }
-        }
-        var (star, tr) = Best(options);
+        var choice = f.StarPick is { } sp && Serves(sp.p, rwy) ? sp : ChooseStar(new[] { rwy }, f.Other);
+        if (choice is null) return null;
+        var (star, tr) = choice.Value;
         if (tr is not null) legs.AddRange(tr.Legs);
         legs.AddRange(star.Legs);
         var rt = star.RunwayTransitions.FirstOrDefault(t => t.Name == rwy.Ident);

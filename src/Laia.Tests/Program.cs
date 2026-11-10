@@ -572,6 +572,13 @@ Console.WriteLine("== Several runways from the ATIS, and STARs/SIDs chosen by wh
     Check(fromNorth.All(f => f.Route.StartsWith("NORTH1")) && fromSouth.All(f => f.Route.StartsWith("SOUTH1")), "each arrival gets the STAR from its own direction");
     Check(fromNorth.Count(f => f.Rwy!.Ident == "27R") >= 2 && fromSouth.Count(f => f.Rwy!.Ident == "27") >= 2, "arrivals land on the runway on their side, shared out between the two");
     Check(world.ApproachInUse is { } ai && ai.Contains("27R") && ai.Contains("ILS 27"), $"an approach for each landing runway ({world.ApproachInUse})");
+    // Departures: the gates here are on a ramp south of both runways, so they leave from the southern runway
+    // even when heading north (no crossing the airport), as cargo and FBO ramps do.
+    world.AtisText = "TEST ATIS INFO B. ILS RWY 27 AND RWY 27R APCHS IN USE. DEPG RWYS 27, 27R.";
+    Laia.Common.Airports.ScheduleLeg Out(int n) => new() { Airline = "DAL", Operator = "DAL", Type = "A321", Reg = "D" + n, Flight = n.ToString(), Dep = "TEST", Arr = "KNOR" };
+    var outs = Enumerable.Range(0, 3).Select(i => world.StartDeparture(null, 20, Out(300 + i))).Where(f => f is not null).ToList();
+    Console.WriteLine($"  departures from the south ramp: {string.Join(", ", outs.Select(f => f!.Callsign + " " + f.Rwy!.Ident))}");
+    Check(outs.Count > 0 && outs.All(f => f!.Rwy!.Ident == "27"), "a ramp outside the runways departs from the runway on its own side");
 }
 
 Console.WriteLine("== After a go-around, the aircraft comes back around and lands normally");
