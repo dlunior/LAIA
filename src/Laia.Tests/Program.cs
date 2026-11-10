@@ -49,6 +49,23 @@ Console.WriteLine("== Eased taxi turns");
     Check(me.jump < 0.6, $"eased path is continuous (largest step {me.jump:0.00} m per 0.5 m)");
     Check(me.kJump < mp.kJump * 0.35, "turns tighten and unwind gradually instead of all at once");
     Check((me.end - new V2(420, 0)).Length < 0.5, "eased path still ends where it should");
+    // Like LGA's alleys: a taxiway with nodes every 15 m and a 90° turn into an alley through short 10 m pieces.
+    var dense = new List<V2>();
+    for (var x = 0; x <= 300; x += 15) dense.Add(new V2(x, 0));
+    dense.Add(new V2(305, -5)); dense.Add(new V2(310, -10)); dense.Add(new V2(310, -20));
+    for (var y = -30; y >= -250; y -= 10) dense.Add(new V2(310, y));
+    var dpath = new PathGeom(dense, _ => 40, 1.0, ease: true);
+    double maxK = 0, maxOff = 0;
+    for (double sd = 0; sd <= dpath.Length; sd += 0.5)
+    {
+        var (q, _, k) = dpath.At(sd);
+        maxK = Math.Max(maxK, Math.Abs(k));
+        var off = q.Y > -1 ? Math.Abs(q.Y) : Math.Abs(q.X - 310);
+        if (q.X < 300 || q.Y < -40) maxOff = Math.Max(maxOff, off);
+    }
+    Console.WriteLine($"  alley turn: tightest radius {1 / Math.Max(1e-9, maxK):0} m, furthest off the line on the straights {maxOff:0.0} m");
+    Check(1 / Math.Max(1e-9, maxK) >= 20, $"a turn into an alley through short scenery pieces stays a proper curve (tightest {1 / Math.Max(1e-9, maxK):0} m radius)");
+    Check(maxOff < 6.5, "smoothing never strays more than a few metres off the taxi line");
 }
 
 Console.WriteLine("== Wind");

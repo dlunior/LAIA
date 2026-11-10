@@ -57,6 +57,26 @@ public sealed class PathGeom
             map.Add(p.Count - 1);
         }
         if (p.Count == 1) p.Add(p[0] + new V2(0, 0.6));
+        // Taxiing: scenery often has many short segments around junctions (10–20 m), which would squeeze every turn
+        // into a tight radius. Smooth the line first, never more than a few metres off the taxi line (still on the
+        // pavement), so each turn has room to be a proper curve, as a pilot uses the fillet at a junction.
+        var dropped = new HashSet<int>();
+        if (ease && p.Count > 3)
+        {
+            var keep = Simplify(p, 6.0);
+            if (keep.Count < p.Count)
+            {
+                var remap = new int[p.Count];
+                var kept = new List<V2>();
+                for (var i = 0; i < p.Count; i++)
+                {
+                    if (keep.Contains(i)) kept.Add(p[i]); else dropped.Add(i);
+                    remap[i] = Math.Max(0, kept.Count - 1);
+                }
+                for (var j = 0; j < map.Count; j++) map[j] = remap[map[j]];
+                p = kept;
+            }
+        }
         Points = p;
         var keptS = new double[p.Count];
 
@@ -140,6 +160,44 @@ public sealed class PathGeom
         Length = s;
         KeptS = keptS;
         PointS = map.Select(k => keptS[k]).ToArray();
+        // Points smoothed away: their distance along the path is where the path passes closest to them.
+        if (dropped.Count > 0)
+            for (var j = 0; j < pts.Count; j++)
+                if ((pts[j] - p[map[j]]).Length > 0.5) PointS[j] = ProjectNear(pts[j], PointS[j]);
+    }
+
+    /// <summary>Douglas–Peucker: the indices of the points to keep so the line stays within tol metres of the original.</summary>
+    private static HashSet<int> Simplify(List<V2> p, double tol)
+    {
+        var keep = new HashSet<int> { 0, p.Count - 1 };
+        var stack = new Stack<(int a, int b)>();
+        stack.Push((0, p.Count - 1));
+        while (stack.Count > 0)
+        {
+            var (a, b) = stack.Pop();
+            double best = -1; var at = -1;
+            for (var i = a + 1; i < b; i++)
+            {
+                var ab = p[b] - p[a];
+                var t = ab.Length < 1e-6 ? 0 : Math.Clamp(V2.Dot(p[i] - p[a], ab) / V2.Dot(ab, ab), 0, 1);
+                var d = (p[a] + ab * t - p[i]).Length;
+                if (d > best) { best = d; at = i; }
+            }
+            if (at >= 0 && best > tol) { keep.Add(at); stack.Push((a, at)); stack.Push((at, b)); }
+        }
+        return keep;
+    }
+
+    /// <summary>Distance along the path closest to q, searched around a first guess.</summary>
+    private double ProjectNear(V2 q, double guess)
+    {
+        double best = guess, bestD = (At(guess).p - q).Length;
+        for (var s = Math.Max(0, guess - 150); s <= Math.Min(Length, guess + 150); s += 2)
+        {
+            var d = (At(s).p - q).Length;
+            if (d < bestD) { bestD = d; best = s; }
+        }
+        return best;
     }
 
     // ---------------------------------------------------------------- eased turns (for a turn of radius 1)
