@@ -90,6 +90,90 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         };
     }
 
+    // ------------------------------------------------------------------ the live map (control page)
+
+    private const double DrawRadiusNm = 25;
+
+    /// <summary>Everything the live map shows: the user, every simulated flight (drawn in the sim or not), runways in use.</summary>
+    public object MapData()
+    {
+        var sim = state.Sim;
+        var live = sim is not null && sim.Connected && DateTime.UtcNow - state.SimUpdatedUtc < TimeSpan.FromSeconds(30);
+        lock (_gate)
+        {
+            var w = _world;
+            var flights = new List<object>();
+            foreach (var wd in Worlds())
+                foreach (var f in wd.Flights)
+                {
+                    if (f.Done) continue;
+                    var (lat, lon) = wd.Apt.Map.ToLatLon(f.Pos);
+                    var drawn = !live || Geo2.DistanceNm(sim!.Lat, sim.Lon, lat, lon) <= DrawRadiusNm;
+                    flights.Add(new
+                    {
+                        id = f.Id, cs = f.Callsign, type = f.Type, airline = f.Airline, kind = f.Kind, phase = f.Phase,
+                        lat = Math.Round(lat, 6), lon = Math.Round(lon, 6), alt = Math.Round(f.AltFt), gs = Math.Round(f.Gs), ias = Math.Round(f.Ias),
+                        hdg = Math.Round(f.Heading), drawn, ground = f.OnGround, runway = f.Rwy?.Ident, route = f.Route, gate = f.Spot?.Label,
+                        other = f.Other, reg = f.Reg, wake = f.Wake.ToString(), title = f.Title,
+                        dth = f.Kind == "arrival" && !f.OnGround ? Math.Round((f.ThrS - f.S) / Geo2.MPerNm, 1) : (double?)null,
+                    });
+                }
+            object? runways = null;
+            if (w is not null)
+            {
+                var ends = new List<object>();
+                foreach (var e in w.Apt.Ends)
+                {
+                    var use = e == w.ArrRwy && e == w.DepRwy ? "landing and departing" : e == w.ArrRwy ? "landing" : e == w.DepRwy ? "departing" : null;
+                    var (tla, tlo) = w.Apt.Map.ToLatLon(e.Threshold);
+                    var (ela, elo) = w.Apt.Map.ToLatLon(e.FarEnd);
+                    ends.Add(new { ident = e.Ident, use, thr = new[] { tla, tlo }, end = new[] { ela, elo } });
+                }
+                runways = ends;
+            }
+            return new
+            {
+                airport = w is null ? null : new { icao = w.Apt.Icao, name = w.Apt.Name, lat = w.Apt.Map.ToLatLon(new V2(0, 0)).lat, lon = w.Apt.Map.ToLatLon(new V2(0, 0)).lon },
+                user = live ? new { lat = sim!.Lat, lon = sim.Lon, hdg = Math.Round(sim.HeadingTrue), alt = Math.Round(sim.AltitudeFt), gs = Math.Round(sim.GroundSpeed), ground = sim.OnGround, callsign = sim.AtcId } : null,
+                drawRadiusNm = DrawRadiusNm,
+                level = settings.Get("traffic_level") ?? "normal",
+                peak = w?.PeakInfo,
+                runways,
+                flights,
+            };
+        }
+    }
+
+    /// <summary>The selected flight's path ahead (and its procedure's speed-limit fixes), for the map overlay.</summary>
+    public object? MapPath(string id)
+    {
+        lock (_gate)
+        {
+            foreach (var wd in Worlds())
+                foreach (var f in wd.Flights)
+                {
+                    if (f.Id != id || f.Path is null) continue;
+                    var path = f.Path;
+                    var step = f.OnGround ? 10.0 : 250.0;
+                    var pts = new List<double[]>();
+                    for (var s = Math.Max(0, f.S); s < path.Length; s += step)
+                    {
+                        var (ll, lo) = wd.Apt.Map.ToLatLon(path.At(s).p);
+                        pts.Add(new[] { Math.Round(ll, 6), Math.Round(lo, 6) });
+                    }
+                    var (el, eo) = wd.Apt.Map.ToLatLon(path.At(path.Length).p);
+                    pts.Add(new[] { el, eo });
+                    var limits = f.SpeedLimits.Where(l => l.S >= f.S).Select(l =>
+                    {
+                        var (la, lo2) = wd.Apt.Map.ToLatLon(path.At(l.S).p);
+                        return new { lat = la, lon = lo2, kt = l.Kt };
+                    }).ToList();
+                    return new { id = f.Id, cs = f.Callsign, route = f.Route, ground = f.OnGround, points = pts, limits };
+                }
+        }
+        return null;
+    }
+
     /// <summary>For the control page.</summary>
     public object Status()
     {

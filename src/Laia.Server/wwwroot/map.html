@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LAIA Live Map</title>
+<link rel="icon" href="/logo.png">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  :root{--bg:#0b1020;--panel:#121a2e;--panel2:#18223a;--line:#24314f;--text:#e8eefc;--muted:#8d9bbb;--accent:#38bdf8;--ok:#34d399;--warn:#fbbf24;--bad:#f87171;--sim:#7c8aa8;--dep:#fb923c}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font:14px/1.45 "Segoe UI Variable Text","Segoe UI",system-ui,sans-serif}
+  #map{position:absolute;inset:0;background:#0a0f1c}
+  .panel{position:absolute;z-index:1000;top:12px;left:12px;width:320px;max-height:calc(100% - 24px);display:flex;flex-direction:column;gap:10px;pointer-events:none}
+  .card{pointer-events:auto;background:linear-gradient(180deg,rgba(24,34,58,.96),rgba(18,26,46,.96));border:1px solid var(--line);border-radius:12px;padding:12px 14px;box-shadow:0 8px 24px rgba(0,0,0,.35)}
+  .head{display:flex;align-items:center;gap:10px}
+  .head img{width:28px;height:28px;border-radius:7px}
+  .head h1{font-size:16px;margin:0;font-weight:600}
+  .head a{margin-left:auto;color:var(--muted);text-decoration:none;font-size:12px}
+  .muted{color:var(--muted)}
+  .sub{font-size:12px;color:var(--muted);margin-top:4px}
+  .legend{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:8px;font-size:12px}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .sw{width:10px;height:10px;border-radius:50%;display:inline-block}
+  .toggles{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+  .toggles label{font-size:12px;color:var(--muted);display:inline-flex;gap:5px;align-items:center;border:1px solid var(--line);border-radius:999px;padding:3px 9px;cursor:pointer}
+  .toggles input{accent-color:var(--accent);margin:0}
+  button{background:transparent;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:5px 10px;font:inherit;font-size:12px;cursor:pointer}
+  button:hover{border-color:var(--accent)}
+  #sel h2{margin:0;font-size:17px;display:flex;align-items:baseline;gap:8px}
+  #sel h2 small{font-size:12px;color:var(--muted);font-weight:400}
+  dl{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;margin:8px 0 0;font-size:13px}
+  dt{color:var(--muted)} dd{margin:0}
+  #listCard{display:flex;flex-direction:column;min-height:0;flex:1 1 auto}
+  #list{overflow:auto;min-height:0}
+  #list .row{display:grid;grid-template-columns:10px 82px 1fr auto;gap:8px;align-items:center;padding:4px 2px;border-bottom:1px solid rgba(36,49,79,.6);cursor:pointer;font-size:12.5px}
+  #list .row:hover{background:rgba(56,189,248,.06)}
+  #list .row.on{background:rgba(56,189,248,.12)}
+  .cs{font-weight:600}
+  .ph{color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .num{font-variant-numeric:tabular-nums;color:var(--muted)}
+  .tag{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+  .ac-label{background:transparent;border:0;box-shadow:none;color:var(--text);font-size:11px;font-weight:600;text-shadow:0 0 3px #000,0 0 3px #000;white-space:nowrap;padding:0}
+  .ac-label .l2{font-weight:400;color:#c7d2ea}
+  .leaflet-tooltip.ac-label:before{display:none}
+  .rwy-label{background:rgba(11,16,32,.8);border:1px solid var(--line);color:var(--text);font-size:11px;font-weight:600;border-radius:5px;padding:0 4px}
+  .leaflet-tooltip.rwy-label:before{display:none}
+  .lim-label{background:rgba(11,16,32,.85);border:1px solid var(--warn);color:var(--warn);font-size:10.5px;border-radius:4px;padding:0 3px}
+  .leaflet-tooltip.lim-label:before{display:none}
+  .leaflet-container{font:inherit;background:#0a0f1c}
+  .leaflet-control-attribution{background:rgba(11,16,32,.7)!important;color:var(--muted)!important}
+  .leaflet-control-attribution a{color:#9fb4dd!important}
+  @media (max-width:640px){.panel{width:calc(100% - 24px);max-height:48%}#list{display:none}.panel.open #list{display:block}}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div class="panel" id="panel">
+  <div class="card">
+    <div class="head"><img src="/logo.png" alt=""><h1>LAIA Live Map</h1><a href="/">Control page ›</a></div>
+    <div class="sub" id="status">Connecting…</div>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--warn)"></i>You</span>
+      <span><i class="sw" style="background:var(--accent)"></i>Drawn in the sim</span>
+      <span><i class="sw" style="background:var(--sim)"></i>Simulated, not drawn</span>
+    </div>
+    <div class="toggles">
+      <label><input type="checkbox" id="tRing" checked>Drawing range</label>
+      <label><input type="checkbox" id="tRwy" checked>Runways</label>
+      <label><input type="checkbox" id="tLabels" checked>Labels</label>
+      <label><input type="checkbox" id="tAllPaths">All routes</label>
+      <label><input type="checkbox" id="tFollow">Follow me</label>
+    </div>
+    <div style="margin-top:8px;display:flex;gap:6px"><button id="bAirport">Airport</button><button id="bMe">Me</button><button id="bList">Flights</button></div>
+  </div>
+  <div class="card" id="sel" hidden></div>
+  <div class="card" id="listCard"><div class="tag" style="margin-bottom:4px">Flights <span id="count"></span></div><div id="list"></div></div>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const COLORS = { user: "#fbbf24", drawn: "#38bdf8", sim: "#7c8aa8", path: "#38bdf8", landing: "#34d399", departing: "#fb923c", both: "#a78bfa", idle: "#56607a" };
+const NM = 1852;
+
+const map = L.map("map", { zoomControl: true, attributionControl: true, preferCanvas: false }).setView([40.7769, -73.874], 11);
+L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+  subdomains: "abcd", maxZoom: 19,
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>'
+}).addTo(map);
+
+const layers = { rwy: L.layerGroup().addTo(map), ring: L.layerGroup().addTo(map), paths: L.layerGroup().addTo(map), sel: L.layerGroup().addTo(map), ac: L.layerGroup().addTo(map) };
+const markers = new Map();      // id -> marker
+let userMarker = null, selected = null, data = null, centred = false, lastRwyKey = "", pathTimer = 0;
+
+function planeIcon(color, hdg, size) {
+  const s = size || 22;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${s}" height="${s}" viewBox="0 0 24 24" style="transform:rotate(${hdg}deg);filter:drop-shadow(0 0 2px #000)">
+    <path d="M12 2c.8 0 1.3.8 1.3 1.8V9l7.7 4.6v2l-7.7-2.3v4.5l2.2 1.7v1.5L12 20l-3.5 1v-1.5l2.2-1.7v-4.5L3 15.6v-2L10.7 9V3.8C10.7 2.8 11.2 2 12 2z" fill="${color}" stroke="#0b1020" stroke-width=".8"/></svg>`;
+  return L.divIcon({ html: svg, className: "", iconSize: [s, s], iconAnchor: [s / 2, s / 2] });
+}
+
+function fmtAlt(f) { if (f.ground) return "ground"; const a = Math.round(f.alt / 100); return a >= 180 ? "FL" + a : Math.round(f.alt).toLocaleString() + " ft"; }
+function phaseText(f) {
+  const p = f.phase;
+  const map = { "taxi in": "taxiing in", "landing roll": "landing roll", "takeoff roll": "takeoff roll", "lined up": "lined up", "holding short": "holding short", "lining up": "lining up", "at gate": "at the gate", "engine start": "engine start", pushback: "pushing back", boarding: "boarding", parked: "parked", climbing: "climbing", arriving: "arriving", approach: "approach", final: "final", flare: "landing", "go-around": "going around", taxi: "taxiing out" };
+  return map[p] || p;
+}
+function colorFor(f) { return f.drawn ? COLORS.drawn : COLORS.sim; }
+
+function labelHtml(f) {
+  const l2 = f.ground ? `${f.type} · ${phaseText(f)}` : `${Math.round(f.alt / 100).toString().padStart(3, "0")} · ${f.gs} kt`;
+  return `${f.cs}<br><span class="l2">${l2}</span>`;
+}
+
+function updateAircraft(list) {
+  const seen = new Set();
+  const showLabels = $("tLabels").checked;
+  for (const f of list) {
+    if (f.kind === "parked" && f.phase === "parked") continue;   // parked aircraft only clutter the map
+    seen.add(f.id);
+    let m = markers.get(f.id);
+    const icon = planeIcon(f.id === selected ? "#ffffff" : colorFor(f), f.hdg, f.ground ? 18 : 22);
+    if (!m) {
+      m = L.marker([f.lat, f.lon], { icon, keyboard: false }).addTo(layers.ac);
+      m.on("click", () => select(f.id));
+      markers.set(f.id, m);
+    } else { m.setLatLng([f.lat, f.lon]); m.setIcon(icon); }
+    if (showLabels) {
+      if (!m.getTooltip()) m.bindTooltip(labelHtml(f), { permanent: true, direction: "right", offset: [10, 0], className: "ac-label" });
+      else m.setTooltipContent(labelHtml(f));
+    } else if (m.getTooltip()) m.unbindTooltip();
+  }
+  for (const [id, m] of markers) if (!seen.has(id)) { layers.ac.removeLayer(m); markers.delete(id); }
+}
+
+function updateUser(u) {
+  if (!u) { if (userMarker) { layers.ac.removeLayer(userMarker); userMarker = null; } return; }
+  const icon = planeIcon(COLORS.user, u.hdg, 26);
+  if (!userMarker) {
+    userMarker = L.marker([u.lat, u.lon], { icon, zIndexOffset: 1000 }).addTo(layers.ac)
+      .bindTooltip(() => `You${u.callsign ? " · " + u.callsign : ""}`, { direction: "right", offset: [12, 0], className: "ac-label" });
+  } else { userMarker.setLatLng([u.lat, u.lon]); userMarker.setIcon(icon); }
+  if ($("tFollow").checked) map.panTo([u.lat, u.lon], { animate: true });
+}
+
+function updateRunways(rw) {
+  const key = JSON.stringify((rw || []).map(r => r.ident + r.use));
+  if (key === lastRwyKey) return;
+  lastRwyKey = key;
+  layers.rwy.clearLayers();
+  if (!rw || !$("tRwy").checked) return;
+  const done = new Set();
+  for (const r of rw) {
+    const pair = [r.thr, r.end].map(p => p.map(x => x.toFixed(5)).join(",")).sort().join("|");
+    const other = rw.find(o => o !== r && [o.thr, o.end].map(p => p.map(x => x.toFixed(5)).join(",")).sort().join("|") === pair);
+    const use = r.use || (other && other.use) || null;
+    if (!done.has(pair)) {
+      done.add(pair);
+      const c = use ? (use.includes("landing") && use.includes("depart") ? COLORS.both : use.includes("landing") ? COLORS.landing : COLORS.departing) : COLORS.idle;
+      L.polyline([r.thr, r.end], { color: c, weight: use ? 6 : 4, opacity: use ? .95 : .6, lineCap: "butt" }).addTo(layers.rwy);
+    }
+    L.marker(r.thr, { opacity: 0, keyboard: false, interactive: false }).addTo(layers.rwy)
+      .bindTooltip(r.ident + (r.use ? " · " + r.use : ""), { permanent: true, direction: "center", className: "rwy-label" });
+  }
+}
+
+function updateRing(d) {
+  layers.ring.clearLayers();
+  if (!$("tRing").checked || !d.user) return;
+  L.circle([d.user.lat, d.user.lon], { radius: d.drawRadiusNm * NM, color: COLORS.user, weight: 1, opacity: .45, fill: false, dashArray: "6 6" }).addTo(layers.ring);
+}
+
+function detailsHtml(f) {
+  const rows = [
+    ["Aircraft", `${f.type}${f.title ? ` <span class="muted">· ${f.title.replace(/^AIGAIM_/, "")}</span>` : ""}`],
+    ["Registration", f.reg || "—"],
+    [f.kind === "arrival" ? "From" : f.kind === "departure" ? "To" : "Route", f.other || "—"],
+    ["Phase", phaseText(f)],
+    ["Altitude", fmtAlt(f)],
+    ["Speed", `${f.ias} kt IAS · ${f.gs} kt ground`],
+    ["Runway", f.runway || "—"],
+    ["Procedure", f.route || "—"],
+    ["Gate", f.gate || "—"],
+    ["Wake category", f.wake],
+    ["Drawn in the sim", f.drawn ? "yes" : "no (simulated only)"],
+  ];
+  if (f.dth != null) rows.splice(5, 0, ["To the runway", `${f.dth} nm`]);
+  return `<h2>${f.cs} <small>${f.airline}</small></h2>
+    <dl>${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>
+    <div style="margin-top:8px;display:flex;gap:6px"><button id="bZoomSel">Zoom to it</button><button id="bClose">Close</button></div>`;
+}
+
+function select(id) {
+  selected = id;
+  layers.sel.clearLayers();
+  const f = data && data.flights.find(x => x.id === id);
+  if (!f) { $("sel").hidden = true; selected = null; return; }
+  renderSel(f);
+  drawPath(true);
+  render();
+}
+
+function renderSel(f) {
+  $("sel").hidden = false;
+  $("sel").innerHTML = detailsHtml(f);
+  $("bClose").onclick = () => { selected = null; $("sel").hidden = true; layers.sel.clearLayers(); render(); };
+  $("bZoomSel").onclick = () => map.setView([f.lat, f.lon], f.ground ? 15 : 11);
+}
+
+async function drawPath(force) {
+  if (!selected) return;
+  if (!force && Date.now() - pathTimer < 2000) return;
+  pathTimer = Date.now();
+  try {
+    const r = await fetch(`/api/map/path/${encodeURIComponent(selected)}`, { cache: "no-store" });
+    if (!r.ok) return;
+    const p = await r.json();
+    if (p.id !== selected) return;
+    layers.sel.clearLayers();
+    L.polyline(p.points, { color: "#ffffff", weight: p.ground ? 3 : 2.5, opacity: .9, dashArray: p.ground ? null : "8 6" }).addTo(layers.sel);
+    for (const l of p.limits || [])
+      L.circleMarker([l.lat, l.lon], { radius: 4, color: COLORS.user, weight: 2, fillOpacity: .3 }).addTo(layers.sel)
+        .bindTooltip(`≤ ${Math.round(l.kt)} kt`, { permanent: true, direction: "top", offset: [0, -4], className: "lim-label" });
+  } catch { }
+}
+
+let allPathsAt = 0;
+async function drawAllPaths() {
+  if (!$("tAllPaths").checked) { layers.paths.clearLayers(); return; }
+  if (Date.now() - allPathsAt < 5000) return;
+  allPathsAt = Date.now();
+  const ids = (data?.flights || []).filter(f => f.drawn && !(f.kind === "parked" && f.phase === "parked")).map(f => f.id).slice(0, 40);
+  const results = await Promise.all(ids.map(id => fetch(`/api/map/path/${encodeURIComponent(id)}`, { cache: "no-store" }).then(r => r.ok ? r.json() : null).catch(() => null)));
+  layers.paths.clearLayers();
+  for (const p of results) if (p) L.polyline(p.points, { color: COLORS.path, weight: 1.5, opacity: .45, dashArray: p.ground ? null : "6 6" }).addTo(layers.paths);
+}
+
+function renderList() {
+  const fl = (data?.flights || []).filter(f => !(f.kind === "parked" && f.phase === "parked"))
+    .sort((a, b) => (b.drawn - a.drawn) || (a.kind > b.kind ? 1 : -1) || a.cs.localeCompare(b.cs));
+  $("count").textContent = `(${fl.length} moving, ${(data?.flights || []).length - fl.length} parked)`;
+  $("list").innerHTML = fl.map(f => `<div class="row${f.id === selected ? " on" : ""}" data-id="${f.id}">
+      <i class="sw" style="background:${colorFor(f)}"></i><span class="cs">${f.cs}</span>
+      <span class="ph">${f.type} · ${phaseText(f)}${f.runway ? " · " + f.runway : ""}</span>
+      <span class="num">${f.ground ? f.gs + " kt" : Math.round(f.alt / 100).toString().padStart(3, "0")}</span></div>`).join("");
+  for (const row of $("list").querySelectorAll(".row")) row.onclick = () => { select(row.dataset.id); const f = data.flights.find(x => x.id === row.dataset.id); if (f) map.panTo([f.lat, f.lon]); };
+}
+
+function render() {
+  if (!data) return;
+  updateRunways(data.runways);
+  updateRing(data);
+  updateAircraft(data.flights);
+  updateUser(data.user);
+  renderList();
+  if (selected) { const f = data.flights.find(x => x.id === selected); if (f) renderSel(f); else { selected = null; $("sel").hidden = true; layers.sel.clearLayers(); } }
+}
+
+async function poll() {
+  try {
+    const r = await fetch("/api/map", { cache: "no-store" });
+    data = await r.json();
+    const a = data.airport;
+    const moving = data.flights.filter(f => !(f.kind === "parked" && f.phase === "parked")).length;
+    $("status").textContent = a ? `${a.icao} ${a.name} · ${moving} moving, ${data.flights.length} in all · level ${data.level}${data.peak ? " · peak test" : ""}${data.user ? "" : " · MSFS not connected"}`
+      : (data.user ? "No traffic airport near you yet" : "Waiting for MSFS");
+    if (!centred && (a || data.user)) { centred = true; map.setView(a ? [a.lat, a.lon] : [data.user.lat, data.user.lon], 11); }
+    render();
+    drawPath(false);
+    drawAllPaths();
+  } catch { $("status").textContent = "Can't reach the LAIA Server — retrying…"; }
+  setTimeout(poll, 1000);
+}
+
+$("bAirport").onclick = () => { if (data?.airport) map.setView([data.airport.lat, data.airport.lon], 12); };
+$("bMe").onclick = () => { if (data?.user) map.setView([data.user.lat, data.user.lon], 12); };
+$("bList").onclick = () => $("panel").classList.toggle("open");
+$("tRwy").onchange = () => { lastRwyKey = ""; render(); };
+$("tRing").onchange = render;
+$("tLabels").onchange = render;
+$("tAllPaths").onchange = () => { allPathsAt = 0; drawAllPaths(); };
+map.on("click", () => { if (selected) { selected = null; $("sel").hidden = true; layers.sel.clearLayers(); render(); } });
+poll();
+</script>
+</body>
+</html>

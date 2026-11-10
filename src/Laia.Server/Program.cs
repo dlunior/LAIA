@@ -52,6 +52,7 @@ static byte[] Resource(string name)
 }
 var indexHtml = Resource("index.html");
 var logoPng = Resource("logo.png");
+var mapHtml = Resource("map.html");
 
 app.MapGet("/", () => Results.Bytes(indexHtml, "text/html; charset=utf-8"));
 app.MapGet("/logo.png", () => Results.Bytes(logoPng, "image/png"));
@@ -109,6 +110,9 @@ app.MapPost("/api/sim/state", async (HttpContext ctx, ServerState s, SimBriefSer
     return Results.Json(reply, jsonOpts);
 });
 
+app.MapGet("/map", () => Results.Bytes(mapHtml, "text/html; charset=utf-8"));
+app.MapGet("/api/map", (TrafficEngine t) => Results.Json(t.MapData(), jsonOpts));
+app.MapGet("/api/map/path/{id}", (string id, TrafficEngine t) => t.MapPath(id) is { } p ? Results.Json(p, jsonOpts) : Results.NotFound());
 app.MapGet("/api/traffic", (TrafficEngine t, RunwayDb r) => Results.Json(new { runways = r.Status, motion = t.Motion, status = t.Status(), traffic = t.Snapshot() }, jsonOpts));
 app.MapPost("/api/traffic/level/{level}", (string level, TrafficEngine t) =>
 {
