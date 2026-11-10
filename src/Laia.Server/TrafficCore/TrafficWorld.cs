@@ -835,8 +835,8 @@ public sealed class TrafficWorld
     private void SetGroundPath(Flight f, List<V2> pts, List<int>? route, int offset, double radius = 40)
     {
         // Taxi turns sized for the aircraft (about 1.1 × wingspan, 30–60 m) and eased in and out, as pilots steer.
-        var r = Math.Clamp(Math.Max(radius * 0.75, f.P.SpanM * 1.1), 30, 60);
-        f.Path = new PathGeom(pts, _ => r, 1.0, ease: true);
+        var turnR = Math.Clamp(Math.Max(radius * 0.75, f.P.SpanM * 1.1), 30, 60);
+        f.Path = new PathGeom(pts, _ => turnR, 1.0, ease: true);
         f.S = 0;
         f.Stops.Clear();
         if (route is null) return;
