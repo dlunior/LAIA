@@ -1367,6 +1367,13 @@ public sealed class TrafficWorld
         var pos = Across(list, out var axis).Select(x => Math.Abs(x) < 0.3 ? x : Math.Sign(x)).ToList();
         var serving = Enumerable.Range(0, list.Count).Where(i => sid is null || Serves(sid.Value.p, list[i])).ToList();
         if (serving.Count == 0) serving = Enumerable.Range(0, list.Count).ToList();
+        // The airport's own rule for this SID (its AAUP), when it names runways that are in use.
+        var rule = sid is { } sr ? AirportRules.ForSid(Apt.Icao, sr.p.Name) : null;
+        if (rule is not null)
+        {
+            var ruled = serving.Where(i => rule.Runways.Contains(list[i].Ident)).ToList();
+            if (ruled.Count > 0) serving = ruled; else rule = null;
+        }
         var side = sid is { } sd ? SideOf(axis, ExitFix(sd.p, sd.t)) : BearingTo(f.Other) is { } b ? V2.Cross(axis, V2.FromBearing(b)) : 0;
         // A stand beyond the outermost runway on one side: that side's runway (no crossing the airport to depart).
         var gate = f.Spot?.P ?? f.Pos;
@@ -1386,6 +1393,7 @@ public sealed class TrafficWorld
         // For the log: why this runway, in compass terms (the side of the field the SID heads for).
         string Side(double v) => Math.Abs(v) < 0.25 ? "straight out" : "to the " + Compass(Geo2.Norm(axis.Bearing + (v > 0 ? -90 : 90)));
         var why = new List<string>();
+        if (rule is not null) why.Add(rule.Source);
         if (sid is { } sd2) why.Add($"{sd2.p.Name}{(sd2.t is { } tt ? "." + tt.Name : "")} towards {f.Other} exits {Side(side)}");
         else why.Add($"no SID; {f.Other} lies {Side(side)}");
         if (straight && ramp == 0 && Math.Abs(gatePos) > 0.2) why.Add($"its stand is on the {Compass(Geo2.Norm(axis.Bearing + (gatePos > 0 ? -90 : 90)))} side of the field");

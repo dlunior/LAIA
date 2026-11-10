@@ -631,6 +631,14 @@ Console.WriteLine("== Vectors to final: downwind, base, a 20–30° intercept 8�
     }
 }
 
+Console.WriteLine("== An airport's own published rules (its AAUP) narrow the runway choice");
+{
+    var r1 = AirportRules.ForSid("KMCO", "JEEMY4");
+    var r2 = AirportRules.ForSid("KMCO", "OSPRY1");
+    Check(r1 is not null && r1.Runways.Contains("35L") && r2 is not null && r2.Runways.Contains("36R") && AirportRules.ForSid("KMCO", "CITR1") is null && AirportRules.ForSid("KLGA", "JEEMY4") is null,
+        "Orlando: JEEMY/FATHE/DDANY/MZULO depart the east runways, RDSOX/OSPRY/FSHUN the west (MCO RNAV Departure AAUP)");
+}
+
 Console.WriteLine("== After a go-around, the aircraft comes back around and lands normally");
 {
     var apt = new AirportModel(TestAirport.Build(false));
