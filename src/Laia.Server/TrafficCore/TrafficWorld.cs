@@ -396,7 +396,25 @@ public sealed class TrafficWorld
     /// push back at their scheduled times, arrivals are placed so they land at theirs, and an arriving airframe
     /// later leaves again on its next scheduled flight.
     /// </summary>
-    private double _lastSchedArr = -1e9, _lastSchedArrDist;
+    /// <summary>
+    /// Where a new arrival can start: the wanted distance from the runway (nm), moved further out until it's at least
+    /// 5 nm from every arrival already flying to the landing runway. -1 if that would be more than 50 nm out.
+    /// </summary>
+    private double ArrivalSlot(double wantNm)
+    {
+        if (ArrRwy is null) SelectRunways(true);
+        var rwy = ArrRwy;
+        var taken = Flights.Where(o => !o.Done && o.Kind == "arrival" && !o.OnGround && o.Rwy is not null && rwy is not null && o.Rwy.Runway == rwy.Runway)
+            .Select(o => o.Phase == "go-around" ? 12.0 : (o.ThrS - o.S) / Geo2.MPerNm).OrderBy(x => x).ToList();
+        var d = wantNm;
+        for (var tries = 0; tries < 20; tries++)
+        {
+            var clash = taken.FirstOrDefault(o => Math.Abs(o - d) < 5, double.NaN);
+            if (double.IsNaN(clash)) return d <= 50 ? d : -1;
+            d = clash + 5;
+        }
+        return -1;
+    }
 
     private void RunSchedule()
     {
@@ -451,14 +469,13 @@ public sealed class TrafficWorld
                 try { SpawnParked(gate, l); placed++; } catch (Exception ex) { Log($"Couldn't park {l.Callsign}: {ex.Message}"); }
             }
             // Arrivals already on their way in.
-            var lastDist = 0.0;
             foreach (var l in arrs.Where(l => Until(l.ArrMin) is >= 1 and <= 13).OrderBy(l => Until(l.ArrMin)))
             {
+                if (l.Reg.Length > 0 && Flights.Any(f => !f.Done && f.Reg == l.Reg)) continue;
+                // Spread out along the approach, clear of every arrival already flying, rather than on top of one.
+                var d = ArrivalSlot(Math.Clamp(Until(l.ArrMin) * 3.2, 7, 40));
+                if (d < 0) break;
                 _done.Add(Key(l, 'A'));
-                // Spread out along the approach, at least 5 nm apart, rather than all at the same point.
-                var d = Math.Max(Math.Clamp(Until(l.ArrMin) * 3.2, 7, 40), lastDist + 5);
-                if (d > 45) break;
-                lastDist = d;
                 SpawnArrival(d, false, l);
             }
             Log($"{me}: following the real {Schedule.Source} schedule ({deps.Count} departures and {arrs.Count} arrivals a week at this level); {placed} aircraft at the gates waiting for their next flight");
@@ -486,12 +503,14 @@ public sealed class TrafficWorld
             var u = Until(l.ArrMin);
             if (u > 13 || u < 1) continue;
             if (l.Reg.Length > 0 && Flights.Any(f => !f.Done && f.Reg == l.Reg)) continue;   // that airframe is still around
-            if (!_done.Add(Key(l, 'A'))) continue;
-            if (active >= maxActive || Flights.Count >= maxObjects) { Log($"{l.Callsign}: skipped (traffic limit)"); continue; }
-            // Two flights due the same minute: the second one starts further out.
-            var d = Math.Clamp(u * 3.2, 7, 40);
-            if (Time - _lastSchedArr < 60) d = Math.Max(d, _lastSchedArrDist + 5);
-            if (SpawnArrival(d, false, l) is not null) { active++; Movements++; _lastSchedArr = Time; _lastSchedArrDist = d; }
+            if (_done.Contains(Key(l, 'A'))) continue;
+            if (active >= maxActive || Flights.Count >= maxObjects) { _done.Add(Key(l, 'A')); Log($"{l.Callsign}: skipped (traffic limit)"); continue; }
+            // Start clear of every arrival already flying (a little later than scheduled if needed); if there's no
+            // room yet, try again on the next step.
+            var d = ArrivalSlot(Math.Clamp(u * 3.2, 7, 40));
+            if (d < 0) continue;
+            _done.Add(Key(l, 'A'));
+            if (SpawnArrival(d, false, l) is not null) { active++; Movements++; }
         }
         // Too many parked aircraft: remove the ones with no flight soon.
         if (Flights.Count > maxObjects)
@@ -1210,7 +1229,7 @@ public sealed class TrafficWorld
         return Math.Max(t, f.P.Vapp);
     }
 
-    private void GoAround(Flight f, string why)
+    internal void GoAround(Flight f, string why)
     {
         Log($"{f.Callsign}: going around ({why})");
         var rwy = f.Rwy!;
@@ -1749,7 +1768,7 @@ public sealed class TrafficWorld
                 var off = f.AltFt - Profile(rwy, dth);
                 if (!f.Gear || f.Ias > f.P.Vapp + 20 || Math.Abs(off) > 400)
                 {
-                    GoAround(f, $"not stable at 1,000 ft ({(f.Gear ? "" : "gear up, ")}{f.Ias:0} kt, {off:+0;-0} ft from the glidepath)");
+                    GoAround(f, $"not stable at 1,000 ft ({(f.Gear ? "" : "gear up, ")}{f.Ias:0} kt, {off:+0;-0} ft from the glidepath, {dth:0.0} nm out at {f.AltFt:0} ft{(f.WentAround ? ", after a go-around" : "")})");
                     return;
                 }
             }

@@ -362,6 +362,28 @@ Console.WriteLine("== A STAR that ends over the airport is vectored off it, not 
     Check(route.Contains("vectors to the ILS 27"), "the arrival is vectored to the approach, as controllers do");
 }
 
+Console.WriteLine("== After a go-around, the aircraft comes back around and lands normally");
+{
+    var apt = new AirportModel(TestAirport.Build(false));
+    var world = new TrafficWorld(apt, new TestSource(), seed: 12) { Automatic = false, Wind = new Wind(270, 10) };
+    var log = new List<string>(); world.Log = s => log.Add($"{TimeSpan.FromSeconds(world.Time):mm\\:ss} {s}");
+    world.SelectRunways(true);
+    var f = world.SpawnArrival(4, true)!;
+    while ((f.ThrS - f.S) / Geo2.MPerNm > 0.6 && world.Time < 300) world.Step(0.25);
+    world.GoAround(f, "test");
+    var trace = new List<string>();
+    for (var i = 0; i < 25 * 60 * 4 && !f.OnGround && !f.Done; i++)
+    {
+        world.Step(0.25);
+        if (i % 240 == 0) trace.Add($"{f.Phase} {(f.ThrS - f.S) / Geo2.MPerNm:0.0} nm {f.AltFt:0} ft {f.Ias:0} kt");
+    }
+    var again = log.Count(l => l.Contains("going around")) - 1;
+    Console.WriteLine("  " + string.Join(" | ", trace.Take(14)));
+    foreach (var l in log.Where(l => l.Contains("going around") || l.Contains("landed"))) Console.WriteLine("    " + l);
+    Check(again == 0, $"no second go-around ({again})");
+    Check(f.OnGround, "it lands after coming back around");
+}
+
 Console.WriteLine("== Peak-hour test setting replays the busiest hours now");
 {
     var apt = new AirportModel(TestAirport.Build(false));
