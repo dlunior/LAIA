@@ -693,10 +693,39 @@ public sealed class TrafficWorld
 
     private PushbackPlanner? _pushPlanner;
 
+    /// <summary>For the log: a route that turns more than a full circle in its first 25 nm is a loop to look into.</summary>
+    private void CheckLoops(Flight f, string what)
+    {
+        if (f.Path is null || f.Test) return;
+        double total = 0, prev = double.NaN;
+        var max = Math.Min(f.Path.Length, 25 * Geo2.MPerNm);
+        for (var s2 = 0.0; s2 < max; s2 += 150)
+        {
+            var d = f.Path.At(s2).dir;
+            if (!double.IsNaN(prev)) total += Math.Abs(Geo2.Diff(d, prev));
+            prev = d;
+        }
+        if (total > 330) Log($"{f.Callsign}: {what} turns {total:0}° in its first {max / Geo2.MPerNm:0} nm ({f.Route}, runway {f.Rwy?.Ident}) — a loop to look into");
+    }
+
+    /// <summary>Seconds until a landing aircraft is off the runway: to its exit at its current deceleration, plus turning off.</summary>
+    private double TimeToClear(Flight o)
+    {
+        if (o.OnRunway < 0) return 0;
+        if (o.Path is null) return 99;
+        // The exit is where the ground path leaves the runway.
+        double exitS = double.NaN;
+        for (var s2 = o.S; s2 < o.Path.Length; s2 += 10)
+            if (!(o.Rwy?.Contains(o.Path.At(s2).p, 3) ?? false)) { exitS = s2; break; }
+        if (double.IsNaN(exitS)) return 99;
+        var v = Math.Max(4, o.Gs * Kt);
+        return (exitS - o.S) / Math.Max(6, v * 0.6) + 4;
+    }
+
     private void StartPushback(Flight f)
     {
         var s = f.Spot!;
-        var hold = PickRunwayEntry(f.Rwy!, out var entry);
+        var hold = PickRunwayEntry(f.Rwy!, out var entry, s.P);
         _pushPlanner ??= new PushbackPlanner(Apt);
         var plan = _pushPlanner.Plan(s, f.P, hold);
         f.Path = new PathGeom(plan.Points, _ => plan.Radius, 0.5);
@@ -830,12 +859,23 @@ public sealed class TrafficWorld
     }
 
     /// <summary>Where departures enter the runway: the connection nearest the threshold. Returns the hold node.</summary>
-    private int PickRunwayEntry(RunwayEnd rwy, out int entry)
+    /// <summary>
+    /// Where departures enter the runway: the connection nearest the threshold on the aircraft's own side of the
+    /// runway (never crossing the runway to line up from the far side), and one it can turn onto the runway from
+    /// without a hairpin (not a high-speed exit used backwards). Returns the hold node.
+    /// </summary>
+    private int PickRunwayEntry(RunwayEnd rwy, out int entry, V2? from = null)
     {
         entry = -1;
         var links = Apt.RunwayLinks(rwy.Runway).Select(l => (l.on, l.off, along: rwy.Along(Apt.Nodes[l.on]))).ToList();
         if (links.Count == 0) return -1;
-        var near = links.Where(l => l.along > -80 && l.along < rwy.LengthM * 0.3).OrderBy(l => l.along).ThenByDescending(l => Apt.NodeHoldShort[l.off] ? 1 : 0).ToList();
+        var side = from is { } fp ? Math.Sign(rwy.Offset(fp)) : 0;
+        bool SameSide((int on, int off, double along) l) => side == 0 || Math.Sign(rwy.Offset(Apt.Nodes[l.off])) == side;
+        // Entering means driving off → on, then turning to the runway heading: more than ~120° is a hairpin.
+        bool Turnable((int on, int off, double along) l) => V2.Dot((Apt.Nodes[l.on] - Apt.Nodes[l.off]).Unit, rwy.Dir) > -0.5;
+        var near = links.Where(l => l.along > -80 && l.along < rwy.LengthM * 0.3)
+            .OrderBy(l => SameSide(l) ? 0 : 1).ThenBy(l => Turnable(l) ? 0 : 1)
+            .ThenBy(l => Math.Round(l.along / 60)).ThenByDescending(l => Apt.NodeHoldShort[l.off] ? 1 : 0).ToList();
         var pick = near.Count > 0 ? near[0] : links.OrderBy(l => Math.Abs(l.along)).First();
         entry = pick.on;
         return pick.off;
@@ -959,6 +999,36 @@ public sealed class TrafficWorld
     }
 
     private readonly Dictionary<int, Flight> _lastDep = new();
+    private readonly Dictionary<(RunwayEnd, bool), double> _rot = new();
+
+    /// <summary>
+    /// Seconds a landing aircraft occupies this runway: braking at about 2 m/s² from touchdown (~400 m in) to the
+    /// first usable exit, the roll to it and clearing the runway — so a long rollout to a far exit (Orlando 36L)
+    /// gets more room than the 50 s of a runway with a high-speed exit in the right place.
+    /// </summary>
+    private double RunwayOccupancy(RunwayEnd rwy, Perf p)
+    {
+        var key = (rwy, p.Heavy);
+        if (_rot.TryGetValue(key, out var t)) return t;
+        var v0 = (p.Vapp - 5) * Kt;
+        double Needed(double dot) { var vx = dot > 0.5 ? 16.0 : 9.0; return 400 + Math.Max(250, (v0 * v0 - vx * vx) / (2 * 2.0)); }
+        var links = Apt.HasGround ? Apt.RunwayLinks(rwy.Runway)
+            .Select(l => (along: rwy.Along(Apt.Nodes[l.on]), dot: V2.Dot((Apt.Nodes[l.off] - Apt.Nodes[l.on]).Unit, rwy.Dir)))
+            .Where(l => l.dot > -0.2 && l.along < rwy.LengthM + 30).ToList() : new();
+        var exit = links.Where(l => l.along >= Needed(l.dot)).OrderBy(l => l.along).Select(l => ((double, double)?)(l.along, l.dot)).FirstOrDefault();
+        if (exit is not { } x) t = 50;
+        else
+        {
+            var vx = x.Item2 > 0.5 ? 16.0 : 9.0;
+            var brake = (v0 - vx) / 2.0;                                     // seconds braking
+            var brakeDist = (v0 * v0 - vx * vx) / (2 * 2.0);
+            var roll = Math.Max(0, x.Item1 - 400 - brakeDist) / vx;          // rolling on to the exit
+            t = 3 + brake + roll + (x.Item2 > 0.5 ? 8 : 14);                 // touchdown, braking, roll, turning off
+        }
+        t = Math.Clamp(t, 40, 120);
+        _rot[key] = t;
+        return t;
+    }
 
     private bool LineUpAllowed(Flight f)
     {
@@ -1100,6 +1170,7 @@ public sealed class TrafficWorld
         var last = pts[^1].P; var prev = pts[^2].P;
         pts.Add(new AirPoint(last + (last - prev).Unit * (30 * Geo2.MPerNm), ""));
         f.Path = AirPath(pts.Select(p => p.P).ToList(), i => i <= 1 ? 1 : 190, f.AltFt + 2000);
+        CheckLoops(f, "departure route");
         SetSpeedLimits(f, pts);
         f.S = 0;
         f.Stops.Clear();
@@ -1442,6 +1513,7 @@ public sealed class TrafficWorld
             return d > 20 ? 250 : d > 12 ? 210 : d > 7 ? 180 : 160;
         }, 6000);
         f.ThrS = f.Path.PointS[thrIndex];
+        CheckLoops(f, "arrival route");
         f.LandingChecked = false;
         f.StableChecked = false;
         f.SpeedLimits.Clear();
@@ -1734,7 +1806,7 @@ public sealed class TrafficWorld
     {
         var gs = Math.Max(90, f.P.Vapp - Wind.Headwind(f.Rwy!.Heading));
         var wake = Cwt.MilesBehind(leader.Wake, f.Wake) / gs * 3600;
-        var occupancy = 50 + 15;
+        var occupancy = RunwayOccupancy(f.Rwy, leader.P) + 10;
         var deps = DepRwys.Count > 0 ? DepRwys : DepRwy is null ? new List<RunwayEnd>() : new() { DepRwy };
         var mixed = deps.Count == 0 || deps.Any(d => d.Runway == f.Rwy.Runway);
         var crossing = deps.Any(d => Crossing(f.Rwy, d) is not null);
@@ -2334,7 +2406,10 @@ public sealed class TrafficWorld
                 f.LandingChecked = true;
                 var toThreshold = dth * Geo2.MPerNm / Math.Max(30, f.Gs * Kt);
                 // A departure that will be airborne before this aircraft reaches the threshold is fine.
-                bool Clear(Flight o) => o.Phase == "takeoff roll" && (o.P.Vr + 7 - o.Ias) / o.P.RollAccel < toThreshold;
+                // Anticipating separation (7110.65 3-10-3): a departure that will be airborne, or a landing aircraft
+                // that will have turned off, before this one crosses the threshold doesn't need a go-around.
+                bool Clear(Flight o) => (o.Phase == "takeoff roll" && (o.P.Vr + 7 - o.Ias) / o.P.RollAccel < toThreshold)
+                    || (o.Phase == "landing roll" && o.Rwy?.Runway == rwy.Runway && TimeToClear(o) < toThreshold);
                 var blocker = Flights.FirstOrDefault(o => o != f && !o.Done && !Clear(o) && (o.Reserve == rwy.Runway || (o.OnRunway == rwy.Runway && !(o.Kind == "departure" && !o.OnGround))));
                 if (blocker is not null) { GoAround(f, $"runway not clear: {blocker.Callsign} {blocker.Phase}"); return; }
                 // A departure on a crossing runway that won't be through the intersection in time (7110.65 3-10-4).
