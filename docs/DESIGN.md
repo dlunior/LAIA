@@ -176,10 +176,11 @@ These are hints, not clearances: the wording is plain ("aim for", "wait", "after
 
 **In the air**
 - **Sequence:** "#4 for runway 22, following DAL1132 (A321), 7 nm ahead".
-- **What to aim for:**
-  - A target time at the next fix ("cross CAMRN at 21:42, you're 40 s early").
-  - A target speed now and the next speed step ("250 kt now, plan 210 by CAMRN, 170 by 5 nm final").
-  - The expected STAR, approach and runway, from the runway in use.
+- **No time targets (the user's decision):** a new pilot shouldn't have to hit a time at a fix. The user is the anchor of the sequence and the AI fits around them. The guidance only ever asks for simple things a controller might ask for:
+  - **A speed,** now and next: "210 kt now", "you can keep 250 until CAMRN", "slow to 180, you're catching the A321".
+  - **The expected STAR, approach and runway,** from the runway in use.
+  - **Rarely, a simple delay:** "extend your downwind 2 miles", or "expect one turn in the hold at BRAND". Only when spacing can't be made any other way.
+- **Speed hints are few and steady:** at most one change every few minutes, always a round number, never a constant stream of small corrections.
 - **Who's waiting for you:** the aircraft holding or being slowed for your slot ("UAL455 holding at BRAND for you, 4 min").
 - **When the slot changes:** a short note explaining why, for example "#5 now, a 777 needs extra spacing ahead of you". This is as rare as the sequence-stability rules allow.
 
