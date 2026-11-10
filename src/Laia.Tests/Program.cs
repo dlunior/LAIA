@@ -401,6 +401,36 @@ Console.WriteLine("== A STAR that ends over the airport is vectored off it, not 
     Check(route.Contains("vectors to the ILS 27"), "the arrival is vectored to the approach, as controllers do");
 }
 
+Console.WriteLine("== Vectored to an approach's own first fix, not a straight-in final through a neighbour");
+{
+    // Like LaGuardia's RNAV Y 31: its final comes in from a fix off to the side, while the extended centreline
+    // points at a neighbouring airport. A STAR that doesn't lead into it from the other side of the field.
+    var data = TestAirport.Build(false);
+    data.Arrivals.Clear(); data.Approaches.Clear();
+    var map = new LocalMap(data.Lat, data.Lon);
+    var nm = Geo2.MPerNm;
+    Laia.Common.Airports.ProcedureLeg Fix(string name, double x, double y, int type = 18)
+    {
+        var (la, lo) = map.ToLatLon(new V2(x, y));
+        return new() { Type = type, Fix = name, Lat = la, Lon = lo };
+    }
+    data.Arrivals.Add(new() { Name = "WEST1", Legs = { Fix("WESTA", -35 * nm, 6 * nm, 15), Fix("WESTB", -20 * nm, 8 * nm) } });
+    // Runway 27 lands westbound; this approach starts north-east (GEMKX) and curves onto a short final.
+    data.Approaches.Add(new() { Type = 10, Runway = "27", Suffix = "Y", FinalLegs = { Fix("GEMKX", 7 * nm, 7 * nm, 15), Fix("NYJXT", 5 * nm, 1.5 * nm), Fix("MANLX", 3.5 * nm, 0), Fix("RW27", 1500, 0) } });
+    var apt = new AirportModel(data);
+    var world = new TrafficWorld(apt, new TestSource(), seed: 5) { Automatic = false, Wind = new Wind(270, 10) };
+    world.SelectRunways(true);
+    var f = world.SpawnArrival(40, true)!;
+    var pts = f.Path!.Points;
+    // The "neighbour" sits on the extended centreline 8–12 nm east: nothing should go there.
+    var intoNeighbour = pts.Count(q => q.X > 6.5 * nm && Math.Abs(q.Y) < 2 * nm);
+    var overField = pts.Count(q => q.Length < 3 * nm && !(Math.Abs(q.Y) < 600 && q.X > -1600));
+    Console.WriteLine($"  route: {f.Route}");
+    Check(f.Route.Contains("vectors to GEMKX for the RNAV 27 Y"), "vectored to the approach's first fix, then flies the approach");
+    Check(intoNeighbour == 0, $"never on a long straight-in through the neighbour's airspace ({intoNeighbour} points)");
+    Check(overField == 0, $"doesn't cross the field on the way ({overField} points)");
+}
+
 Console.WriteLine("== After a go-around, the aircraft comes back around and lands normally");
 {
     var apt = new AirportModel(TestAirport.Build(false));

@@ -1257,7 +1257,41 @@ public sealed class TrafficWorld
             {
                 var firstFix = app.FinalLegs.FirstOrDefault(l => l.Lat != 0 || l.Lon != 0);
                 var gap = firstFix is null ? double.MaxValue : (Apt.ToXY(firstFix.Lat, firstFix.Lon) - starPts[^1].P).Length;
-                if (gap > 5 * Geo2.MPerNm) return ($"vectors to the {typeLabel} {rwy.Ident}{(app.Suffix.Length > 0 ? " " + app.Suffix : "")}", new List<AirPoint>());
+                if (gap > 5 * Geo2.MPerNm)
+                {
+                    // Vector the arrival to the approach's own first fix, lined up with its inbound course, then fly
+                    // the real approach — not a generic straight-in final on the extended centreline, which can run
+                    // through a neighbour's airspace (LGA's RNAV Y 31 curves in from GEMKE in the east, clear of JFK;
+                    // a straight 10-nm final to 31 points right at JFK).
+                    var app1 = Apt.LegsToPoints(app.FinalLegs, starPts[^1].P, 3000, out _);
+                    var cut1 = app1.FindIndex(p => p.Fix.StartsWith("RW") || rwy.Along(p.P) > -200);
+                    if (cut1 >= 0) app1.RemoveRange(cut1, app1.Count - cut1);
+                    var label = $"{typeLabel} {rwy.Ident}{(app.Suffix.Length > 0 ? " " + app.Suffix : "")}";
+                    if (app1.Count >= 2)
+                    {
+                        var last1 = app1[^1].P;
+                        var along1 = rwy.Along(last1);
+                        if (along1 <= -2 * Geo2.MPerNm && Math.Abs(rwy.Offset(last1)) <= Math.Abs(along1) * Math.Tan(25 * Math.PI / 180))
+                        {
+                            var fix = app1[0];
+                            var inbound = (app1[1].P - fix.P).Unit;
+                            var lead = fix.P - inbound * (3 * Geo2.MPerNm);
+                            var route1 = new List<AirPoint>();
+                            // Keep clear of the airport on the way there: go round its side, not over it.
+                            var e = starPts[^1].P;
+                            if (DistToSegment(new V2(0, 0), e, lead) < 4 * Geo2.MPerNm)
+                            {
+                                var mid = (e + lead) * 0.5;
+                                var away = mid.Length > Geo2.MPerNm ? mid.Unit : (lead - e).Unit.Perp;
+                                route1.Add(new AirPoint(away * (6 * Geo2.MPerNm), ""));
+                            }
+                            route1.Add(new AirPoint(lead, ""));
+                            route1.AddRange(app1);
+                            return ($"vectors to {(fix.Fix.Length > 0 ? fix.Fix : "the approach")} for the {label}", route1);
+                        }
+                    }
+                    return ($"vectors to the {label}", new List<AirPoint>());
+                }
             }
             if (join is not null) legs.AddRange(join.Legs);
             legs.AddRange(app.FinalLegs);
@@ -1276,6 +1310,13 @@ public sealed class TrafficWorld
             return ($"{typeName} {rwy.Ident}{(app.Suffix.Length > 0 ? " " + app.Suffix : "")}", pts);
         }
         return ("", new List<AirPoint>());
+    }
+
+    private static double DistToSegment(V2 p, V2 a, V2 b)
+    {
+        var ab = b - a;
+        var t = ab.Length < 1e-6 ? 0 : Math.Clamp(V2.Dot(p - a, ab) / V2.Dot(ab, ab), 0, 1);
+        return (a + ab * t - p).Length;
     }
 
     /// <summary>Radar vectors to final: a downwind and base if needed, intercepting about 8 miles out at 30-40°.</summary>
