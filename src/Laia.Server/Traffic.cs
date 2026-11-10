@@ -12,6 +12,8 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     SimBriefService simbrief, ServerState state, ScheduleStore schedules, NetworkStore network, ILogger<TrafficEngine> log) : BackgroundService
 {
     private readonly object _gate = new();
+    private AtisReader? _atisReader;
+    private AtisReader Atis => _atisReader ??= new AtisReader(log);
     private TrafficWorld? _world;       // the airport near the user (with layout)
     private TrafficWorld? _testWorld;   // runway-only world for test buttons at airports without layout
     private readonly List<TrafficWorld> _retiring = new();
@@ -138,6 +140,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 drawRadiusNm = DrawRadiusNm,
                 level = settings.Get("traffic_level") ?? "normal",
                 peak = w?.PeakInfo,
+                approach = w?.ApproachInUse,
                 runways,
                 flights,
                 net = withSky ? NetFlights(w, live ? sim!.Lat : (double?)null, live ? sim!.Lon : null) : null,
@@ -231,6 +234,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 airportName = w?.Apt.Name,
                 layout = w is null ? null : $"{w.Apt.Spots.Count} parking spots, {w.Apt.Data.Departures.Count} SIDs, {w.Apt.Data.Arrivals.Count} STARs, {w.Apt.Data.Approaches.Count} approaches",
                 landing = w?.ArrRwy?.Ident,
+                approach = w?.ApproachInUse,
                 departing = w?.DepRwy?.Ident,
                 airportsOnFile = airports.Count,
                 catalog = source.HasCatalog,
@@ -369,6 +373,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                             // The installed AIG schedule is the real one to follow (exact models and registrations).
                             if (w.Schedule is null) w.Schedule = schedules.Get(w.Apt.Icao);
                             w.Gates = source.Gates(w.Apt.Icao);
+                            w.AtisApproaches = Atis.Approaches(w.Apt.Icao);
                         }
                         w.WeekMinute = live && sim!.ZuluWeekMinute >= 0 ? sim.ZuluWeekMinute : WeekMinuteNow();
                         // Don't run traffic while nobody is flying (sim closed): it would all depart unseen.

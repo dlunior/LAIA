@@ -316,7 +316,7 @@ async function poll() {
     if (data.net) { sky = data.net; skyAt = Date.now(); }
     const a = data.airport;
     const moving = data.flights.filter(f => !(f.kind === "parked" && f.phase === "parked")).length;
-    $("status").textContent = a ? `${a.icao} ${a.name} · ${moving} moving, ${data.flights.length} in all · level ${data.level}${data.peak ? " · peak test" : ""}${sky.length ? ` · ${sky.length} more in the sky nearby` : ""}${data.user ? "" : " · MSFS not connected"}`
+    $("status").textContent = a ? `${a.icao} ${a.name} · ${moving} moving, ${data.flights.length} in all · level ${data.level}${data.approach ? " · " + data.approach : ""}${data.peak ? " · peak test" : ""}${sky.length ? ` · ${sky.length} more in the sky nearby` : ""}${data.user ? "" : " · MSFS not connected"}`
       : (data.user ? "No traffic airport near you yet" : "Waiting for MSFS");
     if (!centred && (a || data.user)) { centred = true; map.setView(a ? [a.lat, a.lon] : [data.user.lat, data.user.lon], 11); }
     render();

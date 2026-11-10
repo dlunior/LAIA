@@ -125,6 +125,15 @@ public sealed class TrafficWorld
     }
     private TrafficLevel _level = TrafficLevel.Normal;
     public RunwayEnd? ArrRwy { get; private set; }
+
+    /// <summary>Approaches the real ATIS says are in use (kind like "ILS"/"RNAV", suffix like "Y", runway), when it could be read.</summary>
+    public List<(string kind, string suffix, string runway)> AtisApproaches { get; set; } = new();
+    /// <summary>The one approach every arrival to the landing runway flies (never a mix), e.g. "RNAV Y 31".</summary>
+    public string? ApproachInUse { get; private set; }
+    private Approach? _app;
+    private RunwayEnd? _appRwy;
+    private string _appKey = "";
+    private const double MinFinalNm = 1.2; // LGA's RNAV X 31 turns onto its final only 1.6 nm out
     public RunwayEnd? DepRwy { get; private set; }
     public V2? UserPos { get; set; }
     public bool UserOnGround { get; set; }
@@ -1258,8 +1267,10 @@ public sealed class TrafficWorld
     /// <summary>The approach to the runway, joined to the STAR where they share a fix. Empty if it doesn't line up.</summary>
     private (string name, List<AirPoint> pts) ApproachPoints(RunwayEnd rwy, List<AirPoint> starPts)
     {
-        int Pref(int t) => t switch { 4 => 0, 10 => 1, 1 => 2, 5 => 3, _ => 4 };
-        var apps = Apt.Data.Approaches.Where(a => a.Runway == rwy.Ident && a.FinalLegs.Count > 0).OrderBy(a => Pref(a.Type)).ToList();
+        // One approach at a time for the runway (the ATIS's, or a fixed choice): never a mix of, say, LGA's RNAV X and Y 31.
+        var chosen = ApproachFor(rwy);
+        var apps = chosen is not null ? new List<Approach> { chosen }
+            : Apt.Data.Approaches.Where(a => a.Runway == rwy.Ident && a.FinalLegs.Count > 0).OrderBy(a => ApproachPref(a.Type)).ToList();
         foreach (var app in apps)
         {
             var legs = new List<ProcedureLeg>();
@@ -1310,7 +1321,7 @@ public sealed class TrafficWorld
                         {
                             var lt = tp[^1].P;
                             var at = rwy.Along(lt);
-                            if (at <= -2 * Geo2.MPerNm && Math.Abs(rwy.Offset(lt)) <= Math.Abs(at) * Math.Tan(25 * Math.PI / 180))
+                            if (at <= -MinFinalNm * Geo2.MPerNm && Math.Abs(rwy.Offset(lt)) <= Math.Abs(at) * Math.Tan(25 * Math.PI / 180))
                                 return ($"{label0} via {bestT.Name}", tp);
                         }
                     }
@@ -1322,7 +1333,7 @@ public sealed class TrafficWorld
                     {
                         var last1 = app1[^1].P;
                         var along1 = rwy.Along(last1);
-                        if (along1 <= -2 * Geo2.MPerNm && Math.Abs(rwy.Offset(last1)) <= Math.Abs(along1) * Math.Tan(25 * Math.PI / 180))
+                        if (along1 <= -MinFinalNm * Geo2.MPerNm && Math.Abs(rwy.Offset(last1)) <= Math.Abs(along1) * Math.Tan(25 * Math.PI / 180))
                         {
                             var fix = app1[0];
                             var inbound = (app1[1].P - fix.P).Unit;
@@ -1354,12 +1365,89 @@ public sealed class TrafficWorld
             // The last point must be on the extended centreline (within 25°, at least 2 nm out).
             var lastP = pts[^1].P;
             var along = rwy.Along(lastP);
-            if (along > -2 * Geo2.MPerNm || Math.Abs(rwy.Offset(lastP)) > Math.Abs(along) * Math.Tan(25 * Math.PI / 180)) continue;
+            if (along > -MinFinalNm * Geo2.MPerNm || Math.Abs(rwy.Offset(lastP)) > Math.Abs(along) * Math.Tan(25 * Math.PI / 180)) continue;
             if (keep < starPts.Count) starPts.RemoveRange(keep, starPts.Count - keep);
             var typeName = app.Type switch { 4 => "ILS", 10 => "RNAV", 1 => "GPS", 5 => "LOC", 2 => "VOR", 7 => "LDA", _ => "approach" };
             return ($"{typeName} {rwy.Ident}{(app.Suffix.Length > 0 ? " " + app.Suffix : "")}", pts);
         }
         return ("", new List<AirPoint>());
+    }
+
+    private static int ApproachPref(int t) => t switch { 4 => 0, 10 => 1, 1 => 2, 5 => 3, _ => 4 };
+
+    public static string ApproachLabel(Approach a) =>
+        $"{(a.Type switch { 4 => "ILS", 10 => "RNAV", 1 => "GPS", 5 => "LOC", 2 => "VOR", 7 => "LDA", _ => "approach" })}{(a.Suffix.Length > 0 ? " " + a.Suffix : "")} {a.Runway}";
+
+    private static bool KindMatches(int type, string kind) => kind switch
+    {
+        "ILS" => type == 4, "LOC" => type == 5, "VOR" => type == 2, "LDA" => type == 7,
+        "RNAV" or "RNP" or "GPS" => type is 10 or 1, _ => false,
+    };
+
+    /// <summary>Whether the approach's final ends lined up with the runway, so it can actually be flown to a landing.</summary>
+    private bool Flyable(Approach a, RunwayEnd rwy)
+    {
+        var pts = Apt.LegsToPoints(a.FinalLegs, rwy.Threshold - rwy.Dir * (15 * Geo2.MPerNm), 4000, out _);
+        TrimAtRunway(pts, rwy);
+        if (pts.Count == 0) return false;
+        var last = pts[^1].P;
+        var along = rwy.Along(last);
+        return along <= -MinFinalNm * Geo2.MPerNm && Math.Abs(rwy.Offset(last)) <= Math.Abs(along) * Math.Tan(25 * Math.PI / 180);
+    }
+
+    /// <summary>
+    /// The approach in use on the landing runway: the one the real ATIS names; otherwise a fixed choice (an ILS
+    /// first, else the RNAV with the most published transitions, so the most arrivals join it the published way).
+    /// It changes only when the runway or the ATIS changes. Picking it from the neighbours' flows comes with M4.
+    /// </summary>
+    private Approach? ApproachFor(RunwayEnd rwy)
+    {
+        var key = string.Join(";", AtisApproaches.Select(x => $"{x.kind}|{x.suffix}|{x.runway}"));
+        if (_appRwy == rwy && _appKey == key) return _app;
+        var apps = Apt.Data.Approaches.Where(a => a.Runway == rwy.Ident && a.FinalLegs.Count > 0 && Flyable(a, rwy)).ToList();
+        Approach? pick = null;
+        var why = "";
+        foreach (var (kind, suffix, runway) in AtisApproaches)
+        {
+            if (runway != rwy.Ident) continue;
+            pick = apps.FirstOrDefault(a => KindMatches(a.Type, kind) && (suffix.Length == 0 || a.Suffix == suffix))
+                ?? (suffix.Length == 0 ? null : apps.FirstOrDefault(a => KindMatches(a.Type, kind)));
+            if (pick is not null) { why = "as the real ATIS says"; break; }
+        }
+        if (pick is null)
+        {
+            pick = apps.OrderBy(a => ApproachPref(a.Type)).ThenByDescending(a => a.Transitions.Count).ThenBy(a => a.Suffix).FirstOrDefault();
+            why = AtisApproaches.Count > 0 ? "the ATIS names none LAIA can fly here, so the standard choice" : "no ATIS approach known, so the standard choice";
+        }
+        var label = pick is null ? null : ApproachLabel(pick);
+        if (label != ApproachInUse || _appRwy != rwy) Log($"Approach in use at {Apt.Icao}: {label ?? "none (vectors to final)"} for runway {rwy.Ident} ({why})");
+        _app = pick; _appRwy = rwy; _appKey = key; ApproachInUse = label;
+        return pick;
+    }
+
+    /// <summary>
+    /// The approaches a D-ATIS text says are in use: "ILS RWY 22 APCH IN USE", "EXPECT RNAV Y RWY 31 APPROACH",
+    /// "RNAV (RNP) Z RY 13". Approaches mentioned as out of service are ignored; visual approaches aren't flown yet.
+    /// </summary>
+    public static List<(string kind, string suffix, string runway)> ParseAtisApproaches(string text)
+    {
+        var list = new List<(string, string, string)>();
+        var t = " " + (text ?? "").ToUpperInvariant().Replace('.', ' ').Replace(',', ' ') + " ";
+        var rx = new System.Text.RegularExpressions.Regex(@"\b(ILS|LOC|RNAV|RNP|GPS|VOR|LDA)\b(?:\s+OR\s+LOC(?:/DME)?)?\s*(?:\((?:GPS|RNP)\)\s*)?(?:([XYZ])\s+)?(?:RWY|RY|RUNWAY|RWYS)\s*(\d{1,2}[LRC]?)\b");
+        foreach (System.Text.RegularExpressions.Match m in rx.Matches(t))
+        {
+            var a = Math.Max(0, m.Index - 25);
+            var b = Math.Min(t.Length, m.Index + m.Length + 30);
+            var around = t[a..b];
+            var after = t[(m.Index + m.Length)..Math.Min(t.Length, m.Index + m.Length + 25)];
+            if (after.Contains(" OTS") || after.Contains("OUT OF SERVICE") || after.Contains(" U/S") || after.Contains("UNUSABLE") || after.Contains("NOT AVBL")) continue;
+            if (!(around.Contains("APCH") || around.Contains("APPROACH") || around.Contains("EXPECT") || around.Contains(" EXP ") || around.Contains("IN USE") || around.Contains(" APP "))) continue;
+            var rwy = m.Groups[3].Value;
+            if (rwy.Length == 1 || (rwy.Length == 2 && !char.IsDigit(rwy[1]))) rwy = "0" + rwy;
+            var e = (m.Groups[1].Value, m.Groups[2].Value, rwy);
+            if (!list.Contains(e)) list.Add(e);
+        }
+        return list;
     }
 
     /// <summary>

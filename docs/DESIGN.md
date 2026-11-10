@@ -386,7 +386,7 @@ The choice, in order:
 3. **Learned (M13).** From real ADS-B tracks, identify which approach was flown (track shape) against the neighbours' configurations at the time, giving a per-airport table.
 4. **One approach at a time,** never a random mix. It changes only with a configuration change, as a planned changeover.
 
-Today (0.1.75) the approach is picked by type preference and whether the arrival's route reaches it, which can mix the X and the Y. That is replaced by the above.
+Since 0.1.79: one approach at a time per landing runway. It's the approach the real D-ATIS names (read every 10 minutes from datis.clowd.io for US airports; out-of-service and visual approaches are skipped), otherwise a fixed standard choice: an ILS first, else the RNAV with the most published transitions (LGA 31 → RNAV Y). It changes only when the runway or the ATIS changes, and the control page and map show it. Approaches whose final is short (the RNAV X 31 turns onto a 1.6 nm final at DCTRK) are now flown as published; before, they were rejected by a 2 nm minimum-final check and replaced by a straight-in. Step 2 (linked configurations, from the neighbours' simulated flows) is still to do with M4.
 
 **Telling the user**
 - **Traffic mode (no ATC):** plain notes with lead time:

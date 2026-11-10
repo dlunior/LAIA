@@ -464,6 +464,47 @@ Console.WriteLine("== Vectored to an approach's own first fix, not a straight-in
     Check(overField == 0, $"doesn't cross the field on the way ({overField} points)");
 }
 
+Console.WriteLine("== One approach at a time: the ATIS's, or a fixed choice — never a mix (LGA RNAV X vs Y 31)");
+{
+    var atis = TrafficWorld.ParseAtisApproaches("LGA ATIS INFO K 0551Z. 31010KT 10SM FEW250 08/M03 A3012 (THREE ZERO ONE TWO). RNAV X RWY 31 APCH IN USE. DEPG RWY 4. NOTICE TO AIR MISSIONS. ILS RWY 22 OTS. ...ADVS YOU HAVE INFO K.");
+    Check(atis.Count == 1 && atis[0] == ("RNAV", "X", "31"), $"reads the approach in use from the ATIS, not the out-of-service one ({string.Join(", ", atis)})");
+    var atis2 = TrafficWorld.ParseAtisApproaches("EXPECT ILS OR LOC RWY 4 APPROACH. SIMUL APCHS IN USE");
+    Check(atis2.Count == 1 && atis2[0] == ("ILS", "", "04"), $"\"ILS or LOC runway 4\" is the ILS to 04 ({string.Join(", ", atis2)})");
+    var nm = Geo2.MPerNm;
+    var data = TestAirport.Build(false);
+    data.Approaches.Clear();
+    var map = new LocalMap(data.Lat, data.Lon);
+    Laia.Common.Airports.ProcedureLeg Fix(string name, double x, double y, int type = 18)
+    {
+        var (la, lo) = map.ToLatLon(new V2(x, y));
+        return new() { Type = type, Fix = name, Lat = la, Lon = lo };
+    }
+    // Like the RNAV X 31: curves in from the side and turns onto a final only 1.6 nm long.
+    data.Approaches.Add(new() { Type = 10, Runway = "27", Suffix = "X",
+        Transitions = { new() { Name = "VARAX", Legs = { Fix("VARAX", 14 * nm, -12 * nm, 15), Fix("PACHX", 8 * nm, -8 * nm) } } },
+        FinalLegs = { Fix("PACHX", 8 * nm, -8 * nm, 15), Fix("SHAYX", 6 * nm, -5 * nm), Fix("KEYTX", 4.5 * nm, -2.5 * nm), Fix("DCTRX", 1500 + 1.6 * nm, 0), Fix("RW27", 1500, 0) } });
+    // Like the RNAV Y 31: more transitions, from the north-east.
+    data.Approaches.Add(new() { Type = 10, Runway = "27", Suffix = "Y",
+        Transitions = { new() { Name = "WASBX", Legs = { Fix("WASBX", 15 * nm, 12 * nm, 15), Fix("GEMKY", 10 * nm, 6 * nm) } },
+                        new() { Name = "JABAX", Legs = { Fix("JABAX", 20 * nm, 5 * nm, 15), Fix("GEMKY", 10 * nm, 6 * nm) } } },
+        FinalLegs = { Fix("GEMKY", 10 * nm, 6 * nm, 15), Fix("MANLY", 6 * nm, 0), Fix("RW27", 1500, 0) } });
+    List<string> Routes(TrafficWorld w) { var r = new List<string>(); for (var i = 0; i < 6; i++) { var f = w.SpawnArrival(40, true); if (f is null) continue; r.Add(f.Route); f.Done = true; } return r; }
+    var w1 = new TrafficWorld(new AirportModel(data), new TestSource(), seed: 8) { Automatic = false, Wind = new Wind(270, 10) };
+    w1.SelectRunways(true);
+    var r1 = Routes(w1);
+    Console.WriteLine($"  standard choice: {w1.ApproachInUse}; {string.Join(" | ", r1.Distinct())}");
+    Check(w1.ApproachInUse == "RNAV Y 27" && r1.All(r => r.Contains("RNAV 27 Y")), "without an ATIS, every arrival flies the same approach (the one with the most transitions)");
+    var w2 = new TrafficWorld(new AirportModel(data), new TestSource(), seed: 8) { Automatic = false, Wind = new Wind(270, 10), AtisApproaches = { ("RNAV", "X", "27") } };
+    w2.SelectRunways(true);
+    var f2 = w2.SpawnArrival(40, true)!;
+    var r2 = Routes(w2).Append(f2.Route).ToList();
+    Console.WriteLine($"  ATIS says RNAV X: {string.Join(" | ", r2.Distinct())}");
+    Check(w2.ApproachInUse == "RNAV X 27" && r2.All(r => r.Contains("RNAV 27 X")), "with the ATIS saying RNAV X, every arrival flies the X");
+    var keyth = new V2(4.5 * nm, -2.5 * nm);
+    var nearKeyth = f2.Path!.Points.Min(q => (q - keyth).Length) / nm;
+    Check(nearKeyth < 0.6 && !f2.Route.StartsWith("vectors to the "), $"the X is flown along its curved final, not replaced by a straight-in ({nearKeyth:0.00} nm from its fix)");
+}
+
 Console.WriteLine("== After a go-around, the aircraft comes back around and lands normally");
 {
     var apt = new AirportModel(TestAirport.Build(false));
