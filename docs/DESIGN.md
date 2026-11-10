@@ -89,6 +89,7 @@ work runs on a second PC on the home network, so the sim PC stays fast.
   - **Stabilized approach by 1,000 ft (AIM 5-4),** or the aircraft goes around.
   - **Holding (AIM 5-3-8)** far out. 360s are used only within 15 nm. Today's holds use 200 kt up to 6,000 ft and 230 kt above. The full AIM limits are 200 kt up to 6,000 ft MSL, 230 kt from 6,001 to 14,000 ft (210 where charted), and 265 kt above 14,000 ft, with one-minute legs at or below 14,000 ft and 1.5 minutes above. The 265 kt and 1.5-minute rules still need adding.
   - **Taxi speeds:** 20 kt straight, 16 kt for heavies, slower in turns, 10 kt on the ramp.
+- **STARs that end at or over the airport (0.1.56):** many end with "expect radar vectors" (LaGuardia's VADDR1 ends over the field). They're flown only until about 8 nm from the airport, then the arrival is vectored (downwind, base, final). When a STAR doesn't lead into the chosen approach, the arrival is vectored to final, not sent straight to the approach's first fix.
 - **Peak (test) traffic level (0.1.54):** for testing at quiet times. It finds the airport's busiest 3 hours in its real schedule and replays them now, real flights and all, then replays them again when they finish. The control page says it isn't the real time. Busy and Peak both fly every scheduled flight; Peak has a higher object limit.
 - **Safety nets:** a stuck-aircraft watchdog (reroute after 20 s, another gate after 2 min, removed after 5 min with the reason logged), ground separation and intersection yielding.
 
