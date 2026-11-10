@@ -71,10 +71,29 @@ Console.WriteLine("== One hour of busy traffic, runway 27 in use (wind 270/12)")
     var seenPhases = new HashSet<string>();
     var stuckFlights = new HashSet<string>();
     var prevBank = new Dictionary<string, double>();
+    // Rule checks (7110.65, 14 CFR 91.117, AIM).
+    int slowFar = 0, slowNear = 0, speedUpInside5 = 0, fastLow = 0, wakeShort = 0;
+    var prevIas = new Dictionary<string, double>();
+    var liftoffs = new List<(double t, int rwy, char wake, string cs)>();
+    var airborneSeen = new HashSet<string>();
     for (var step = 0; step < 3600 / dt; step++)
     {
         world.Step(dt);
         var fl = world.Flights;
+        foreach (var f in fl)
+        {
+            if (f.Kind == "arrival" && !f.OnGround && !f.WentAround && f.Phase is "arriving" or "approach" or "final" && world.Time - f.LastHold > 400)
+            {
+                var dth = (f.ThrS - f.S) / Geo2.MPerNm;
+                var jet = f.P.Family != "turboprop";
+                if (jet && dth > 20.5 && f.AltFt < 10000 && f.Ias < 209) { slowFar++; if (slowFar <= 3) log.Add($"SLOW {f.Callsign} {f.Ias:0} kt at {dth:0.0} nm"); }
+                if (jet && dth > 5.5 && dth <= 20 && f.Ias < Math.Min(169, f.P.Vapp + 30)) { slowNear++; if (slowNear <= 3) log.Add($"SLOW {f.Callsign} {f.Ias:0} kt at {dth:0.0} nm"); }
+                if (dth < 5 && prevIas.TryGetValue(f.Id, out var pi) && f.Ias > pi + 0.01) speedUpInside5++;
+            }
+            if (f.Kind == "departure" && !f.OnGround && f.AltFt < 9500 && f.Ias > 251) fastLow++;
+            if (f.Kind == "departure" && !f.OnGround && f.Rwy is not null && airborneSeen.Add(f.Id)) liftoffs.Add((world.Time, f.Rwy.Runway, f.Wake, f.Callsign));
+            prevIas[f.Id] = f.Ias;
+        }
         // Runway: at most one aircraft on it (departures that have lifted off don't count).
         var onRwy = fl.Where(f => f.OnRunway >= 0 && !(f.Kind == "departure" && !f.OnGround)).GroupBy(f => f.OnRunway).Where(g => g.Count() > 1).ToList();
         if (onRwy.Count > 0)
@@ -135,6 +154,19 @@ Console.WriteLine("== One hour of busy traffic, runway 27 in use (wind 270/12)")
     Check(landings >= 6, $"arrivals land ({landings})");
     Check(parkedArrivals >= 3, $"arrivals taxi to gates ({parkedArrivals})");
     Check(goArounds <= 2, $"few go-arounds ({goArounds})");
+    Check(!log.Any(l => l.Contains("not stable")), "every arrival is stable by 1,000 ft (AIM 5-4)");
+    Check(slowFar == 0, $"no jet slowed below 210 kt beyond 20 miles (7110.65 5-7-3) ({slowFar})");
+    Check(slowNear == 0, $"no jet slowed below 170 kt between 5 and 20 miles (7110.65 5-7-3) ({slowNear})");
+    Check(speedUpInside5 == 0, $"no speed changes upward inside 5 miles (7110.65 5-7-2) ({speedUpInside5})");
+    Check(fastLow == 0, $"departures stay at or below 250 kt below 10,000 ft (91.117) ({fastLow})");
+    for (var i = 1; i < liftoffs.Count; i++)
+    {
+        var a = liftoffs[i - 1]; var b = liftoffs[i];
+        if (a.rwy != b.rwy) continue;
+        if (b.t - a.t < Cwt.DepartureSeconds(a.wake, b.wake) - 1) { wakeShort++; log.Add($"WAKE {b.cs} ({b.wake}) {b.t - a.t:0} s behind {a.cs} ({a.wake})"); }
+        if (b.t - a.t < 25) { wakeShort++; log.Add($"TOO CLOSE {b.cs} {b.t - a.t:0} s behind {a.cs}"); }
+    }
+    Check(wakeShort == 0, $"departures spaced for wake turbulence and the runway (7110.65 3-9-6) ({wakeShort})");
     Check(runwayConflicts == 0, $"never two aircraft on the runway ({runwayConflicts} moments)");
     Check(jumps == 0, $"no jumps in movement ({jumps})");
     Check(closeCalls < 20, $"aircraft keep their distance on the ground ({closeCalls} moments closer than 12 m)");
@@ -144,6 +176,33 @@ Console.WriteLine("== One hour of busy traffic, runway 27 in use (wind 270/12)")
     Check(!log.Any(l => l.Contains("removed")), "no errors in the traffic logic");
     Check(seenPhases.Contains("pushback") && seenPhases.Contains("lined up") && seenPhases.Contains("flare") && seenPhases.Contains("at gate") || seenPhases.Contains("parked"),
         "all phases happen (pushback, line-up, flare, gate)");
+}
+
+Console.WriteLine("== Rules: wake categories and crossing runways");
+{
+    Check(Cwt.For("B77W", Perf.For("B77W")) == 'B' && Cwt.For("B738", Perf.For("B738")) == 'F' && Cwt.For("E75L", Perf.For("E75L")) == 'G' && Cwt.For("B752", Perf.For("B752")) == 'E' && Cwt.For("A388", Perf.For("A388")) == 'A',
+        "aircraft get their CWT wake categories (777 B, 737 F, E175 G, 757 E, A380 A)");
+    Check(Cwt.MilesBehind('B', 'F') == 5 && Cwt.MilesBehind('A', 'I') == 8 && Cwt.MilesBehind('F', 'F') == 3 && Cwt.MilesBehind('C', 'E') == 3.5,
+        "spacing on final follows the CWT table (heavy→large 5 nm, A380→small 8, large→large 3)");
+    Check(Cwt.DepartureSeconds('B', 'F') == 120 && Cwt.DepartureSeconds('A', 'B') == 180 && Cwt.DepartureSeconds('F', 'F') == 0,
+        "departure wake times follow 7110.65 3-9-6 (2 min behind a heavy, 3 behind an A380)");
+    Check(Airspace.Has200KnotArea("KISP") && !Airspace.Has200KnotArea("KLGA") && !Airspace.Has200KnotArea("EGLL"),
+        "91.117(b) 200-knot area: Class C/D airports in the US, not Class B");
+
+    var data = TestAirport.Build(false);
+    var map = new LocalMap(40, -75);
+    var (clat, clon) = map.ToLatLon(new V2(0, 0));
+    data.Runways.Add(new AirportRunway { Lat = clat, Lon = clon, ElevationM = 10, Heading = 0, LengthM = 2500, WidthM = 45, PrimaryNumber = 36, SecondaryNumber = 18 });
+    var apt = new AirportModel(data);
+    var w = new TrafficWorld(apt, new TestSource(), seed: 3) { Level = TrafficLevel.Busy, Wind = new Wind(300, 15) };
+    var lines = new List<string>(); w.Log = l => lines.Add(l);
+    w.SelectRunways(true);
+    Console.WriteLine("  " + string.Join(" | ", lines));
+    Check(w.ArrRwy?.Ident == "27" && w.DepRwy?.Ident == "36", $"busy: land 27, depart the crossing runway 36 ({w.ArrRwy?.Ident}/{w.DepRwy?.Ident})");
+    w.Level = TrafficLevel.Light; w.SelectRunways(true);
+    Check(w.DepRwy?.Ident == "27", $"quiet: one runway for both ({w.DepRwy?.Ident})");
+    w.Level = TrafficLevel.Busy; w.Wind = new Wind(120, 12); w.SelectRunways(true);
+    Check(w.ArrRwy?.Ident == "09" || w.ArrRwy?.Ident == "18", $"wind change: landing runway turns into the wind ({w.ArrRwy?.Ident})");
 }
 
 Console.WriteLine("== Runway-only airport (test buttons without a layout)");

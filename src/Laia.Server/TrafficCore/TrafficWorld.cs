@@ -67,6 +67,16 @@ public sealed class Flight
     public string Title = "";               // exact model/livery (scheduled flights)
     public string? Brand;                   // the airline whose flight it is (DAL for a Delta Connection flight), when known
     public bool UserIsObstacle;
+    public char Wake => _wake ??= Cwt.For(Type, P);
+    private char? _wake;
+    /// <summary>Published speed limits along the path: distance along the path of the fix, and the limit (kt).</summary>
+    public List<(double S, double Kt)> SpeedLimits = new();
+    /// <summary>The planned departure route (planned when lining up, so the spacing can look at where it goes).</summary>
+    public List<AirPoint>? DepPlan;
+    public string DepRoute = "";
+    public double DepCourse = double.NaN;   // the track about 4 nm after the runway end
+    public bool StableChecked;
+    public double LastHold = -999;
 
     public double AglFt(double groundFt) => OnGround ? 0 : Math.Max(0, AltFt - groundFt);
 
@@ -146,8 +156,6 @@ public sealed class TrafficWorld
     private int _nextId = 1;
     private double _nextDep = double.NaN, _nextArr = double.NaN, _lastRunwayCheck = -999;
     private bool _filled;
-    private double _lastDepLiftoff = -999;
-    private bool _lastDepHeavy;
 
     public TrafficWorld(AirportModel apt, IFlightSource source, int seed = 0)
     {
@@ -168,23 +176,64 @@ public sealed class TrafficWorld
 
     // ------------------------------------------------------------------ runways
 
+    /// <summary>Crosswind component (kt) on a heading.</summary>
+    private double Crosswind(double heading) => Math.Abs(V2.Cross(V2.FromBearing(heading), Wind.Vector));
+
+    /// <summary>
+    /// Picks the runways: the one most into the wind for landing, kept until the tailwind on it is more than
+    /// 5 knots (as real airports do, so light shifting winds don't flip the airport). Departures use a parallel
+    /// runway if there is one, else — when it's busy enough to matter — a crossing runway whose departures don't
+    /// fly through the arrivals' final approach (LaGuardia: land 22, depart 13), else the landing runway.
+    /// </summary>
     public void SelectRunways(bool force = false)
     {
         if (Apt.Ends.Count == 0) return;
         var usable = Apt.Ends.Where(e => e.LengthM >= 1400).ToList();
         if (usable.Count == 0) usable = Apt.Ends.ToList();
+        bool WindOk(RunwayEnd e) => Wind.Headwind(e.Heading) >= -5 && Crosswind(e.Heading) <= 25;
         RunwayEnd best;
         if (Wind.Kt < 4 && ArrRwy is not null && !force) best = ArrRwy;
         else if (Wind.Kt < 4) best = usable.OrderByDescending(e => e.LengthM).First();
         else best = usable.OrderByDescending(e => Math.Round(Wind.Headwind(e.Heading) / 3)).ThenByDescending(e => e.LengthM).First();
-        // Keep the current runway unless the tailwind on it gets above 5 knots.
-        if (!force && ArrRwy is not null && Wind.Headwind(ArrRwy.Heading) > -5) return;
+        // Keep the current runways unless the tailwind on the landing runway gets above 5 knots.
+        if (!force && ArrRwy is not null && Wind.Headwind(ArrRwy.Heading) > -5 && (DepRwy is null || WindOk(DepRwy) || DepRwy == ArrRwy)) return;
         var group = usable.Where(e => Math.Abs(Geo2.Diff(e.Heading, best.Heading)) < 25).OrderByDescending(e => e.LengthM).ToList();
         var arr = group[0];
-        var dep = group.Skip(1).FirstOrDefault(e => e.Runway != arr.Runway && e.LengthM >= 2000) ?? arr;
+        var dep = group.Skip(1).FirstOrDefault(e => e.Runway != arr.Runway && e.LengthM >= 2000);
+        if (dep is null && Level is TrafficLevel.Normal or TrafficLevel.Busy)
+        {
+            var nm = Geo2.MPerNm;
+            dep = usable.Where(e => e.Runway != arr.Runway && e.LengthM >= 1900 && WindOk(e) && Crossing(arr, e) is not null)
+                .Where(e =>
+                {
+                    // The departure's first miles must stay clear of the final approach to the landing runway.
+                    var a0 = e.FarEnd; var a1 = e.FarEnd + e.Dir * (6 * nm);
+                    var f0 = arr.Threshold - arr.Dir * (12 * nm); var f1 = arr.Threshold - arr.Dir * (0.5 * nm);
+                    return !SegmentsCross(a0, a1, f0, f1) && Math.Abs(Geo2.Diff(e.Heading, arr.Heading + 180)) > 30;
+                })
+                .OrderByDescending(e => Math.Round(Wind.Headwind(e.Heading) / 3)).ThenByDescending(e => e.LengthM).FirstOrDefault();
+        }
+        dep ??= arr;
         if (ArrRwy != arr || DepRwy != dep) Log($"Runways in use at {Apt.Icao}: landing {arr.Ident}, departing {dep.Ident} (wind {Wind.FromDeg:000} at {Wind.Kt:0} kt)");
         ArrRwy = arr;
         DepRwy = dep;
+    }
+
+    private static bool SegmentsCross(V2 a0, V2 a1, V2 b0, V2 b1)
+    {
+        double C(V2 o, V2 a, V2 b) => V2.Cross(a - o, b - o);
+        var d1 = C(b0, b1, a0); var d2 = C(b0, b1, a1); var d3 = C(a0, a1, b0); var d4 = C(a0, a1, b1);
+        return d1 * d2 < 0 && d3 * d4 < 0;
+    }
+
+    /// <summary>Where two runways cross: the distance from each end's threshold to the intersection. Null if they don't.</summary>
+    private static (double alongA, double alongB)? Crossing(RunwayEnd a, RunwayEnd b)
+    {
+        if (a.Runway == b.Runway || !SegmentsCross(a.Threshold, a.FarEnd, b.Threshold, b.FarEnd)) return null;
+        var r = a.FarEnd - a.Threshold; var q = b.FarEnd - b.Threshold;
+        var t = V2.Cross(b.Threshold - a.Threshold, q) / V2.Cross(r, q);
+        var x = a.Threshold + r * t;
+        return (a.Along(x), b.Along(x));
     }
 
     // ------------------------------------------------------------------ main step
@@ -663,7 +712,31 @@ public sealed class TrafficWorld
         }
     }
 
-    private double WakeRemaining(Flight f) => Math.Max(0, (_lastDepHeavy && !f.P.Heavy ? 120 : 70) - (Time - _lastDepLiftoff));
+    /// <summary>
+    /// Seconds before this departure may start its roll, behind the previous departure from the same runway:
+    /// wake turbulence time by CWT category (7110.65 3-9-6), and radar separation once airborne — 1 nm when the
+    /// two courses diverge by 15° or more right after takeoff (5-8-3), else 3 nm.
+    /// </summary>
+    private double WakeRemaining(Flight f)
+    {
+        var l = _lastDep;
+        if (l is null || l.Done || l.Rwy is null || f.Rwy is null || l.Rwy.Runway != f.Rwy.Runway) return 0;
+        if (l.OnGround) return 30;                                      // still rolling
+        var since = Time - l.LiftoffTime;
+        var wake = Cwt.DepartureSeconds(l.Wake, f.Wake) - since;
+        if (double.IsNaN(f.DepCourse)) PlanDeparture(f);
+        var diverging = !double.IsNaN(l.DepCourse) && !double.IsNaN(f.DepCourse) && Math.Abs(Geo2.Diff(l.DepCourse, f.DepCourse)) >= 15;
+        // The follower gets airborne about 35 s after starting its roll, by when the leader has gained more distance.
+        var needNm = diverging ? 0.4 : 2.0;
+        var ahead = (l.Pos - f.Pos).Length / Geo2.MPerNm;
+        var radar = ahead >= needNm ? 0 : (needNm - ahead) / Math.Max(2, l.Gs / 3600.0);
+        // Same runway, both airborne-capable jets: the leader must be airborne and 6,000 ft down the runway (3-9-6).
+        var down = f.Rwy.Along(l.Pos) - f.Rwy.Along(f.Pos);
+        var runway = down >= 1829 ? 0 : 5;
+        return Math.Max(0, Math.Max(wake, Math.Max(radar, runway)));
+    }
+
+    private Flight? _lastDep;
 
     private bool LineUpAllowed(Flight f)
     {
@@ -684,7 +757,46 @@ public sealed class TrafficWorld
         var r = f.Rwy!.Runway;
         if (RunwayBusy(r, f)) return false;
         if (ArrivalEta(r) < 45) return false;
+        if (!CrossingRunwayClearForTakeoff(f)) return false;
         return WakeRemaining(f) <= 0;
+    }
+
+    /// <summary>Seconds for a departure starting its roll here to pass a point this far down the runway.</summary>
+    private static double RollTime(Flight f, double metres)
+    {
+        var a = Math.Max(0.5, f.P.RollAccel * 0.5144);
+        var liftoff = (f.P.Vr + 7) * 0.5144;
+        var tLift = liftoff / a; var dLift = 0.5 * a * tLift * tLift;
+        return metres <= dLift ? Math.Sqrt(2 * Math.Max(0, metres) / a) : tLift + (metres - dLift) / (liftoff * 1.1);
+    }
+
+    /// <summary>
+    /// A runway that crosses the departure runway (7110.65 3-9-8): don't start the roll if an arrival there would
+    /// reach the intersection before this departure is through it, or if a landed aircraft hasn't passed it yet.
+    /// </summary>
+    private bool CrossingRunwayClearForTakeoff(Flight f)
+    {
+        var d = f.Rwy!;
+        foreach (var end in Apt.Ends)
+        {
+            if (end.Runway == d.Runway) continue;
+            var x = Crossing(d, end);
+            if (x is null) continue;
+            var tPass = RollTime(f, x.Value.alongA - d.Along(f.Pos)) + 15;
+            foreach (var o in Flights)
+            {
+                if (o == f || o.Done || o.Rwy is null || o.Rwy.Runway != end.Runway) continue;
+                if (o.Kind == "arrival" && !o.OnGround && o.Phase != "go-around")
+                {
+                    var toX = (o.ThrS - o.S + x.Value.alongB) / Math.Max(30, o.Gs * Kt);
+                    if (o.Rwy == end && toX < tPass) return false;
+                }
+                // Landing or taking off on the crossing runway and not yet through the intersection.
+                if (o.OnGround && o.OnRunway == end.Runway && o.Phase is "landing roll" or "takeoff roll" && o.Rwy.Along(o.Pos) < (o.Rwy == end ? x.Value.alongB : end.LengthM - x.Value.alongB) + 30)
+                    return false;
+            }
+        }
+        return true;
     }
 
     private void StartLineUp(Flight f)
@@ -705,39 +817,90 @@ public sealed class TrafficWorld
         f.Stops.Clear();
         f.MaxKt = 10;
         f.Reserve = rwy.Runway;
+        if (f.DepPlan is null) PlanDeparture(f);
         f.SetPhase("lining up", Time);
     }
 
-    private void StartTakeoff(Flight f)
+    /// <summary>The departure route: straight ahead past the runway end, then the SID (or a turn out). Also its course.</summary>
+    private void PlanDeparture(Flight f)
     {
         var rwy = f.Rwy!;
-        // Straight ahead for a mile after the runway end before any turn.
-        var pts = new List<AirPoint> { new(f.Pos, ""), new(rwy.FarEnd, ""), new(rwy.FarEnd + rwy.Dir * Geo2.MPerNm, "") };
-        f.Route = "";
+        var pts = new List<AirPoint> { new(rwy.FarEnd, ""), new(rwy.FarEnd + rwy.Dir * Geo2.MPerNm, "") };
+        f.DepRoute = "";
         var sid = PickSid(rwy, out var sidLegs);
         if (sid is not null && sidLegs.Count > 0)
         {
             var sp = Apt.LegsToPoints(sidLegs, rwy.FarEnd, rwy.ElevationFt + 400, out _);
             // Ignore points behind the runway end (some SIDs begin with the runway fix).
             sp = sp.Where(p => rwy.Along(p.P) > rwy.LengthM + Geo2.MPerNm + 300 || (p.P - rwy.FarEnd).Length > 4000).ToList();
-            if (sp.Count > 0) { pts.AddRange(sp); f.Route = sid.Name; }
+            if (sp.Count > 0) { pts.AddRange(sp); f.DepRoute = sid.Name; }
         }
-        if (pts.Count <= 3)
+        if (pts.Count <= 2)
         {
             var straight = rwy.FarEnd + rwy.Dir * (5 * Geo2.MPerNm);
             pts.Add(new AirPoint(straight, ""));
             var turn = Geo2.Norm(rwy.Heading + (Rng.NextDouble() < 0.5 ? -1 : 1) * (30 + Rng.NextDouble() * 60));
             pts.Add(new AirPoint(straight + V2.FromBearing(turn, 25 * Geo2.MPerNm), ""));
         }
+        f.DepPlan = pts;
+        // The course about 4 nm after the runway end (for diverging-departure spacing).
+        var want = 4 * Geo2.MPerNm; var run = 0.0; var course = rwy.Heading;
+        for (var i = 0; i + 1 < pts.Count; i++)
+        {
+            var seg = pts[i + 1].P - pts[i].P;
+            if (seg.Length < 1) continue;
+            course = seg.Bearing;
+            run += seg.Length;
+            if (run >= want) break;
+        }
+        f.DepCourse = course;
+    }
+
+    private void StartTakeoff(Flight f)
+    {
+        var rwy = f.Rwy!;
+        if (f.DepPlan is null) PlanDeparture(f);
+        var pts = new List<AirPoint> { new(f.Pos, "") };
+        pts.AddRange(f.DepPlan!);
+        f.Route = f.DepRoute;
         // Keep going 30 nm past the last point so the path never runs out before the aircraft is removed.
         var last = pts[^1].P; var prev = pts[^2].P;
         pts.Add(new AirPoint(last + (last - prev).Unit * (30 * Geo2.MPerNm), ""));
         f.Path = AirPath(pts.Select(p => p.P).ToList(), i => i <= 1 ? 1 : 190, f.AltFt + 2000);
+        SetSpeedLimits(f, pts);
         f.S = 0;
         f.Stops.Clear();
         f.Ias = 0;
         f.Gs = 0;
         f.SetPhase("takeoff roll", Time);
+    }
+
+    /// <summary>The published speed limits of the procedure points on the path (index i of pts is point i of the path).</summary>
+    private static void SetSpeedLimits(Flight f, List<AirPoint> pts)
+    {
+        f.SpeedLimits.Clear();
+        if (f.Path is null) return;
+        for (var i = 0; i < pts.Count && i < f.Path.PointS.Length; i++)
+            if (pts[i].SpeedKt >= 100 && pts[i].SpeedKt < 400) f.SpeedLimits.Add((f.Path.PointS[i], pts[i].SpeedKt));
+    }
+
+    /// <summary>
+    /// The highest speed the procedure allows here: a limit ahead must be met at its fix (slowing about 10 kt per mile
+    /// before it), and the last limit passed holds until the next one (or for 10 nm after the last).
+    /// </summary>
+    private static double ProcedureLimit(Flight f, bool before)
+    {
+        var lim = double.PositiveInfinity;
+        (double S, double Kt)? passed = null;
+        foreach (var c in f.SpeedLimits)
+        {
+            var ahead = (c.S - f.S) / Geo2.MPerNm;
+            if (ahead >= 0) { lim = Math.Min(lim, before ? c.Kt : c.Kt + ahead * 10); }
+            else passed = c;
+        }
+        if (!before && passed is { } p && (f.S - p.S) / Geo2.MPerNm < 10 && !f.SpeedLimits.Any(c => c.S > f.S)) lim = Math.Min(lim, p.Kt);
+        else if (!before && passed is { } p2 && f.SpeedLimits.Any(c => c.S > f.S)) lim = Math.Min(lim, Math.Max(p2.Kt, f.SpeedLimits.Where(c => c.S > f.S).Min(c => c.Kt)));
+        return lim;
     }
 
     private Procedure? PickSid(RunwayEnd rwy, out List<ProcedureLeg> legs)
@@ -819,6 +982,7 @@ public sealed class TrafficWorld
     {
         var rwy = f.Rwy!;
         var route = new List<V2>();
+        var speeds = new List<double>();
         var names = new List<string>();
         if (from is { } start)
         {
@@ -844,7 +1008,8 @@ public sealed class TrafficWorld
                 starPts.Add(new AirPoint(s0, ""));
             }
             route.AddRange(starPts.Select(p => p.P));
-            if (appPts.Count > 0) route.AddRange(appPts.Select(p => p.P));
+            speeds.AddRange(starPts.Select(p => p.SpeedKt));
+            if (appPts.Count > 0) { route.AddRange(appPts.Select(p => p.P)); speeds.AddRange(appPts.Select(p => p.SpeedKt)); }
             else route.AddRange(Vectors(route[^1], rwy));
         }
         var thrIndex = route.Count;
@@ -862,6 +1027,10 @@ public sealed class TrafficWorld
         }, 6000);
         f.ThrS = f.Path.PointS[thrIndex];
         f.LandingChecked = false;
+        f.StableChecked = false;
+        f.SpeedLimits.Clear();
+        for (var i = 0; i < speeds.Count && i < f.Path.PointS.Length; i++)
+            if (speeds[i] >= 100 && speeds[i] < 400) f.SpeedLimits.Add((f.Path.PointS[i], speeds[i]));
     }
 
     private Procedure? PickStar(RunwayEnd rwy, out List<ProcedureLeg> legs)
@@ -946,10 +1115,16 @@ public sealed class TrafficWorld
 
     private double ArrivalSpeed(Flight f, double d)
     {
-        var t = d > 20 ? 250 : d > 12 ? 210 : d > 7 ? 180 : d > 4.5 ? Math.Max(160, f.P.Vapp + 10) : f.P.Vapp;
-        if (f.AltFt > 10000 + Apt.ElevationFt) t = Math.Min(t, 250);
+        // Typical controller speeds (250 → 210 → 180 → 170 to a 5-mile final), then the aircraft slows to its
+        // approach speed on its own: no speed is assigned inside 5 miles (7110.65 5-7-2).
+        double t = d > 20 ? 250 : d > 12 ? 210 : d > 7 ? 180 : d > 5 ? 170 : f.P.Vapp;
+        if (f.P.Family == "turboprop" && d <= 20) t = Math.Min(t, d > 5 ? 170 : f.P.Vapp);
+        t = Math.Max(t, f.P.Vapp);
         if (f.WentAround) t = Math.Min(t, 200);
-        return t;
+        // Published speed limits on the STAR and approach, and 250 knots below 10,000 ft (14 CFR 91.117(a)).
+        t = Math.Min(t, ProcedureLimit(f, false));
+        if (f.AltFt < 10000) t = Math.Min(t, 250);
+        return Math.Max(t, f.P.Vapp);
     }
 
     private void GoAround(Flight f, string why)
@@ -969,6 +1144,8 @@ public sealed class TrafficWorld
         f.ThrS = f.Path.PointS[thrIndex];
         f.S = 0;
         f.LandingChecked = false;
+        f.StableChecked = false;
+        f.SpeedLimits.Clear(); // radar vectors back around: no procedure limits
     }
 
     /// <summary>A full circle from the current position, then the rest of the route.</summary>
@@ -993,9 +1170,59 @@ public sealed class TrafficWorld
         var keptS = path.KeptS;
         for (var i = 0; i < path.Points.Count; i++) if (keptS[i] > f.S + 300) remaining.Add(path.Points[i]);
         pts.AddRange(remaining);
+        var oldLimits = f.SpeedLimits.Where(l => l.S > f.S + 300).Select(l => (off: l.S - f.S, l.Kt)).ToList();
         var thrIndex = pts.Count - 2;
         f.Path = AirPath(pts, i => i >= thrIndex ? 1 : i <= 8 ? f.Ias : 180, f.AltFt);
         f.ThrS = f.Path.PointS[thrIndex];
+        var added = f.Path.PointS[Math.Min(8, f.Path.PointS.Length - 1)];
+        f.SpeedLimits = oldLimits.Select(l => (added + l.off, l.Kt)).ToList();
+        f.S = 0;
+    }
+
+    /// <summary>
+    /// A holding pattern (AIM 5-3-8): from where the aircraft is (or the named fix just ahead), standard right turns,
+    /// one-minute legs, at holding speed (200 kt up to 6,000 ft, 230 kt above), then back onto the route.
+    /// Far from the airport this replaces 360s when the arrival flow is full.
+    /// </summary>
+    private void Hold(Flight f, string why)
+    {
+        var path = f.Path!;
+        var (p, dir, _) = path.At(f.S);
+        Log($"{f.Callsign}: holding for spacing ({why}), {(f.Ias > 0 ? Math.Min(f.Ias, f.AltFt <= 6000 ? 200 : 230) : 200):0} kt, right turns");
+        f.LastHold = Time;
+        f.LastOrbit = Time;
+        var holdKt = Math.Min(f.Ias, f.AltFt <= 6000 ? 200 : 230);
+        var v = Wind.Tas(holdKt, f.AltFt) * Kt;
+        var r = Math.Max(1500, v * v / (G * Math.Tan(25 * Math.PI / 180)));
+        var leg = Math.Max(2 * Geo2.MPerNm, v * 60);
+        var c = V2.FromBearing(dir);
+        var right = V2.FromBearing(dir + 90);
+        var pts = new List<V2> { p };
+        // Turn right onto the outbound leg.
+        var c1 = p + right * r;
+        var a1 = (p - c1).Bearing;
+        for (var k = 1; k <= 4; k++) pts.Add(c1 + V2.FromBearing(a1 + 45 * k, r));
+        var outEnd = p + right * (2 * r) - c * leg;
+        pts.Add(outEnd);
+        // Turn right back to the inbound leg, and fly it to the holding fix.
+        var c2 = outEnd - right * r;
+        var a2 = (outEnd - c2).Bearing;
+        for (var k = 1; k <= 4; k++) pts.Add(c2 + V2.FromBearing(a2 + 45 * k, r));
+        pts.Add(p);
+        pts.Add(p + c * 200);
+        var holdCount = pts.Count;
+        var remaining = new List<V2>();
+        var keptS = path.KeptS;
+        for (var i = 0; i < path.Points.Count; i++) if (keptS[i] > f.S + 300) remaining.Add(path.Points[i]);
+        var oldLimits = f.SpeedLimits.Where(l => l.S > f.S).Select(l => (off: l.S - f.S, l.Kt)).ToList();
+        pts.AddRange(remaining);
+        var thrIndex = pts.Count - 2;
+        f.Path = AirPath(pts, i => i >= thrIndex ? 1 : i < holdCount ? holdKt : 180, f.AltFt);
+        f.ThrS = f.Path.PointS[thrIndex];
+        // The procedure's speed limits move with the route (they come after the hold now).
+        var added = f.Path.PointS[holdCount - 1];
+        f.SpeedLimits = oldLimits.Select(l => (added + l.off, l.Kt)).ToList();
+        f.SpeedLimits.Add((f.Path.PointS[1], holdKt));
         f.S = 0;
     }
 
@@ -1166,6 +1393,13 @@ public sealed class TrafficWorld
         }
     }
 
+    private bool NearStands(V2 p, double margin)
+    {
+        foreach (var s in Apt.Spots)
+            if ((s.P - p).Length < Math.Max(15, s.RadiusM) + margin) return true;
+        return false;
+    }
+
     /// <summary>Moves along the ground path. Returns true when the end of the path is reached.</summary>
     private bool MoveGround(Flight f, double dt)
     {
@@ -1174,6 +1408,9 @@ public sealed class TrafficWorld
         var brake = f.Phase == "landing roll" ? 2.4 : 1.0;
         var vmax = f.MaxKt * Kt;
         if (f.Phase == "landing roll") vmax = Math.Max(vmax, v); // decelerate gently from touchdown speed
+        // Taxi speeds (airline practice, AIM 4-3): up to 20 kt on straight taxiways (16 for heavies), slower in
+        // turns (sideways acceleration limit), and about 10 kt on the ramp among the gates.
+        if (f.Phase is "taxi" or "taxi in" && NearStands(f.Pos, 60)) vmax = Math.Min(vmax, 10 * Kt);
         var target = path.CurveLimit(f.S, f.Phase == "landing roll" ? 2.0 : 1.0, vmax);
         if (f.Phase == "landing roll") target = Math.Min(target, Math.Max(f.MaxKt * Kt, v - 2.0 * dt));
         // Runway crossings: ask for clearance on the way, stop at the hold line if not given.
@@ -1324,8 +1561,7 @@ public sealed class TrafficWorld
         {
             f.OnGround = false;
             f.LiftoffTime = Time;
-            _lastDepLiftoff = Time;
-            _lastDepHeavy = f.P.Heavy;
+            _lastDep = f;
             f.Reserve = -1;
             f.Vs = 600;
             f.SetPhase("climbing", Time);
@@ -1339,7 +1575,11 @@ public sealed class TrafficWorld
         var agl = f.AltFt - rwy.ElevationFt;
         f.Lights = Nav | Beacon | Logo | Strobes | (f.AltFt < 10000 ? Landing : 0);
         if (agl > 100 && Time - f.LiftoffTime > 3) f.Gear = false;
-        var targetIas = agl < 1500 ? f.P.V2 + 15 : f.AltFt < 10000 ? 250 : 290;
+        double targetIas = agl < 1500 ? f.P.V2 + 15 : f.AltFt < 10000 ? 250 : 290;
+        // 91.117(b): 200 knots at or below 2,500 ft within 4 nm of a Class C or D airport.
+        if (agl <= 2500 && f.Pos.Length < 4 * Geo2.MPerNm && Airspace.Has200KnotArea(Apt.Icao)) targetIas = Math.Min(targetIas, 200);
+        // The SID's published speed limits.
+        targetIas = Math.Max(f.P.V2 + 10, Math.Min(targetIas, ProcedureLimit(f, true)));
         f.Ias += Math.Clamp(targetIas - f.Ias, -1.0 * dt, 1.6 * dt);
         var targetVs = agl < 1500 ? f.P.ClimbFpm : f.P.ClimbFpm * (f.Ias < targetIas - 5 ? 0.7 : 0.9);
         f.Vs += Math.Clamp(targetVs - f.Vs, -500 * dt, 600 * dt);
@@ -1383,11 +1623,21 @@ public sealed class TrafficWorld
             if (leader is not null && !leader.OnGround)
             {
                 var gap = dth - leaderD;
-                // Wider gaps when departures are waiting, so they can go between arrivals.
-                var need = (leader.P.Heavy && !f.P.Heavy ? 5 : 4) + (DeparturesWaiting ? 2.5 : 0.5);
-                if (gap < need) target = Math.Min(target, Math.Max(dth > 8 ? f.P.MinClean - 10 : f.P.Vapp, leader.Ias - 15));
-                // Too close to fix with speed: a 360° turn (as a controller would give) to drop back.
-                if (gap < need - 1.5 && dth > 7 && Time - f.LastOrbit > 240) { Orbit(f, $"{gap:0.0} nm behind {leader.Callsign}"); return; }
+                // Wake turbulence (CWT) or radar minimum, a little margin, and room for departures when they're waiting
+                // (a full gap on a single runway, a shorter one when they leave from a crossing runway).
+                var single = DepRwy is null || DepRwy.Runway == rwy.Runway;
+                var need = Cwt.MilesBehind(leader.Wake, f.Wake) + (DeparturesWaiting ? (single ? 3.0 : 1.5) : 1.0);
+                // Speed for spacing, never below what a controller may assign (7110.65 5-7-3: jets 210 kt below
+                // 10,000 ft, 170 kt within 20 miles; turboprops 200 / 150) and never inside 5 miles (5-7-2).
+                if (gap < need && dth > 5)
+                {
+                    var jet = f.P.Family != "turboprop";
+                    var floor = dth > 20 ? (jet ? 210 : 200) : (jet ? 170 : 150);
+                    target = Math.Min(target, Math.Max(Math.Max(floor, f.P.Vapp), leader.Ias - 15));
+                }
+                // Too close to fix with speed: hold (far out) or a 360° turn (closer in), as a controller would.
+                if (gap < need - 1.5 && dth > 15 && Time - f.LastHold > 300 && Time - f.LastOrbit > 120) { Hold(f, $"{gap:0.0} nm behind {leader.Callsign}"); return; }
+                if (gap < need - 1.5 && dth > 7 && dth <= 15 && Time - f.LastOrbit > 240) { Orbit(f, $"{gap:0.0} nm behind {leader.Callsign}"); return; }
             }
             if (f.Phase == "flare") target = f.P.Vapp - 5;
             f.Ias += Math.Clamp(target - f.Ias, -1.0 * dt, 1.5 * dt);
@@ -1409,6 +1659,17 @@ public sealed class TrafficWorld
             }
             f.AltFt += f.Vs / 60 * dt;
 
+            // Stabilized approach (AIM 5-4): by 1,000 ft above the runway, gear down, at approach speed and on the glidepath.
+            if (!f.StableChecked && agl < 1000 && f.Phase is "final" or "approach")
+            {
+                f.StableChecked = true;
+                var off = f.AltFt - Profile(rwy, dth);
+                if (!f.Gear || f.Ias > f.P.Vapp + 20 || Math.Abs(off) > 400)
+                {
+                    GoAround(f, $"not stable at 1,000 ft ({(f.Gear ? "" : "gear up, ")}{f.Ias:0} kt, {off:+0;-0} ft from the glidepath)");
+                    return;
+                }
+            }
             // Landing clearance: the runway must be clear when the aircraft is half a mile out.
             if (!f.LandingChecked && dth < 0.4)
             {
@@ -1418,6 +1679,17 @@ public sealed class TrafficWorld
                 bool Clear(Flight o) => o.Phase == "takeoff roll" && (o.P.Vr + 7 - o.Ias) / o.P.RollAccel < toThreshold;
                 var blocker = Flights.FirstOrDefault(o => o != f && !o.Done && !Clear(o) && (o.Reserve == rwy.Runway || (o.OnRunway == rwy.Runway && !(o.Kind == "departure" && !o.OnGround))));
                 if (blocker is not null) { GoAround(f, $"runway not clear: {blocker.Callsign} {blocker.Phase}"); return; }
+                // A departure on a crossing runway that won't be through the intersection in time (7110.65 3-10-4).
+                foreach (var end in Apt.Ends)
+                {
+                    if (end.Runway == rwy.Runway) continue;
+                    var x = Crossing(rwy, end);
+                    if (x is null) continue;
+                    var tArr = toThreshold + x.Value.alongA / Math.Max(30, f.P.Vapp * Kt);
+                    var dep = Flights.FirstOrDefault(o => o.Phase == "takeoff roll" && o.Rwy == end && o.Rwy.Along(o.Pos) < x.Value.alongB + 30 &&
+                        RollTime(o, x.Value.alongB) - (Time - o.PhaseTime) + 10 > tArr);
+                    if (dep is not null) { GoAround(f, $"{dep.Callsign} departing the crossing runway {end.Ident}"); return; }
+                }
             }
             if (f.Phase == "flare" && f.AltFt <= rwy.ElevationFt)
             {

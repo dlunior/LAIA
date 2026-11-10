@@ -70,3 +70,79 @@ public readonly record struct Wind(double FromDeg, double Kt)
     /// <summary>Headwind component (+) along a heading.</summary>
     public double Headwind(double headingDeg) => -V2.Dot(Vector, V2.FromBearing(headingDeg));
 }
+
+/// <summary>
+/// FAA Consolidated Wake Turbulence (CWT) categories A–I (JO 7110.126A, used by 7110.65 5-5-4 and 3-9-6):
+/// A = A380, B = upper heavy (747, 777, A330/A340/A350, 787), C = lower heavy (767, MD-11, A300/A310),
+/// D = non-pairwise heavy, E = 757, F = upper large (A320 family, 737, A220, MD-80/90, 717), G = lower large
+/// (regional jets, Dash 8-400, ATR 72), H = upper small (15,400–41,000 lb), I = lower small.
+/// </summary>
+public static class Cwt
+{
+    public static char For(string type, Perf p)
+    {
+        var t = (type ?? "").ToUpperInvariant();
+        if (t is "A388" or "A225") return 'A';
+        if (t.StartsWith("B74") || t.StartsWith("B77") || t.StartsWith("A33") || t.StartsWith("A34") || t.StartsWith("A35") || t.StartsWith("B78") || t is "A124" or "C5M" or "IL96" or "A3ST") return 'B';
+        if (t.StartsWith("B76") || t is "MD11" or "DC10" or "A306" or "A30B" or "A310" or "IL76" or "K35R") return 'C';
+        if (t is "B752" or "B753") return 'E';
+        if (t.StartsWith("A31") || t.StartsWith("A32") || t is "A19N" or "A20N" or "A21N" || t.StartsWith("B73") || t is "B37M" or "B38M" or "B39M" or "B3XM" or "B712"
+            || t.StartsWith("MD8") || t == "MD90" || t is "BCS1" or "BCS3" or "C130" or "B721" or "B722") return 'F';
+        if (t is "SF34" or "AT43" or "AT45" or "AT46" or "B190" or "JS41" or "E120" or "DH8A" or "DH8B" or "CL30" or "CL35" or "C25B" or "C25C" or "C560" or "C56X" or "LJ45" or "LJ60") return 'H';
+        if (t is "C208" or "PC12" or "BE20" or "BE9L" or "C172" or "C182" or "PA28" or "SR22" or "BE58" or "C510" or "E50P") return 'I';
+        return p.Family switch
+        {
+            "heavy" or "widebody" => 'B',
+            "757" => 'E',
+            "narrowbody" => 'F',
+            _ => 'G',
+        };
+    }
+
+    // Distance behind (nm), leader row, follower column A..I; 0 = the 3 nm radar minimum (7110.65 5-5-4, TBL 5-5-1).
+    private static readonly double[,] InTrail =
+    {
+        /* A */ { 0, 4.5, 6, 6, 7, 7, 7, 7, 8 },
+        /* B */ { 0, 3, 4, 4, 5, 5, 5, 5, 5 },
+        /* C */ { 0, 0, 0, 0, 3.5, 3.5, 3.5, 3.5, 5 },
+        /* D */ { 0, 3, 4, 4, 5, 5, 5, 5, 5 },
+        /* E */ { 0, 0, 0, 0, 0, 0, 0, 0, 4 },
+        /* F */ { 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+        /* G */ { 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+        /* H */ { 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+        /* I */ { 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    };
+
+    /// <summary>Minimum distance on final behind the leader (nm): the wake minimum, or 3 nm radar separation.</summary>
+    public static double MilesBehind(char leader, char follower)
+    {
+        var v = InTrail[Math.Clamp(leader - 'A', 0, 8), Math.Clamp(follower - 'A', 0, 8)];
+        return Math.Max(3, v);
+    }
+
+    /// <summary>Wake time between departures from the same runway (seconds after the leader lifts off), 7110.65 3-9-6.</summary>
+    public static double DepartureSeconds(char leader, char follower)
+    {
+        if (leader == 'A' && follower != 'A') return 180;
+        if (leader is 'B' or 'D' && follower >= 'B') return 120;
+        if (leader == 'C' && follower >= 'E') return 120;
+        if (leader == 'E' && follower == 'I') return 120;
+        return 0;
+    }
+}
+
+/// <summary>Where the speed rules of 14 CFR 91.117 apply differently.</summary>
+public static class Airspace
+{
+    // US Class B primary airports (91.117(c): the 200-knot limit near the airport doesn't apply in Class B).
+    private static readonly HashSet<string> ClassB = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "KATL","KBOS","KBWI","KCLT","KCVG","KDCA","KIAD","KADW","KDEN","KDFW","KDTW","KEWR","KJFK","KLGA","KHOU","KIAH","KLAS","KLAX",
+        "KMCI","KMCO","KMEM","KMIA","KMSP","KMSY","KORD","KPHL","KPHX","KPIT","KSAN","KSEA","KSFO","KSLC","KSTL","KTPA","PHNL","KNKX","KCLE","KNFW","KDAL","KMDW","KFLL",
+    };
+
+    public static bool IsUs(string icao) => icao.Length == 4 && (icao[0] == 'K' || icao.StartsWith("PA") || icao.StartsWith("PH") || icao.StartsWith("PG"));
+
+    /// <summary>91.117(b): at or below 2,500 ft above the surface within 4 nm of a Class C or D airport, 200 knots at most.</summary>
+    public static bool Has200KnotArea(string icao) => IsUs(icao) && !ClassB.Contains(icao);
+}
