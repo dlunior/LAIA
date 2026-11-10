@@ -57,18 +57,44 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     public List<TrafficAircraft> Snapshot()
     {
         var sim = state.Sim;
-        var list = new List<TrafficAircraft>();
         lock (_gate)
         {
+            var drawn = DrawnIds();
+            var list = new List<TrafficAircraft>();
             foreach (var w in Worlds())
                 foreach (var f in w.Flights)
-                {
-                    var a = ToAircraft(w, f);
-                    if (sim is not null && sim.Connected && Geo2.DistanceNm(sim.Lat, sim.Lon, a.Lat, a.Lon) > 25) continue;
-                    list.Add(a);
-                }
+                    if (drawn is null || drawn.Contains(f.Id)) list.Add(ToAircraft(w, f));
+            return list;
         }
-        return list;
+    }
+
+    /// <summary>Most aircraft drawn in the sim at once (MSFS slows down with many AI objects).</summary>
+    private const int MaxDrawn = 50;
+    private const double DrawRadiusNm = 40, DrawBandFt = 10000;
+
+    /// <summary>
+    /// Which simulated flights are drawn in the sim (null = all, when MSFS isn't connected): airborne traffic within
+    /// 40 nm and 10,000 ft above or below the user; ground traffic at the airports within 40 nm (the user's field
+    /// with its gates and taxiing, neighbours on their runways). At most 50, nearest first — ground traffic close to
+    /// the user and aircraft near the user's level win over distant ones.
+    /// </summary>
+    private HashSet<string>? DrawnIds()
+    {
+        var sim = state.Sim;
+        if (sim is null || !sim.Connected || DateTime.UtcNow - state.SimUpdatedUtc > TimeSpan.FromSeconds(30)) return null;
+        var cands = new List<(string id, double score)>();
+        foreach (var w in Worlds())
+            foreach (var f in w.Flights)
+            {
+                if (f.Done) continue;
+                var (lat, lon) = w.Apt.Map.ToLatLon(f.Pos);
+                var nm = Geo2.DistanceNm(sim.Lat, sim.Lon, lat, lon);
+                if (nm > DrawRadiusNm) continue;
+                var dz = Math.Abs(f.AltFt - sim.AltitudeFt);
+                if (!f.OnGround && dz > DrawBandFt) continue;
+                cands.Add((f.Id, nm + dz / 2000));
+            }
+        return cands.OrderBy(c => c.score).Take(MaxDrawn).Select(c => c.id).ToHashSet();
     }
 
     private IEnumerable<TrafficWorld> Worlds()
@@ -100,7 +126,6 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
 
     // ------------------------------------------------------------------ the live map (control page)
 
-    private const double DrawRadiusNm = 25;
 
     /// <summary>Everything the live map shows: the user, every simulated flight (drawn in the sim or not), runways in use.</summary>
     public object MapData(bool withSky = false)
@@ -111,12 +136,13 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         {
             var w = _world;
             var flights = new List<object>();
+            var drawnIds = DrawnIds();
             foreach (var wd in Worlds())
                 foreach (var f in wd.Flights)
                 {
                     if (f.Done) continue;
                     var (lat, lon) = wd.Apt.Map.ToLatLon(f.Pos);
-                    var drawn = !live || Geo2.DistanceNm(sim!.Lat, sim.Lon, lat, lon) <= DrawRadiusNm;
+                    var drawn = drawnIds is null || drawnIds.Contains(f.Id);
                     flights.Add(new
                     {
                         id = f.Id, cs = f.Callsign, type = f.Type, airline = f.Airline, kind = f.Kind, phase = f.Phase,
