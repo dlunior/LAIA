@@ -231,6 +231,21 @@ airport the user is at) must be as close to the real world as possible:
   3. Holding as the last resort.
 - **The plan is frozen** as aircraft get close, so nobody is re-sequenced on final.
 
+**Constant monitoring, with speed as the main tool (the user's decision, 9 Nov 2026).** As at a real facility, every arrival's spacing is measured and predicted all the time, and corrected as it drifts. Speed control is the controller's primary tool.
+- **Re-measured every update (every few seconds), for every pair of aircraft in the sequence:**
+  - the current gap,
+  - the predicted gap at the runway threshold, allowing for compression (the leader slows to its approach speed first),
+  - the predicted runway occupancy of the aircraft ahead.
+- **The gap needed at the threshold** = wake or radar spacing (CWT or 3 nm), or the leader's runway occupancy time plus a margin, whichever is larger, plus a small buffer.
+- **Speed corrections are made early and often, in 10-kt steps** (7110.65 5-7-2 uses 10-knot increments): "reduce speed to 190", "increase to 210", "maintain 180 until FIXXX", "170 to a 5-mile final". In the terminal area an arrival may typically get several speed instructions. A new one is given as soon as the predicted gap drifts beyond a small tolerance, with enough lead to work within the energy rules.
+- **Speeds stay within the rules:** 7110.65 5-7 minimum speeds, nothing inside 5 miles or the final approach fix, the maximum speed at the final approach fix, and the energy model (no slowing in a dive).
+- **Then vectors:** when speed can't fix it, a vector, a longer downwind or a later base, and a rejoin.
+- **Then an early break-off** (around 6–10 miles, before final) if the threshold gap is still predicted to be too small: "turn left heading 270, climb and maintain 3,000, I'll bring you back around". That's calmer and more realistic than a go-around at half a mile.
+- **Holding** only when the whole flow is over capacity.
+- **Go-arounds are a last resort, and rare,** for things that can't be predicted (a slow runway exit, a gust).
+- **Runway occupancy:** the leader picks the first suitable exit (high-speed exits when traffic is close behind), and the exit choice counts in the predicted occupancy time.
+- **The landing rule stays 7110.65 3-10-3:** an airliner may not cross the threshold until the aircraft ahead has cleared the runway, or has departed and crossed the runway end. The reduced distances apply only to small aircraft. Landing clearance may be anticipated (3-10-6) when the separation will exist in time.
+
 **A sequence that is dynamic but stable (the user's decision, 9 Nov 2026).** The sequence keeps adapting to reality
 (winds, delays, a slow climber, the user), but it must not churn so much that aircraft keep needing new instructions.
 - **Modelled on real arrival managers.** Researched 9 Nov 2026: FAA TBFM, and the MAESTRO arrival manager used on VATSIM.
@@ -247,7 +262,7 @@ airport the user is at) must be as close to the real world as possible:
   - **Rescheduling everyone ("rippling") is avoided** once metering is running, as TBFM guidance says.
 - **Unstable, the order may still change,** but two aircraft only swap places if it saves real delay (at least about a minute in total), and an aircraft changes position at most a couple of times.
 - **Stable onward, the order is fixed.** A landing time moves by at most about 30 s per update.
-- **Instructions:** each aircraft gets a new speed or vector at most every 3–5 minutes, except for safety (a real loss of spacing). One clear plan per aircraft (for example "210 knots until DIXIE", or "turn left heading 240, expect direct CAMRN in 10 miles") rather than constant nudges.
+- **Instructions:** speeds are adjusted as often as the monitoring needs (see above), in clear 10-knot steps with lead time, never as a stream of tiny nudges. Route changes (vectors and their rejoin) are rarer, at most every 3–5 minutes per aircraft, except for safety. Each comes as one clear plan ("turn left heading 240, expect direct CAMRN in 10 miles").
 - **The user gets no priority: a sequence is a sequence (the user's decision).** The user is sequenced like any other flight, in the normal order (by predicted arrival, with wake and runway rules), so others don't always yield to them.
 - **The user's slot is the most stable,** because the user can't react as instantly as an AI. Once set, it is only moved for a real reason: the user being well off their prediction, or a go-around.
 - **Delay for the user is speed control first, then a small vector or extended downwind. A hold for the user is extremely rare,** only when nothing else can make the spacing. The AI flights take the holds.
@@ -274,6 +289,13 @@ The user's words (9 Nov 2026): radar vectors matter more for realism than the gr
 - If needed, the pattern is tightened or flown on the other side of the airport rather than crossing them.
 
 **On the map:** the airport envelopes, and any predicted cross-airport conflict and how it was solved, can be switched on as layers.
+
+### Step 2e: Smoother ground turns (can be done any time; planned with M1)
+- **Easing curves:** the turn rate builds and unwinds gradually at the start and end of each turn, like a pilot feeding in nosewheel steering, instead of jumping straight to full curvature.
+- **Radius by turn:** set by the angle of the turn, the aircraft's size and the real taxiway fillet, not a fixed 40 m.
+- **Slow before the corner:** slowing finished on the straight, then a steady speed through the turn.
+- **Oversteer on big jets:** the main gear tracks the centreline and the nose swings wide outside it (judgmental oversteering).
+- **A light heading smoothing** in LAIA Sim as the final polish.
 
 ### Step 2b: The live map (on the control page)
 An interactive map on the ATC PC's control page, which works from any PC, tablet or phone on the home network.
@@ -446,7 +468,7 @@ Status key: **Next**, **Planned**, **Done**.
 | # | Milestone | Builds | How the user tests it | Done when |
 |---|---|---|---|---|
 | **M0** | **Check 0.1.51 at LGA** (**Done**, 9 Nov 2026: fine apart from the runway pair not being re-picked when the traffic level changed, fixed in 0.1.52) | Nothing new; read the logs | Fly or sit at LGA in Normal or Busy for 30–60 min, then say "check the logs" | The runway pair is sensible (e.g. land 22, depart 13); no "not stable" go-arounds; holds or 360s only when needed; nothing stuck; departure spacing looks real |
-| **M1** | **Energy-correct flying** (**Next**) | The energy model (descending and slowing compete), planned descents with level-off and slowdown points, flap and gear schedules, the maximum speed at the final approach fix, holding at 265 kt above 14,000 ft with 1.5-minute legs | Watch arrivals into LGA: they level off to slow, slow mostly on level pieces and on the localizer before the glideslope, and never slow while diving. The log shows each arrival's descent plan | Offline checks: no arrival slows faster than the model allows; every arrival is stable at 1,000 ft; FAF speeds fit the formula |
+| **M1** | **Energy-correct flying** (**Next**) | Smoother ground turns (step 2e), the predicted gap at the threshold with runway occupancy, early break-offs instead of late go-arounds, and the energy model (descending and slowing compete), planned descents with level-off and slowdown points, flap and gear schedules, the maximum speed at the final approach fix, holding at 265 kt above 14,000 ft with 1.5-minute legs | Watch arrivals into LGA: they level off to slow, slow mostly on level pieces and on the localizer before the glideslope, and never slow while diving. The log shows each arrival's descent plan | Offline checks: no arrival slows faster than the model allows; every arrival is stable at 1,000 ft; FAF speeds fit the formula |
 | **M2** | **Live map, first version** | Map page on the control site: the three colours (drawn, user, simulated), click an aircraft for details, SID/STAR/approach overlay, runways in use, the 40 nm drawing ring | Open the control page on a tablet or PC while flying | Every drawn aircraft shows in the right place; clicking shows its route and procedure. This map is then the test tool for everything after it. |
 | **M3** | **The whole sky, the network layer** | All AIG schedules read at once; every scheduled flight moving logically (gate, climb, cruise, descent, landed); the three layers with smooth hand-over between them; the drawing rules (gates and ground at the user's fields only, runway-only at neighbours, airborne within 40 nm and ±10,000 ft, object cap with priorities) | Map: thousands of simulated flights across the region. In the sim: neighbouring-field traffic appears on their runways only, and TCAS and the ND show traffic out to 40 nm | Sim PC frame rate unchanged; no pop-in inside view; the object cap is respected |
 | **M4** | **The airspace layer and prediction** | Full flight paths from about 200 nm (cruise, top of descent, STAR, approach), departures climbing out, every airport in the TRACON active (JFK, EWR, satellites around LGA), ETAs at fixes and runways | Map: ETAs on every inbound. The log compares each landing's predicted and actual times | Predictions within about 1–2 min from 30 min out, and within about 30 s from 10 min out |
