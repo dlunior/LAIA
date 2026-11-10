@@ -168,7 +168,11 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                         var (la, lo2) = wd.Apt.Map.ToLatLon(path.At(l.S).p);
                         return new { lat = la, lon = lo2, kt = l.Kt };
                     }).ToList();
-                    return new { id = f.Id, cs = f.Callsign, route = f.Route, ground = f.OnGround, points = pts, limits };
+                    // Where it has been, ending at where it is now.
+                    var flown = f.Trail.Select(t => { var (la, lo) = wd.Apt.Map.ToLatLon(t.P); return new[] { Math.Round(la, 6), Math.Round(lo, 6) }; }).ToList();
+                    var (nla, nlo) = wd.Apt.Map.ToLatLon(f.Pos);
+                    flown.Add(new[] { Math.Round(nla, 6), Math.Round(nlo, 6) });
+                    return new { id = f.Id, cs = f.Callsign, route = f.Route, ground = f.OnGround, points = pts, flown, limits };
                 }
         }
         return null;

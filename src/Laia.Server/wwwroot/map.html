@@ -63,6 +63,8 @@
       <span><i class="sw" style="background:var(--warn)"></i>You</span>
       <span><i class="sw" style="background:var(--accent)"></i>Drawn in the sim</span>
       <span><i class="sw" style="background:var(--sim)"></i>Simulated, not drawn</span>
+      <span title="Click an aircraft"><i style="display:inline-block;width:16px;border-top:2px solid var(--warn)"></i>Flown</span>
+      <span title="Click an aircraft"><i style="display:inline-block;width:16px;border-top:2px dashed #fff"></i>Upcoming</span>
     </div>
     <div class="toggles">
       <label><input type="checkbox" id="tRing" checked>Drawing range</label>
@@ -218,7 +220,9 @@ async function drawPath(force) {
     const p = await r.json();
     if (p.id !== selected) return;
     layers.sel.clearLayers();
-    L.polyline(p.points, { color: "#ffffff", weight: p.ground ? 3 : 2.5, opacity: .9, dashArray: p.ground ? null : "8 6" }).addTo(layers.sel);
+    // Flown: solid amber line behind it. Upcoming: dashed white line ahead.
+    if (p.flown && p.flown.length > 1) L.polyline(p.flown, { color: "#fbbf24", weight: p.ground ? 3 : 2.5, opacity: .85 }).addTo(layers.sel);
+    L.polyline(p.points, { color: "#ffffff", weight: p.ground ? 3 : 2.5, opacity: .9, dashArray: "8 6" }).addTo(layers.sel);
     for (const l of p.limits || [])
       L.circleMarker([l.lat, l.lon], { radius: 4, color: COLORS.user, weight: 2, fillOpacity: .3 }).addTo(layers.sel)
         .bindTooltip(`≤ ${Math.round(l.kt)} kt`, { permanent: true, direction: "top", offset: [0, -4], className: "lim-label" });

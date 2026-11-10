@@ -69,6 +69,8 @@ public sealed class Flight
     public string? Brand;                   // the airline whose flight it is (DAL for a Delta Connection flight), when known
     public bool UserIsObstacle;
     public char Wake => _wake ??= Cwt.For(Type, P);
+    /// <summary>Where it has been (for the live map): position, altitude and time, every few seconds.</summary>
+    public readonly List<(V2 P, double AltFt, double T)> Trail = new();
     private char? _wake;
     /// <summary>Published speed limits along the path: distance along the path of the fix, and the limit (kt).</summary>
     public List<(double S, double Kt)> SpeedLimits = new();
@@ -276,7 +278,7 @@ public sealed class TrafficWorld
         foreach (var f in Flights.ToList())
         {
             if (f.Done) continue;
-            try { Advance(f, dt); }
+            try { Advance(f, dt); RecordTrail(f); }
             catch (Exception ex) { Log($"{f.Callsign}: {ex.Message}; removed"); f.Done = true; }
         }
         foreach (var f in Flights.Where(f => f.Done && f.Spot is not null)) f.Spot = null;
@@ -563,6 +565,17 @@ public sealed class TrafficWorld
         var minSize = pool.Min(s => s.Size);
         pool = pool.Where(s => s.Size == minSize).ToList();
         return pool[Rng.Next(pool.Count)];
+    }
+
+    /// <summary>Breadcrumbs of where each flight has been: every 2 s on the ground, every 5 s in the air, the last ~40 minutes.</summary>
+    private void RecordTrail(Flight f)
+    {
+        if (f.Phase is "parked" or "boarding") return;
+        var every = f.OnGround ? 2.0 : 5.0;
+        if (f.Trail.Count > 0 && Time - f.Trail[^1].T < every) return;
+        if (f.Trail.Count > 0 && (f.Trail[^1].P - f.Pos).Length < 1 && f.OnGround) return;
+        f.Trail.Add((f.Pos, f.AltFt, Time));
+        if (f.Trail.Count > 900) f.Trail.RemoveRange(0, f.Trail.Count - 900);
     }
 
     private string NewId() => $"{Apt.Icao}{_nextId++:000}";
