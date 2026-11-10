@@ -375,6 +375,19 @@ LAIA must notice quickly when the real airport changes flow, and switch over log
 - **The sequence is rebuilt once,** for the new configuration. The stability rules still apply.
 - **Sectors and frequencies follow** if the change moves which corridors feed which runway.
 
+**Which approach is in use (the user's note, 10 Nov 2026; researched).** At airports with close neighbours, the
+approach is tied to the neighbours' flows, and the alternatives are never used interchangeably. LaGuardia runway 31:
+- The **RNAV X 31** (from the southwest via VARAZ or GGREG, then PACHU, with turns in its visual segment) lets N90 run 31 as a straight-in while JFK is on an east flow at the same time. It also gives a repeatable, noise-friendly track (FAA procedure package).
+- The **RNAV Y 31** (from the east via GEMKE) was created in 2019 so JFK wouldn't be forced into a single configuration. The Port Authority's 2018 briefing gave the order of preference for runway 31 then as: Expressway Visual, ILS 4 circle to 31, RNAV 31, LOC 31.
+
+The choice, in order:
+1. **The real ATIS states the approach in use (M11).** Use exactly that for every arrival.
+2. **Linked configurations.** With the whole TRACON simulated (M3/M4), pick the approach consistent with the neighbours' runway configurations (for example, JFK on east flow → LGA 31 via the X).
+3. **Learned (M13).** From real ADS-B tracks, identify which approach was flown (track shape) against the neighbours' configurations at the time, giving a per-airport table.
+4. **One approach at a time,** never a random mix. It changes only with a configuration change, as a planned changeover.
+
+Today (0.1.75) the approach is picked by type preference and whether the arrival's route reaches it, which can mix the X and the Y. That is replaced by the above.
+
 **Telling the user**
 - **Traffic mode (no ATC):** plain notes with lead time:
   - "LGA is changing to land 31 / depart 4"
@@ -462,6 +475,7 @@ around. Airliners can't do that on a taxiway, and a real ground controller never
 - **Sources:** adsb.lol daily history dumps (main source) and the user's OpenSky account for live recording (OAuth2 client `credentials.json`, to be added to LAIA Sim settings).
 - **Learned per airport:**
   - Runway configurations used in each wind.
+  - Which approach is used with which neighbouring-airport configuration (e.g. LGA RNAV X vs Y 31 against JFK's flow).
   - Real approach paths and vector patterns.
   - **Radar-vector procedures, researched ahead of time.** Many SIDs are "fly runway heading, expect vectors" (LaGuardia's LGA departure, for example), and many STARs end in vectors with no joining point to an approach. For those, LAIA learns from real previous flights (ADS-B tracks) where they actually go:
     - **Departures:** the headings, turn points and climb at each altitude after takeoff, per runway and per departure fix or direction, until they join their route.
