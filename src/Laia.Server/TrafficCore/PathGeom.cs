@@ -42,7 +42,12 @@ public sealed class PathGeom
     /// <param name="pts">Points to pass (duplicates are dropped).</param>
     /// <param name="radius">Turn radius wanted at corner i (metres).</param>
     /// <param name="lateralAccel">For curve speed limits (m/s²).</param>
-    public PathGeom(IList<V2> pts, Func<int, double> radius, double lateralAccel)
+    /// <param name="ease">
+    /// Ease into and out of each turn (for taxiing): the turn tightens gradually from straight to its full radius and
+    /// unwinds the same way, like a pilot feeding in and taking off nosewheel steering — the transition curve roads and
+    /// railways use, instead of going from straight to full turn in an instant.
+    /// </param>
+    public PathGeom(IList<V2> pts, Func<int, double> radius, double lateralAccel, bool ease = false)
     {
         var p = new List<V2>();
         var map = new List<int>(); // input index -> kept index
@@ -67,7 +72,7 @@ public sealed class PathGeom
             turn[i] = th;
             var origIndex = map.IndexOf(i);
             var r = Math.Max(1, radius(origIndex < 0 ? i : origIndex));
-            var tanHalf = Math.Tan(th * Math.PI / 360);
+            var tanHalf = ease ? EasedTangent(th) : Math.Tan(th * Math.PI / 360);
             t[i] = r * tanHalf;
             rad[i] = r;
         }
@@ -78,7 +83,7 @@ public sealed class PathGeom
             var maxIn = i - 1 == 0 ? lin * 0.95 : lin * 0.5;
             var maxOut = i + 1 == p.Count - 1 ? lout * 0.95 : lout * 0.5;
             var tt = Math.Min(t[i], Math.Min(maxIn, maxOut));
-            if (tt < t[i]) { rad[i] = tt / Math.Tan(turn[i] * Math.PI / 360); t[i] = tt; }
+            if (tt < t[i]) { rad[i] = tt / (ease ? EasedTangent(turn[i]) : Math.Tan(turn[i] * Math.PI / 360)); t[i] = tt; }
         }
 
         double s = 0;
@@ -96,21 +101,91 @@ public sealed class PathGeom
                 var dout = (p[i + 1] - p[i]).Unit;
                 var right = V2.Cross(dir, dout) < 0;
                 var r = rad[i];
-                var c = cur + (right ? dir.Perp : dir.Perp * -1) * r;
-                var phi0 = (cur - c).Bearing;
-                var sweep = (right ? 1 : -1) * turn[i];
-                var alen = r * turn[i] * Math.PI / 180;
-                _segs.Add(new Arc(s, alen, c, r, phi0, sweep));
-                Curves.Add((s, s + alen, Math.Sqrt(lateralAccel * r)));
-                keptS[i] = s + alen / 2;
-                s += alen;
-                cur = p[i] + dout * t[i];
+                if (ease)
+                {
+                    // A chain of short arcs whose curvature ramps up, holds, and ramps down (a clothoid, piece by piece).
+                    var s0c = s;
+                    var heading = dir;
+                    foreach (var (k, len1) in EasedPieces(turn[i]))
+                    {
+                        var rr = r / k;
+                        var plen = len1 * r;
+                        var c = cur + (right ? heading.Perp : heading.Perp * -1) * rr;
+                        var phi0 = (cur - c).Bearing;
+                        var sweep = (right ? 1 : -1) * plen / rr * 180 / Math.PI;
+                        _segs.Add(new Arc(s, plen, c, rr, phi0, sweep));
+                        s += plen;
+                        cur = c + V2.FromBearing(phi0 + sweep, rr);
+                        heading = V2.FromBearing(heading.Bearing + sweep);
+                    }
+                    Curves.Add((s0c, s, Math.Sqrt(lateralAccel * r)));
+                    keptS[i] = (s0c + s) / 2;
+                    cur = p[i] + dout * t[i];   // the same point the pieces end at (they are built to fit exactly)
+                }
+                else
+                {
+                    var c = cur + (right ? dir.Perp : dir.Perp * -1) * r;
+                    var phi0 = (cur - c).Bearing;
+                    var sweep = (right ? 1 : -1) * turn[i];
+                    var alen = r * turn[i] * Math.PI / 180;
+                    _segs.Add(new Arc(s, alen, c, r, phi0, sweep));
+                    Curves.Add((s, s + alen, Math.Sqrt(lateralAccel * r)));
+                    keptS[i] = s + alen / 2;
+                    s += alen;
+                    cur = p[i] + dout * t[i];
+                }
             }
             else keptS[i] = s;
         }
         Length = s;
         KeptS = keptS;
         PointS = map.Select(k => keptS[k]).ToArray();
+    }
+
+    // ---------------------------------------------------------------- eased turns (for a turn of radius 1)
+    private const int EasePieces = 6;
+
+    /// <summary>The pieces of an eased turn of the given angle at radius 1: (curvature, length).</summary>
+    private static List<(double k, double len)> EasedPieces(double turnDeg)
+    {
+        var th = turnDeg * Math.PI / 180;
+        var q = Math.Min(0.8, th * 0.8);                 // length of each easing spiral (at radius 1); turns q/2 each
+        var list = new List<(double, double)>();
+        for (var j = 0; j < EasePieces; j++) list.Add(((j + 0.5) / EasePieces, q / EasePieces));
+        var mid = th - q;
+        if (mid > 1e-6) list.Add((1.0, mid));
+        for (var j = EasePieces - 1; j >= 0; j--) list.Add(((j + 0.5) / EasePieces, q / EasePieces));
+        // Scale the turn so the pieces add up to exactly the corner's angle.
+        var total = list.Sum(x => x.Item1 * x.Item2);
+        return list.Select(x => (x.Item1, x.Item2 * th / total)).ToList();
+    }
+
+    private static readonly Dictionary<int, double> TangentCache = new();
+
+    /// <summary>
+    /// How far before (and after) the corner an eased turn of radius 1 starts: integrate the pieces from the start
+    /// line and solve where the end lands on the outgoing line (it's symmetric, so both distances are equal).
+    /// </summary>
+    private static double EasedTangent(double turnDeg)
+    {
+        var key = (int)Math.Round(turnDeg * 10);
+        lock (TangentCache)
+            if (TangentCache.TryGetValue(key, out var hit)) return hit;
+        double x = 0, y = 0, a = 0;
+        foreach (var (k, len) in EasedPieces(turnDeg))
+        {
+            var da = k * len;
+            x += (Math.Sin(a + da) - Math.Sin(a)) / k;
+            y += -(Math.Cos(a + da) - Math.Cos(a)) / k;
+            a += da;
+        }
+        var th = turnDeg * Math.PI / 180;
+        // (x, y) = tIn * (1, 0) + tOut * (cos th, sin th)
+        var tOut = y / Math.Sin(th);
+        var tIn = x - tOut * Math.Cos(th);
+        var t = (tIn + tOut) / 2;
+        lock (TangentCache) TangentCache[key] = t;
+        return t;
     }
 
     public (V2 p, double dir, double k) At(double s)

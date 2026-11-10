@@ -834,7 +834,9 @@ public sealed class TrafficWorld
     /// <summary>Builds a taxi path and its runway-crossing stops. route[i] is the node at pts[i + offset].</summary>
     private void SetGroundPath(Flight f, List<V2> pts, List<int>? route, int offset, double radius = 40)
     {
-        f.Path = new PathGeom(pts, _ => radius, 1.0);
+        // Taxi turns sized for the aircraft (about 1.1 × wingspan, 30–60 m) and eased in and out, as pilots steer.
+        var r = Math.Clamp(Math.Max(radius * 0.75, f.P.SpanM * 1.1), 30, 60);
+        f.Path = new PathGeom(pts, _ => r, 1.0, ease: true);
         f.S = 0;
         f.Stops.Clear();
         if (route is null) return;
@@ -1118,7 +1120,42 @@ public sealed class TrafficWorld
         return f;
     }
 
-    private static double Profile(RunwayEnd rwy, double dthNm) => rwy.ElevationFt + 50 + Math.Max(0, dthNm) * 318.4;
+    /// <summary>
+    /// The planned descent (energy model): about 318 ft per nm (3°, the pilots' 3:1), except level pieces where the
+    /// aircraft slows down, because a jet can't slow while descending on a normal path (Airbus / FSF: clean on a 3°
+    /// path it can't decelerate at all). Slowing in level flight takes about 1 nm per 10 kt clean and 12.5 kt per nm
+    /// with approach flaps, so 250→210 levels off for 4 nm at 20 nm out, 210→180 for 2.4 nm at 12 nm and 180→170
+    /// for 0.8 nm at 7 nm; the glidepath is then joined at about 2,000 ft, 6 nm out.
+    /// </summary>
+    private static double Profile(RunwayEnd rwy, double dthNm)
+    {
+        var d = Math.Max(0, dthNm);
+        var level = 0.0;
+        foreach (var (at, from, to) in SlowSteps)
+        {
+            var len = (from - to) / (from > 210 ? 10.0 : 12.5);
+            level += Math.Clamp(d - (at - len), 0, len);
+        }
+        return rwy.ElevationFt + 50 + (d - level) * 318.4;
+    }
+
+    private static readonly (double atNm, double fromKt, double toKt)[] SlowSteps = { (20, 250, 210), (12, 210, 180), (7, 180, 170) };
+
+    /// <summary>
+    /// How fast the aircraft can slow down right now (kt per second), from its configuration and how steeply it is
+    /// descending: in level flight about 10 kt per nm clean, 12.5 with approach flaps, 25 with gear and landing
+    /// flaps (Airbus Flight Operations Briefing Note / FSF ALAR 4.2), minus about 1 kt per nm for every 32 ft per nm
+    /// of descent (a 3° path takes ~10, so clean on a 3° path ≈ 0), plus a little for speedbrakes when in a hurry.
+    /// </summary>
+    private static double DecelRate(Flight f, double targetKt, double aglFt)
+    {
+        double cfg = f.Gear ? 25 : f.Ias <= f.P.MinClean + 2 ? 12.5 : 10;
+        var gs = Math.Max(60, f.Gs);
+        var gradient = -f.Vs * 60 / gs;   // ft per nm of descent (negative when climbing)
+        var brakes = !f.Gear && aglFt > 1000 && f.Ias - targetKt > 10 ? (f.Ias > 250 ? 3.0 : 1.5) : 0;
+        var perNm = cfg + brakes - gradient / 32;
+        return Math.Clamp(perNm * gs / 3600, 0, 1.5);
+    }
 
     /// <summary>The arrival route: STAR, then the approach (or vectors to final), then the runway.</summary>
     private void BuildArrivalPath(Flight f, V2? from)
@@ -1275,14 +1312,88 @@ public sealed class TrafficWorld
     {
         // Typical controller speeds (250 → 210 → 180 → 170 to a 5-mile final), then the aircraft slows to its
         // approach speed on its own: no speed is assigned inside 5 miles (7110.65 5-7-2).
-        double t = d > 20 ? 250 : d > 12 ? 210 : d > 7 ? 180 : d > 5 ? 170 : f.P.Vapp;
-        if (f.P.Family == "turboprop" && d <= 20) t = Math.Min(t, d > 5 ? 170 : f.P.Vapp);
-        t = Math.Max(t, f.P.Vapp);
+        var t = PlannedSpeed(f, d);
         if (f.WentAround) t = Math.Min(t, 200);
         // Published speed limits on the STAR and approach, and 250 knots below 10,000 ft (14 CFR 91.117(a)).
         t = Math.Min(t, ProcedureLimit(f, false));
         if (f.AltFt < 10000) t = Math.Min(t, 250);
         return Math.Max(t, f.P.Vapp);
+    }
+
+    /// <summary>
+    /// The planned speed at a distance from the runway: typical controller speeds, and never faster than the
+    /// aircraft can still slow from in time — approach speed + 10 kt per nm beyond 3 nm (FSF / Airbus: about 10 kt
+    /// per nm on the glidepath, stable by 1,000 ft about 3 nm out). "170 to a 5-mile final" only fits jets whose
+    /// approach speed is 150 kt or more.
+    /// </summary>
+    private static double PlannedSpeed(Flight f, double d)
+    {
+        double t = d > 20 ? 250 : d > 12 ? 210 : d > 7 ? 180 : d > 5 ? 170 : f.P.Vapp;
+        if (f.P.Family == "turboprop" && d <= 20) t = Math.Min(t, d > 5 ? 170 : f.P.Vapp);
+        if (d < 12) t = Math.Min(t, f.P.Vapp + 10 * Math.Max(0, d - 3));
+        return Math.Max(t, f.P.Vapp);
+    }
+
+    /// <summary>Predicted seconds until this arrival crosses the threshold, flying its planned speeds (and the wind on final).</summary>
+    private double EtaToThreshold(Flight f, double dth)
+    {
+        if (dth <= 0) return 0;
+        var hw = f.Rwy is null ? 0 : Wind.Headwind(f.Rwy.Heading);
+        double t = 0;
+        const double step = 0.25;
+        for (var d = dth; d > 0; d -= step)
+        {
+            var v = PlannedSpeed(f, d);
+            if (d > dth - 1.5) v = Math.Min(v, Math.Max(f.Ias, f.P.Vapp));      // it can't be faster than it is now right away
+            if (f.WentAround) v = Math.Min(v, 200);
+            var gs = Wind.Tas(v, Profile(f.Rwy!, d)) - (d < 15 ? hw : hw * 0.5);
+            t += Math.Min(step, d) / Math.Max(60, gs) * 3600;
+        }
+        return t;
+    }
+
+    /// <summary>
+    /// The gap needed at the threshold behind the leader (seconds): the wake or radar spacing at this aircraft's
+    /// final approach groundspeed, or the leader's runway occupancy (about 50 s to land and turn off) plus a margin,
+    /// whichever is larger; more when departures are waiting to go between the arrivals.
+    /// </summary>
+    private double ThresholdGapNeeded(Flight leader, Flight f)
+    {
+        var gs = Math.Max(90, f.P.Vapp - Wind.Headwind(f.Rwy!.Heading));
+        var wake = Cwt.MilesBehind(leader.Wake, f.Wake) / gs * 3600;
+        var occupancy = 50 + 15;
+        var single = DepRwy is null || DepRwy.Runway == f.Rwy.Runway;
+        return Math.Max(wake, occupancy) + 10 + (DeparturesWaiting ? (single ? 70 : 30) : 0);
+    }
+
+    /// <summary>
+    /// Breaking off an approach early (5–12 nm out) when the gap at the threshold is predicted to be too small and
+    /// speed can no longer fix it (no speed adjustments inside 5 nm, 7110.65 5-7-2): a turn away from final at the
+    /// same altitude, then vectors back around — calmer and more realistic than a go-around at half a mile.
+    /// </summary>
+    private void BreakOff(Flight f, string why)
+    {
+        var rwy = f.Rwy!;
+        var (p, dir, _) = f.Path!.At(f.S);
+        var nm = Geo2.MPerNm;
+        var left = new V2(-rwy.Dir.Y, rwy.Dir.X);
+        var side = rwy.Offset(p) >= 0 ? 1.0 : -1.0;              // break off to the side it's already on
+        var outPt = p + left * (side * 4 * nm) - rwy.Dir * (4 * nm);
+        var heading = (outPt - p).Bearing;
+        Log($"{f.Callsign}: breaking off the approach for spacing ({why}): turn {(V2.Cross(V2.FromBearing(dir), outPt - p) > 0 ? "left" : "right")} heading {heading:000}, vectors back around");
+        f.LastOrbit = Time;
+        var pts = new List<V2> { p, p + V2.FromBearing(dir, 700), outPt };
+        pts.AddRange(Vectors(outPt, rwy));
+        var thrIndex = pts.Count;
+        pts.Add(rwy.Threshold);
+        pts.Add(rwy.FarEnd);
+        f.Path = AirPath(pts, i => i >= thrIndex ? 1 : 200, f.AltFt);
+        f.ThrS = f.Path.PointS[thrIndex];
+        f.S = 0;
+        f.SpeedLimits.Clear();
+        f.LandingChecked = false;
+        f.StableChecked = false;
+        if (f.Phase == "final") f.SetPhase("approach", Time);
     }
 
     internal void GoAround(Flight f, string why)
@@ -1346,13 +1457,13 @@ public sealed class TrafficWorld
     {
         var path = f.Path!;
         var (p, dir, _) = path.At(f.S);
-        Log($"{f.Callsign}: holding for spacing ({why}), {(f.Ias > 0 ? Math.Min(f.Ias, f.AltFt <= 6000 ? 200 : 230) : 200):0} kt, right turns");
+        Log($"{f.Callsign}: holding for spacing ({why}), {(f.Ias > 0 ? Math.Min(f.Ias, f.AltFt <= 6000 ? 200 : f.AltFt <= 14000 ? 230 : 265) : 200):0} kt, right turns");
         f.LastHold = Time;
         f.LastOrbit = Time;
-        var holdKt = Math.Min(f.Ias, f.AltFt <= 6000 ? 200 : 230);
+        var holdKt = Math.Min(f.Ias, f.AltFt <= 6000 ? 200 : f.AltFt <= 14000 ? 230 : 265);
         var v = Wind.Tas(holdKt, f.AltFt) * Kt;
         var r = Math.Max(1500, v * v / (G * Math.Tan(25 * Math.PI / 180)));
-        var leg = Math.Max(2 * Geo2.MPerNm, v * 60);
+        var leg = Math.Max(2 * Geo2.MPerNm, v * (f.AltFt <= 14000 ? 60 : 90));   // 1-minute legs at or below 14,000 ft, 1.5 above
         var c = V2.FromBearing(dir);
         var right = V2.FromBearing(dir + 90);
         var pts = new List<V2> { p };
@@ -1778,25 +1889,32 @@ public sealed class TrafficWorld
             }
             if (leader is not null && !leader.OnGround)
             {
+                // Measured and predicted all the time: the gap now, and the predicted gap when each crosses the
+                // threshold (compression: the leader slows to its approach speed first), against the gap needed there.
                 var gap = dth - leaderD;
-                // Wake turbulence (CWT) or radar minimum, a little margin, and room for departures when they're waiting
-                // (a full gap on a single runway, a shorter one when they leave from a crossing runway).
-                var single = DepRwy is null || DepRwy.Runway == rwy.Runway;
-                var need = Cwt.MilesBehind(leader.Wake, f.Wake) + (DeparturesWaiting ? (single ? 3.0 : 1.5) : 1.0);
-                // Speed for spacing, never below what a controller may assign (7110.65 5-7-3: jets 210 kt below
-                // 10,000 ft, 170 kt within 20 miles; turboprops 200 / 150) and never inside 5 miles (5-7-2).
-                if (gap < need && dth > 5)
+                var gapSec = EtaToThreshold(f, dth) - EtaToThreshold(leader, leaderD);
+                var needSec = ThresholdGapNeeded(leader, f);
+                var needNm = Cwt.MilesBehind(leader.Wake, f.Wake);
+                // Speed first (7110.65 5-7-1), never below what a controller may assign (5-7-3: jets 210 kt below
+                // 10,000 ft, 170 kt within 20 miles; turboprops 200 / 150), never inside 5 miles (5-7-2), in 5-kt steps.
+                if ((gapSec < needSec || gap < needNm + 0.5) && dth > 5)
                 {
                     var jet = f.P.Family != "turboprop";
                     var floor = dth > 20 ? (jet ? 210 : 200) : (jet ? 170 : 150);
-                    target = Math.Min(target, Math.Max(Math.Max(floor, f.P.Vapp), leader.Ias - 15));
+                    var want = Math.Max(Math.Max(floor, f.P.Vapp), Math.Min(target, leader.Ias - 10));
+                    target = Math.Min(target, Math.Round(want / 5) * 5);
                 }
-                // Too close to fix with speed: hold (far out) or a 360° turn (closer in), as a controller would.
-                if (gap < need - 1.5 && dth > 15 && Time - f.LastHold > 300 && Time - f.LastOrbit > 120) { Hold(f, $"{gap:0.0} nm behind {leader.Callsign}"); return; }
-                if (gap < need - 1.5 && dth > 7 && dth <= 15 && Time - f.LastOrbit > 240) { Orbit(f, $"{gap:0.0} nm behind {leader.Callsign}"); return; }
+                // Speed can't make it: hold (far out), a 360 (12–15 nm) or an early break-off (5–12 nm), as a controller would.
+                var short_ = needSec - gapSec;
+                var tooClose = gap < needNm - 0.5;
+                if ((short_ > 45 || tooClose) && dth > 15 && Time - f.LastHold > 300 && Time - f.LastOrbit > 120) { Hold(f, $"{gap:0.0} nm behind {leader.Callsign}, {short_:0} s short at the runway"); return; }
+                if ((short_ > 45 || tooClose) && dth > 12 && dth <= 15 && Time - f.LastOrbit > 240) { Orbit(f, $"{gap:0.0} nm behind {leader.Callsign}"); return; }
+                if ((short_ > 40 || tooClose) && dth > 5 && dth <= 12 && Time - f.LastOrbit > 240) { BreakOff(f, $"{gap:0.0} nm behind {leader.Callsign}, {short_:0} s short at the runway"); return; }
             }
             if (f.Phase == "flare") target = f.P.Vapp - 5;
-            f.Ias += Math.Clamp(target - f.Ias, -1.0 * dt, 1.5 * dt);
+            // Energy: it slows only as fast as its configuration and descent allow (descend OR slow, not both).
+            if (target < f.Ias) f.Ias -= Math.Min(f.Ias - target, DecelRate(f, target, agl) * dt);
+            else f.Ias += Math.Min(target - f.Ias, 1.5 * dt);
             if (dth < 6.5 || agl < 2200) f.Gear = true;
 
             double vsTarget;
@@ -1813,6 +1931,9 @@ public sealed class TrafficWorld
                 // Below the descent path (after a go-around, or vectored in low): level off until the path comes down
                 // to meet the aircraft, as pilots do, rather than carry on descending.
                 vsTarget = Math.Clamp(glideVs - Math.Clamp(err * 1.5, -6000, 1500), -3000, 0);
+                // Told to slow (or still too fast) outside the final approach: shallow the descent so it can slow
+                // ("descend OR slow down"); it catches up with the path afterwards.
+                if (f.Ias - target > 5 && dth > 6.5 && !f.Gear) vsTarget = Math.Max(vsTarget, -400);
                 f.Vs += Math.Clamp(vsTarget - f.Vs, -500 * dt, 500 * dt);
             }
             f.AltFt += f.Vs / 60 * dt;

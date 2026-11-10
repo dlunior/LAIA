@@ -28,6 +28,29 @@ Console.WriteLine("== Path geometry");
     Check(Math.Abs(path.Length - expectLen) < 2, $"length is right ({path.Length:0} m, expected {expectLen:0})");
 }
 
+Console.WriteLine("== Eased taxi turns");
+{
+    var pts = new List<V2> { new(0, 0), new(0, 300), new(300, 300), new(300, 120), new(420, 0) };
+    var plain = new PathGeom(pts, _ => 40, 1.0);
+    var eased = new PathGeom(pts, _ => 40, 1.0, ease: true);
+    (double jump, double turnRate, double kJump, V2 end) Measure(PathGeom g)
+    {
+        double jump = 0, turn = 0, kj = 0; var (p0, d0, k0) = g.At(0);
+        for (double s = 0.5; s <= g.Length; s += 0.5)
+        {
+            var (p, d, k) = g.At(s);
+            jump = Math.Max(jump, (p - p0).Length); turn = Math.Max(turn, Math.Abs(Geo2.Diff(d0, d)) / 0.5); kj = Math.Max(kj, Math.Abs(k - k0));
+            p0 = p; d0 = d; k0 = k;
+        }
+        return (jump, turn, kj, g.At(g.Length).p);
+    }
+    var mp = Measure(plain); var me = Measure(eased);
+    Console.WriteLine($"  plain: curvature jump {mp.kJump:0.0000}/m, eased: {me.kJump:0.0000}/m; eased largest step {me.jump:0.00} m");
+    Check(me.jump < 0.6, $"eased path is continuous (largest step {me.jump:0.00} m per 0.5 m)");
+    Check(me.kJump < mp.kJump * 0.35, "turns tighten and unwind gradually instead of all at once");
+    Check((me.end - new V2(420, 0)).Length < 0.5, "eased path still ends where it should");
+}
+
 Console.WriteLine("== Wind");
 {
     var w = new Wind(270, 20);
@@ -73,7 +96,7 @@ Console.WriteLine("== One hour of busy traffic, runway 27 in use (wind 270/12)")
     var stuckFlights = new HashSet<string>();
     var prevBank = new Dictionary<string, double>();
     // Rule checks (7110.65, 14 CFR 91.117, AIM).
-    int slowFar = 0, slowNear = 0, speedUpInside5 = 0, fastLow = 0, wakeShort = 0;
+    int slowFar = 0, slowNear = 0, speedUpInside5 = 0, fastLow = 0, wakeShort = 0, slowDive = 0;
     var prevIas = new Dictionary<string, double>();
     var liftoffs = new List<(double t, int rwy, char wake, string cs)>();
     var airborneSeen = new HashSet<string>();
@@ -88,7 +111,10 @@ Console.WriteLine("== One hour of busy traffic, runway 27 in use (wind 270/12)")
                 var dth = (f.ThrS - f.S) / Geo2.MPerNm;
                 var jet = f.P.Family != "turboprop";
                 if (jet && dth > 20.5 && f.AltFt < 10000 && f.Ias < 209) { slowFar++; if (slowFar <= 3) log.Add($"SLOW {f.Callsign} {f.Ias:0} kt at {dth:0.0} nm"); }
-                if (jet && dth > 5.5 && dth <= 20 && f.Ias < Math.Min(169, f.P.Vapp + 30)) { slowNear++; if (slowNear <= 3) log.Add($"SLOW {f.Callsign} {f.Ias:0} kt at {dth:0.0} nm"); }
+                if (jet && dth > 5.5 && dth <= 20 && f.Ias < Math.Min(169, f.P.Vapp + 10 * (dth - 3)) - 3) { slowNear++; if (slowNear <= 3) log.Add($"SLOW {f.Callsign} {f.Ias:0} kt at {dth:0.0} nm"); }
+                // Energy: never slowing while descending steeply in a clean configuration (it can't, in reality).
+                if (prevIas.TryGetValue(f.Id, out var pv) && !f.Gear && f.Vs < 0 && -f.Vs * 60 / Math.Max(60, f.Gs) > 300 && pv - f.Ias > 0.15 * dt * 4)
+                { slowDive++; if (slowDive <= 3) log.Add($"SLOWING IN A DIVE {f.Callsign} {f.Ias:0} kt, {f.Vs:0} fpm at {dth:0.0} nm"); }
                 if (dth < 5 && prevIas.TryGetValue(f.Id, out var pi) && f.Ias > pi + 0.01) speedUpInside5++;
             }
             if (f.Kind == "departure" && !f.OnGround && f.AltFt < 9500 && f.Ias > 251) fastLow++;
@@ -159,6 +185,7 @@ Console.WriteLine("== One hour of busy traffic, runway 27 in use (wind 270/12)")
     Check(!log.Any(l => l.Contains("not stable")), "every arrival is stable by 1,000 ft (AIM 5-4)");
     Check(slowFar == 0, $"no jet slowed below 210 kt beyond 20 miles (7110.65 5-7-3) ({slowFar})");
     Check(slowNear == 0, $"no jet slowed below 170 kt between 5 and 20 miles (7110.65 5-7-3) ({slowNear})");
+    Check(slowDive == 0, $"no arrival slows while diving clean (energy: descend OR slow) ({slowDive})");
     Check(speedUpInside5 == 0, $"no speed changes upward inside 5 miles (7110.65 5-7-2) ({speedUpInside5})");
     Check(fastLow == 0, $"departures stay at or below 250 kt below 10,000 ft (91.117) ({fastLow})");
     for (var i = 1; i < liftoffs.Count; i++)
