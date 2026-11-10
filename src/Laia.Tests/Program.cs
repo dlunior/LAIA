@@ -466,9 +466,9 @@ Console.WriteLine("== Vectored to an approach's own first fix, not a straight-in
 
 Console.WriteLine("== One approach at a time: the ATIS's, or a fixed choice — never a mix (LGA RNAV X vs Y 31)");
 {
-    var atis = TrafficWorld.ParseAtisApproaches("LGA ATIS INFO K 0551Z. 31010KT 10SM FEW250 08/M03 A3012 (THREE ZERO ONE TWO). RNAV X RWY 31 APCH IN USE. DEPG RWY 4. NOTICE TO AIR MISSIONS. ILS RWY 22 OTS. ...ADVS YOU HAVE INFO K.");
+    var atis = AtisParse.Approaches("LGA ATIS INFO K 0551Z. 31010KT 10SM FEW250 08/M03 A3012 (THREE ZERO ONE TWO). RNAV X RWY 31 APCH IN USE. DEPG RWY 4. NOTICE TO AIR MISSIONS. ILS RWY 22 OTS. ...ADVS YOU HAVE INFO K.");
     Check(atis.Count == 1 && atis[0] == ("RNAV", "X", "31"), $"reads the approach in use from the ATIS, not the out-of-service one ({string.Join(", ", atis)})");
-    var atis2 = TrafficWorld.ParseAtisApproaches("EXPECT ILS OR LOC RWY 4 APPROACH. SIMUL APCHS IN USE");
+    var atis2 = AtisParse.Approaches("EXPECT ILS OR LOC RWY 4 APPROACH. SIMUL APCHS IN USE");
     Check(atis2.Count == 1 && atis2[0] == ("ILS", "", "04"), $"\"ILS or LOC runway 4\" is the ILS to 04 ({string.Join(", ", atis2)})");
     var nm = Geo2.MPerNm;
     var data = TestAirport.Build(false);
@@ -507,13 +507,30 @@ Console.WriteLine("== One approach at a time: the ATIS's, or a fixed choice — 
 
 Console.WriteLine("== The real ATIS decides the runways; the wind is only the fallback");
 {
-    string L(List<string> l) => string.Join(",", l);
-    var (l1, d1) = TrafficWorld.ParseAtisRunways("LGA ATIS INFO B. 18008KT. ILS RWY 22 APCH IN USE. DEPG RWY 13. NOTAMS... RWY 4 CLSD.");
-    Check(L(l1) == "22" && L(d1) == "13", $"\"ILS RWY 22 APCH IN USE, DEPG RWY 13\" lands 22, departs 13 ({L(l1)} / {L(d1)})");
-    var (l2, d2) = TrafficWorld.ParseAtisRunways("SIMUL ILS APCHS IN USE. LANDING RWYS 4R, 4L. DEPARTING RWY 4L AND 31L.");
-    Check(L(l2) == "04R,04L" && L(d2) == "04L,31L", $"lists of runways are read ({L(l2)} / {L(d2)})");
-    var (l3, d3) = TrafficWorld.ParseAtisRunways("LDG AND DEPG RWY 31.");
-    Check(L(l3) == "31" && L(d3) == "31", $"\"LDG AND DEPG RWY 31\" ({L(l3)} / {L(d3)})");
+    string L(IEnumerable<string> l) => string.Join(",", l.OrderBy(x => x));
+    // Real texts that broke the FlightSim Route Generator's parser (its lessons learned), plus LaGuardia's.
+    var cases = new (string name, string text, string dep, string arr, string closed)[]
+    {
+        ("LaGuardia", "LGA ATIS INFO B. 18008KT. ILS RWY 22 APCH IN USE. DEPG RWY 13. NOTAMS... RWY 4 CLSD.", "13", "22", ""),
+        ("Denver", "DEN ARR INFO X. DEPG RWY8, RWY17L, RWY25. LDG RWY 3 4 LEFT, RWY 35R.", "08,17L,25", "34L,35R", ""),
+        ("Boston", "BOS ATIS INFO C. RNAV 4L, DEP 4R.", "04R", "04L", ""),
+        ("Charlotte", "CLT DEP INFO D. SIMUL DEPS IN USE, EXPECT 1R, 36.", "01R,36", "", ""),
+        ("Cleveland", "CLE ATIS INFO E. ILS RWY 24R APCH IN USE. DEPG RWY 24L. TWY G2 CLSD BTN RWY, 24L AND RWY 24R.", "24L", "24R", ""),
+        ("Atlanta", "ATL ARR INFO F. APCHS IN USE VIS 8L, ILS 9R, VIS 10. NOTAMS... RWY 9L CLSD.", "", "08L,09R,10", ""),
+        ("San Francisco", "SFO ARR INFO G. VISUAL, RWY 28L, SIMUL, VISUAL, RWY 28R APCH IN USE. RWY 1L/19R CLSD.", "", "28L,28R", "01L,19R"),
+        ("lists", "SIMUL ILS APCHS IN USE. LANDING RWYS 4R, 4L. DEPARTING RWY 4L AND 31L.", "04L,31L", "04L,04R", ""),
+        ("both", "LDG AND DEPG RWY 31.", "31", "31", ""),
+    };
+    foreach (var (name, text, dep, arr, closed) in cases)
+    {
+        var (d, a, c) = AtisParse.Runways(text);
+        Check(L(d) == dep && L(a) == arr && L(c) == closed, $"{name}: departing {L(d)}, landing {L(a)}{(c.Count > 0 ? ", closed " + L(c) : "")}");
+    }
+    var combined = AtisParse.Combine(new[] { ("arr", "K", "RDU ARR INFO K. ILS RWY 23L APCH IN USE."), ("dep", "L", "RDU DEP INFO L. RWY 23R IN USE.") });
+    Check(L(combined.Landing) == "23L" && L(combined.Departing) == "23R" && combined.CodeArr == "K" && combined.CodeDep == "L",
+        $"arrival and departure broadcasts combine (landing {L(combined.Landing)}, departing {L(combined.Departing)}, info {combined.CodeArr}/{combined.CodeDep})");
+    var one = AtisParse.FromText("RDU ATIS INFO M. ILS RWY 5L APCH IN USE.");
+    Check(L(one.Departing) == "05L", "a combined ATIS naming only arrivals uses them for departures too");
     var world = new TrafficWorld(new AirportModel(TestAirport.Build(false)), new TestSource(), seed: 3) { Automatic = false, Wind = new Wind(270, 12) };
     world.SelectRunways(true);
     var byWind = world.ArrRwy?.Ident;

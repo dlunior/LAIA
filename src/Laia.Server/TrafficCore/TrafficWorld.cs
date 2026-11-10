@@ -126,25 +126,24 @@ public sealed class TrafficWorld
     private TrafficLevel _level = TrafficLevel.Normal;
     public RunwayEnd? ArrRwy { get; private set; }
 
-    /// <summary>Approaches the real ATIS says are in use (kind like "ILS"/"RNAV", suffix like "Y", runway), when it could be read.</summary>
-    public List<(string kind, string suffix, string runway)> AtisApproaches { get; set; } = new();
-    /// <summary>Landing and departure runways the real ATIS names (empty when there's no ATIS: then the wind decides).</summary>
-    public List<string> AtisLanding { get; set; } = new();
-    public List<string> AtisDeparting { get; set; } = new();
-    private string? _atisText;
-    /// <summary>The real ATIS text: it decides the runways and the approach; the wind is only the fallback.</summary>
-    public string? AtisText
+    private AtisInfo _atis = new();
+    /// <summary>What the real ATIS says is in use: it decides the runways and the approach; the wind is only the fallback.</summary>
+    public AtisInfo Atis
     {
-        get => _atisText;
+        get => _atis;
         set
         {
-            if (value == _atisText) return;
-            _atisText = value;
-            AtisApproaches = ParseAtisApproaches(value ?? "");
-            (AtisLanding, AtisDeparting) = ParseAtisRunways(value ?? "");
+            value ??= new AtisInfo();
+            if (value.Key == _atis.Key) { _atis = value; return; }
+            _atis = value;
             if (ArrRwy is not null) SelectRunways();
         }
     }
+    /// <summary>Sets the ATIS from one combined broadcast's text.</summary>
+    public string? AtisText { get => _atis.Text; set => Atis = AtisParse.FromText(value); }
+    public List<(string kind, string suffix, string runway)> AtisApproaches => _atis.Approaches;
+    public List<string> AtisLanding => _atis.Landing;
+    public List<string> AtisDeparting => _atis.Departing;
     /// <summary>The one approach every arrival to the landing runway flies (never a mix), e.g. "RNAV Y 31".</summary>
     public string? ApproachInUse { get; private set; }
     private Approach? _app;
@@ -234,25 +233,36 @@ public sealed class TrafficWorld
         if (Apt.Ends.Count == 0) return;
         var usable = Apt.Ends.Where(e => e.LengthM >= 1400).ToList();
         if (usable.Count == 0) usable = Apt.Ends.ToList();
-        bool WindOk(RunwayEnd e) => Wind.Headwind(e.Heading) >= -5 && Crosswind(e.Heading) <= 25;
+        bool WindOk(RunwayEnd e) => Wind.Headwind(e.Heading) >= -5 && Crosswind(e.Heading) <= 20;
+        // Closed runways (from the ATIS) are never used.
+        usable = usable.Where(e => !_atis.Closed.Contains(e.Ident)).ToList();
+        if (usable.Count == 0) return;
         // The real ATIS always decides when it names the runways; the wind is only the fallback.
-        var atisArr = AtisLanding.Select(id => Apt.Ends.FirstOrDefault(e => e.Ident == id)).Where(e => e is not null).Select(e => e!).OrderByDescending(e => e.LengthM).FirstOrDefault();
+        var atisArr = AtisLanding.Where(id => !_atis.Closed.Contains(id)).Select(id => Apt.Ends.FirstOrDefault(e => e.Ident == id)).Where(e => e is not null).Select(e => e!).OrderByDescending(e => e.LengthM).FirstOrDefault();
         if (atisArr is not null)
         {
             var atisDep = AtisDeparting.Select(id => Apt.Ends.FirstOrDefault(e => e.Ident == id)).Where(e => e is not null).Select(e => e!)
                 .OrderBy(e => e.Runway == atisArr.Runway ? 1 : 0).ThenByDescending(e => e.LengthM).FirstOrDefault() ?? atisArr;
             if (ArrRwy != atisArr || DepRwy != atisDep)
-                Log($"Runways in use at {Apt.Icao}: landing {atisArr.Ident}, departing {atisDep.Ident} (from the real ATIS; wind {Wind.FromDeg:000} at {Wind.Kt:0} kt)");
+                Log($"Runways in use at {Apt.Icao}: landing {atisArr.Ident}, departing {atisDep.Ident} (from the real ATIS{(_atis.CodeArr is { } c ? " info " + c : "")}; wind {Wind.FromDeg:000} at {Wind.Kt:0} kt)");
             ArrRwy = atisArr;
             DepRwy = atisDep;
             return;
         }
         RunwayEnd best;
-        if (Wind.Kt < 4 && ArrRwy is not null && !force) best = ArrRwy;
+        if (Wind.Kt < 4 && ArrRwy is not null && usable.Contains(ArrRwy) && !force) best = ArrRwy;
         else if (Wind.Kt < 4) best = usable.OrderByDescending(e => e.LengthM).First();
-        else best = usable.OrderByDescending(e => Math.Round(Wind.Headwind(e.Heading) / 3)).ThenByDescending(e => e.LengthM).First();
+        else
+        {
+            // Like a real tower: the main (longest) runway whenever it's within limits (crosswind 20, tailwind 5),
+            // the end more into the wind; only a shorter runway when the main one is out of limits.
+            var ok = usable.Where(WindOk).ToList();
+            best = ok.Count > 0
+                ? ok.OrderByDescending(e => Math.Round(e.LengthM / 100)).ThenByDescending(e => Wind.Headwind(e.Heading)).First()
+                : usable.OrderByDescending(e => Wind.Headwind(e.Heading)).ThenByDescending(e => e.LengthM).First();
+        }
         // Keep the current runways unless the tailwind on the landing runway gets above 5 knots.
-        if (!force && ArrRwy is not null && Wind.Headwind(ArrRwy.Heading) > -5 && (DepRwy is null || WindOk(DepRwy) || DepRwy == ArrRwy)) return;
+        if (!force && ArrRwy is not null && usable.Contains(ArrRwy) && WindOk(ArrRwy) && (DepRwy is null || WindOk(DepRwy) || DepRwy == ArrRwy)) return;
         var group = usable.Where(e => Math.Abs(Geo2.Diff(e.Heading, best.Heading)) < 25).OrderByDescending(e => e.LengthM).ToList();
         var arr = group[0];
         var dep = group.Skip(1).FirstOrDefault(e => e.Runway != arr.Runway && e.LengthM >= 2000);
@@ -1458,61 +1468,6 @@ public sealed class TrafficWorld
     /// The approaches a D-ATIS text says are in use: "ILS RWY 22 APCH IN USE", "EXPECT RNAV Y RWY 31 APPROACH",
     /// "RNAV (RNP) Z RY 13". Approaches mentioned as out of service are ignored; visual approaches aren't flown yet.
     /// </summary>
-    /// <summary>
-    /// The runways a D-ATIS text puts in use: "LDG RWY 22, DEPG RWY 13", "LANDING RWYS 4L, 4R",
-    /// "DEPARTING RWY 31L AND 31R". When it names only approaches ("ILS RWY 22 APCH IN USE"), their runways are
-    /// the landing runways, and departures use the landing runway unless it names others.
-    /// </summary>
-    public static (List<string> landing, List<string> departing) ParseAtisRunways(string text)
-    {
-        var t = " " + (text ?? "").ToUpperInvariant().Replace('.', ' ') + " ";
-        const string list = @"(\d{1,2}[LRC]?(?:\s*(?:,|AND|&|/)\s*\d{1,2}[LRC]?)*)";
-        List<string> Find(string words)
-        {
-            var found = new List<string>();
-            var rx = new System.Text.RegularExpressions.Regex(@"\b(?:" + words + @")\s+(?:RWYS?|RY|RUNWAYS?)\s*" + list);
-            foreach (System.Text.RegularExpressions.Match m in rx.Matches(t))
-                foreach (System.Text.RegularExpressions.Match r in System.Text.RegularExpressions.Regex.Matches(m.Groups[1].Value, @"\d{1,2}[LRC]?"))
-                {
-                    var id = r.Value;
-                    if (id.Length == 1 || !char.IsDigit(id[1])) id = "0" + id;
-                    if (!found.Contains(id)) found.Add(id);
-                }
-            return found;
-        }
-        const string both = @"(?:LDG|LNDG|LANDING)\s+(?:AND|&)\s+(?:DEPG|DEPTG|DEPARTING)|";
-        var landing = Find(both + "LDG|LNDG|LANDING|LAND|ARRIVALS?|ARRS?|ARVNG|ARRIVING");
-        var departing = Find(both + "DEPG|DEPTG|DEPARTING|DEPARTURES?|DEPS?|DEPTS?");
-        if (landing.Count == 0)
-        {
-            foreach (var a in ParseAtisApproaches(text ?? "")) if (!landing.Contains(a.runway)) landing.Add(a.runway);
-            var vis = System.Text.RegularExpressions.Regex.Match(t, @"\bVISUAL\s+(?:APCH|APPROACH)(?:ES)?\s+(?:RWYS?|RY|RUNWAY)\s*(\d{1,2}[LRC]?)");
-            if (landing.Count == 0 && vis.Success) { var id = vis.Groups[1].Value; landing.Add(id.Length == 1 || !char.IsDigit(id[1]) ? "0" + id : id); }
-        }
-        return (landing, departing);
-    }
-
-    public static List<(string kind, string suffix, string runway)> ParseAtisApproaches(string text)
-    {
-        var list = new List<(string, string, string)>();
-        var t = " " + (text ?? "").ToUpperInvariant().Replace('.', ' ').Replace(',', ' ') + " ";
-        var rx = new System.Text.RegularExpressions.Regex(@"\b(ILS|LOC|RNAV|RNP|GPS|VOR|LDA)\b(?:\s+OR\s+LOC(?:/DME)?)?\s*(?:\((?:GPS|RNP)\)\s*)?(?:([XYZ])\s+)?(?:RWY|RY|RUNWAY|RWYS)\s*(\d{1,2}[LRC]?)\b");
-        foreach (System.Text.RegularExpressions.Match m in rx.Matches(t))
-        {
-            var a = Math.Max(0, m.Index - 25);
-            var b = Math.Min(t.Length, m.Index + m.Length + 30);
-            var around = t[a..b];
-            var after = t[(m.Index + m.Length)..Math.Min(t.Length, m.Index + m.Length + 25)];
-            if (after.Contains(" OTS") || after.Contains("OUT OF SERVICE") || after.Contains(" U/S") || after.Contains("UNUSABLE") || after.Contains("NOT AVBL")) continue;
-            if (!(around.Contains("APCH") || around.Contains("APPROACH") || around.Contains("EXPECT") || around.Contains(" EXP ") || around.Contains("IN USE") || around.Contains(" APP "))) continue;
-            var rwy = m.Groups[3].Value;
-            if (rwy.Length == 1 || (rwy.Length == 2 && !char.IsDigit(rwy[1]))) rwy = "0" + rwy;
-            var e = (m.Groups[1].Value, m.Groups[2].Value, rwy);
-            if (!list.Contains(e)) list.Add(e);
-        }
-        return list;
-    }
-
     /// <summary>
     /// Ends an approach's points before the runway: at the runway fix (RWxx) if it has one, else drops the trailing
     /// points that lie past the threshold. Points past the threshold earlier in the route are kept — a transition can

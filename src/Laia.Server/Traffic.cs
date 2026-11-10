@@ -235,6 +235,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 layout = w is null ? null : $"{w.Apt.Spots.Count} parking spots, {w.Apt.Data.Departures.Count} SIDs, {w.Apt.Data.Arrivals.Count} STARs, {w.Apt.Data.Approaches.Count} approaches",
                 landing = w?.ArrRwy?.Ident,
                 approach = w?.ApproachInUse,
+                atis = w?.Atis.CodeArr is { } code ? $"real ATIS info {code}" : w is null ? null : "no ATIS: runways from the wind",
                 departing = w?.DepRwy?.Ident,
                 airportsOnFile = airports.Count,
                 catalog = source.HasCatalog,
@@ -373,8 +374,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                             // The installed AIG schedule is the real one to follow (exact models and registrations).
                             if (w.Schedule is null) w.Schedule = schedules.Get(w.Apt.Icao);
                             w.Gates = source.Gates(w.Apt.Icao);
-                            Atis.Approaches(w.Apt.Icao); // keeps the ATIS fresh
-                            w.AtisText = Atis.Text(w.Apt.Icao);
+                            w.Atis = Atis.Get(w.Apt.Icao);
                         }
                         w.WeekMinute = live && sim!.ZuluWeekMinute >= 0 ? sim.ZuluWeekMinute : WeekMinuteNow();
                         // Don't run traffic while nobody is flying (sim closed): it would all depart unseen.
