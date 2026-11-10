@@ -188,6 +188,7 @@ internal sealed class SimLink : IDisposable
                             _airports.Request(reply.NeedAirports, server.BaseUrl, snap.Simulator, ct);
                             if (reply.NeedCatalog && _catalog is { } cat) _ = SendCatalogAsync(server.BaseUrl, cat, ct);
                             if (_catalog is { } cat2) _schedules.Request(reply.NeedSchedules, server.BaseUrl, cat2, ct);
+                            if (reply.NeedNetwork && _catalog is { } cat3) _schedules.RequestNetwork(server.BaseUrl, cat3, ct);
                         }
                     }
                 }

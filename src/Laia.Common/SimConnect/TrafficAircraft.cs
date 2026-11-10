@@ -41,4 +41,6 @@ public sealed class SimStateReply
     public List<string>? NeedSchedules { get; set; }
     /// <summary>True when the server wants the list of installed AI models again.</summary>
     public bool NeedCatalog { get; set; }
+    /// <summary>True when the server wants every AIG schedule (the whole sky), not just its airports'.</summary>
+    public bool NeedNetwork { get; set; }
 }

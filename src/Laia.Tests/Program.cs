@@ -515,6 +515,68 @@ Console.WriteLine("== Traffic starts even when no installed model fits the small
     Check(world.Flights.Count > 0, $"aircraft were created ({world.Flights.Count})");
 }
 
+Console.WriteLine("== The whole sky: scheduled flights fly logically between their airports");
+{
+    var apts = new Dictionary<string, (double lat, double lon, double elevFt)?>
+    {
+        ["KJFK"] = (40.6398, -73.7789, 13), ["KLAX"] = (33.9425, -118.4081, 125), ["KLGA"] = (40.7769, -73.8740, 21),
+        ["KBOS"] = (42.3643, -71.0052, 20), ["EGLL"] = (51.4706, -0.4619, 83),
+    };
+    NetLeg Leg(string dep, string arr, string type, int depMin, int block) => new()
+    {
+        Airline = "DAL", Operator = "DAL", Type = type, Reg = "N" + depMin, Flight = "0123", Dep = dep, Arr = arr,
+        DepMin = depMin, ArrMin = (depMin + block) % 10080, Title = "AIG Delta",
+    };
+    var west = Leg("KJFK", "KLAX", "A321", 600, 390);
+    var east = Leg("KLAX", "KJFK", "A321", 600, 330);
+    var hop = Leg("KLGA", "KBOS", "DH8D", 600, 75);
+    var wrap = Leg("KJFK", "EGLL", "B763", 10020, 420);
+    var orphan = Leg("KJFK", "ZZZZ", "A320", 600, 100);
+    var legs = new List<NetLeg> { west, east, hop, wrap, orphan };
+    var placed = NetworkModel.Locate(legs, a => apts.TryGetValue(a, out var p) ? p : null);
+    Check(placed == 4 && !orphan.Located, $"flights between known airports are placed, the rest left out ({placed} of 5)");
+    Check(west.Callsign == "DAL123", "callsign from operator and flight number (DAL123)");
+
+    var mid = NetworkModel.Intermediate(0, 0, 0, 90, 0.5);
+    Check(Math.Abs(mid.lat) < 1e-6 && Math.Abs(mid.lon - 45) < 1e-6, "great-circle midpoint is right");
+
+    Check(NetworkModel.At(west, 590) is null && NetworkModel.At(west, 600 + 391) is null, "not in the sky before departure or after arrival");
+    Check(NetworkModel.At(west, 605) is null && NetworkModel.At(west, 605, includeGround: true)?.Phase == "taxiing out", "taxiing out first, not airborne at the gate time");
+    var wc = NetworkModel.CruiseFt(west); var ec = NetworkModel.CruiseFt(east); var hc = NetworkModel.CruiseFt(hop);
+    Check(wc % 2000 == 0 && ec % 2000 == 1000, $"cruise levels on the right semicircle (westbound FL{wc / 100}, eastbound FL{ec / 100})");
+    Check(hc is >= 9000 and <= 25000, $"turboprop on a short hop cruises low (FL{hc / 100})");
+    var c = NetworkModel.At(west, 600 + 195)!;
+    Check(c.Phase == "cruising" && c.AltFt == wc && c.GsKt is > 330 and < 560, $"mid-flight: cruising at FL{c.AltFt / 100}, {c.GsKt:0} kt");
+
+    // Fly the whole leg a quarter-minute at a time: smooth, starting and ending at the airports.
+    double maxJump = 0, maxRate = 0, endNm = 99, startAlt = 0; NetPos? prev = null; var first = true;
+    for (var t = 600.0; t <= 990; t += 0.25)
+    {
+        var p = NetworkModel.At(west, t);
+        if (p is null) { prev = null; continue; }
+        if (first) { startAlt = p.AltFt; first = false; }
+        if (prev is not null)
+        {
+            maxJump = Math.Max(maxJump, Geo2.DistanceNm(prev.Lat, prev.Lon, p.Lat, p.Lon));
+            maxRate = Math.Max(maxRate, Math.Abs(p.AltFt - prev.AltFt) / 0.25);
+        }
+        endNm = Geo2.DistanceNm(p.Lat, p.Lon, 33.9425, -118.4081);
+        prev = p;
+    }
+    Check(maxJump < 2.6, $"no jumps along the route (largest {maxJump:0.00} nm in 15 s)");
+    Check(maxRate < 5000, $"climbs and descends at airliner rates (steepest {maxRate:0} ft/min)");
+    Check(startAlt < 1500 && endNm < 3, $"takes off from JFK ({startAlt:0} ft) and lands at LAX ({endNm:0.0} nm out at the end)");
+    var w = NetworkModel.At(wrap, 30);
+    Check(w is not null && w.Phase == "cruising", "a flight leaving late Sunday is still flying after the week rolls over");
+
+    using var ms = new MemoryStream();
+    NetworkModel.Write(ms, legs, new DateTime(2026, 11, 9, 12, 0, 0, DateTimeKind.Utc));
+    ms.Position = 0;
+    var (back, read) = NetworkModel.Parse(ms);
+    Check(back.Count == 5 && back[3].DepMin == 10020 && back[3].Type == "B763" && back[0].Flight == "0123" && read.Year == 2026,
+        $"the schedule file reads back the same ({back.Count} flights)");
+}
+
 Console.WriteLine(failures.Count == 0 ? "TRAFFIC CHECKS PASSED" : $"TRAFFIC CHECKS FAILED: {failures.Count}");
 return failures.Count == 0 ? 0 : 1;
 

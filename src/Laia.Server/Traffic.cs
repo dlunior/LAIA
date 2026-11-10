@@ -9,7 +9,7 @@ namespace Laia.Server;
 /// Without a layout (or for the test buttons at an airport not read yet) a simple runway-only world is used.
 /// </summary>
 public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportStore airports, FlightSource source, SettingsStore settings,
-    SimBriefService simbrief, ServerState state, ScheduleStore schedules, ILogger<TrafficEngine> log) : BackgroundService
+    SimBriefService simbrief, ServerState state, ScheduleStore schedules, NetworkStore network, ILogger<TrafficEngine> log) : BackgroundService
 {
     private readonly object _gate = new();
     private TrafficWorld? _world;       // the airport near the user (with layout)
@@ -95,7 +95,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     private const double DrawRadiusNm = 25;
 
     /// <summary>Everything the live map shows: the user, every simulated flight (drawn in the sim or not), runways in use.</summary>
-    public object MapData()
+    public object MapData(bool withSky = false)
     {
         var sim = state.Sim;
         var live = sim is not null && sim.Connected && DateTime.UtcNow - state.SimUpdatedUtc < TimeSpan.FromSeconds(30);
@@ -140,8 +140,48 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 peak = w?.PeakInfo,
                 runways,
                 flights,
+                net = withSky ? NetFlights(w, live ? sim!.Lat : (double?)null, live ? sim!.Lon : null) : null,
+                netStatus = network.Status,
             };
         }
+    }
+
+    private const double NetRadiusNm = 400;
+
+    /// <summary>The rest of the sky: scheduled flights flying logically (not drawn in the sim), around the user or the airport.</summary>
+    private List<object> NetFlights(TrafficWorld? w, double? lat, double? lon)
+    {
+        var list = new List<object>();
+        double clat, clon;
+        if (lat is not null) { clat = lat.Value; clon = lon!.Value; }
+        else if (w is not null) (clat, clon) = w.Apt.Map.ToLatLon(new V2(0, 0));
+        else return list;
+        var exclude = new HashSet<string>(Worlds().Select(x => x.Apt.Icao), StringComparer.OrdinalIgnoreCase);
+        var clock = w?.ScheduleClock ?? WeekMinuteNow();
+        foreach (var p in network.Around(clock, clat, clon, NetRadiusNm, exclude))
+            list.Add(new
+            {
+                id = p.Leg.Id, cs = p.Leg.Callsign, type = p.Leg.Type, airline = p.Leg.Airline, dep = p.Leg.Dep, arr = p.Leg.Arr,
+                lat = Math.Round(p.Lat, 4), lon = Math.Round(p.Lon, 4), alt = Math.Round(p.AltFt / 100) * 100, gs = Math.Round(p.GsKt),
+                hdg = Math.Round(p.Heading), phase = p.Phase, cruise = p.CruiseFt, eta = Math.Round(p.EtaMin), reg = p.Leg.Reg, title = p.Leg.Title,
+            });
+        return list;
+    }
+
+    /// <summary>A network flight's great-circle route: flown so far and still to go.</summary>
+    public object? MapNetPath(string id)
+    {
+        var l = network.Find(id);
+        if (l is null || !l.Located) return null;
+        double clock;
+        lock (_gate) clock = _world?.ScheduleClock ?? WeekMinuteNow();
+        var p = NetworkModel.At(l, clock, includeGround: true);
+        var f = p is null ? 0 : p.FlownNm / l.DistNm;
+        return new
+        {
+            id, dep = l.Dep, arr = l.Arr, distNm = Math.Round(l.DistNm),
+            flown = NetworkModel.Line(l, 0, f), points = NetworkModel.Line(l, f, 1),
+        };
     }
 
     /// <summary>The selected flight's path ahead (and its procedure's speed-limit fixes), for the map overlay.</summary>
@@ -202,6 +242,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                     alt = Math.Round(f.AltFt), gs = Math.Round(f.Gs), gate = f.Spot?.Label, ground = f.OnGround,
                 })).Where(f => f.Kind != "parked").ToList(),
                 parked = Worlds().Sum(x => x.Flights.Count(f => f.Kind == "parked")),
+                sky = network.Count == 0 ? network.Status : $"{network.AirborneNow(w?.ScheduleClock ?? WeekMinuteNow()):N0} flights in the air worldwide · {network.Status}",
             };
         }
     }

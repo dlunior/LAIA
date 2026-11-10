@@ -349,6 +349,8 @@ public sealed class TrafficWorld
     public string? PeakInfo { get; private set; }
 
     /// <summary>The schedule's clock: the real time, or in the peak test the replayed busiest hours.</summary>
+    /// <summary>The schedule clock (minute of the week), shifted during the peak test.</summary>
+    public double ScheduleClock => SchedNow;
     private double SchedNow => ((WeekMinute + _peakOffset) % 10080 + 10080) % 10080;
 
     /// <summary>

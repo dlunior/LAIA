@@ -28,6 +28,9 @@ builder.Services.AddHostedService<RunwayUpdater>();
 builder.Services.AddSingleton<AirportStore>();
 builder.Services.AddSingleton<Updater>();
 builder.Services.AddSingleton<ScheduleStore>();
+builder.Services.AddSingleton<WorldAirports>();
+builder.Services.AddSingleton<NetworkStore>();
+builder.Services.AddHostedService<NetworkUpdater>();
 builder.Services.AddSingleton<FlightSource>();
 builder.Services.AddSingleton<TrafficEngine>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<TrafficEngine>());
@@ -91,7 +94,7 @@ app.MapGet("/api/logs/{name}", (string name) =>
 app.MapGet("/api/status", (ServerState s, FrequencyDb f, SimBriefService sb) => Results.Json(s.Snapshot(FlightInfo(s, f, sb)), jsonOpts));
 
 // LAIA Sim posts the user's aircraft about once a second.
-app.MapPost("/api/sim/state", async (HttpContext ctx, ServerState s, SimBriefService sb, TrafficEngine traffic, FlightSource src) =>
+app.MapPost("/api/sim/state", async (HttpContext ctx, ServerState s, SimBriefService sb, TrafficEngine traffic, FlightSource src, NetworkStore net) =>
 {
     var st = await JsonSerializer.DeserializeAsync<Laia.Common.SimConnect.AircraftState>(ctx.Request.Body, jsonOpts);
     if (st is null) return Results.BadRequest();
@@ -107,11 +110,12 @@ app.MapPost("/api/sim/state", async (HttpContext ctx, ServerState s, SimBriefSer
         try { var sch = traffic.NeededSchedules(st); if (sch.Count > 0) reply.NeedSchedules = sch; } catch { }
         reply.NeedCatalog = !src.HasCatalog;
     }
+    reply.NeedNetwork = src.HasCatalog && net.Wanted();
     return Results.Json(reply, jsonOpts);
 });
 
 app.MapGet("/map", () => Results.Bytes(mapHtml, "text/html; charset=utf-8"));
-app.MapGet("/api/map", (TrafficEngine t) => Results.Json(t.MapData(), jsonOpts));
+app.MapGet("/api/map", (HttpContext ctx, TrafficEngine t) => Results.Json(t.MapData(ctx.Request.Query["sky"] == "1"), jsonOpts));
 app.MapGet("/api/map/path/{id}", (string id, TrafficEngine t) => t.MapPath(id) is { } p ? Results.Json(p, jsonOpts) : Results.NotFound());
 app.MapGet("/api/traffic", (TrafficEngine t, RunwayDb r) => Results.Json(new { runways = r.Status, motion = t.Motion, status = t.Status(), traffic = t.Snapshot() }, jsonOpts));
 app.MapPost("/api/traffic/level/{level}", (string level, TrafficEngine t) =>
@@ -135,6 +139,12 @@ app.MapPost("/api/schedule", async (HttpContext ctx, ScheduleStore store) =>
     store.Add(d);
     return Results.Json(new { ok = true }, jsonOpts);
 });
+app.MapPost("/api/network", async (HttpContext ctx, NetworkStore net) =>
+{
+    var n = await net.AddAsync(ctx.Request.Body, ctx.RequestAborted);
+    return n > 0 ? Results.Json(new { ok = true, flights = n }, jsonOpts) : Results.BadRequest();
+});
+app.MapGet("/api/map/net/{id}", (string id, TrafficEngine t) => t.MapNetPath(id) is { } p ? Results.Json(p, jsonOpts) : Results.NotFound());
 app.MapPost("/api/traffic/catalog", async (HttpContext ctx, FlightSource src) =>
 {
     var c = await JsonSerializer.DeserializeAsync<Laia.Common.Airports.TrafficCatalog>(ctx.Request.Body, jsonOpts);

@@ -52,6 +52,51 @@ internal static class AigSchedules
     /// <summary>Reads the schedules of several airports in one pass over the flight plans.</summary>
     public static Dictionary<string, ScheduleData>? Read(string community, IReadOnlyCollection<string> airports, AigCatalog catalog)
     {
+        var result = airports.Select(a => a.Trim().ToUpperInvariant()).Distinct()
+            .ToDictionary(a => a, a => new ScheduleData { Airport = a, Source = "AIG", ReadUtc = DateTime.UtcNow }, StringComparer.OrdinalIgnoreCase);
+        var stats = Scan(community, catalog, (dep, arr) => result.ContainsKey(dep) || result.ContainsKey(arr), leg =>
+        {
+            var hits = result.TryGetValue(leg.Dep, out var d1) ? d1 : null;
+            var hita = result.TryGetValue(leg.Arr, out var d2) ? d2 : null;
+            hits?.Legs.Add(leg);
+            if (hita is not null && hita != hits) hita.Legs.Add(leg);
+        });
+        if (stats is null) return null;
+        foreach (var d in result.Values)
+            Log.Write($"AIG schedules: {d.Airport} — {d.Legs.Count} flights a week from {stats.Value.files} airline files");
+        Log.Write($"AIG schedules: {stats.Value.notInstalled} more flights need models that aren't installed; read in {stats.Value.seconds:0.0} s");
+        return result;
+    }
+
+    /// <summary>
+    /// Every flight in every AIG schedule (installed models only), for the whole sky on the ATC PC: a gzipped,
+    /// tab-separated file (header "LAIA-NET 1 time", then airline, operator, type, reg, flight, dep, arr,
+    /// dep minute, arr minute, title). The server reads it in TrafficCore/Network.cs: keep the two in step.
+    /// </summary>
+    public static (byte[] gz, int legs)? ReadAll(string community, AigCatalog catalog)
+    {
+        using var ms = new MemoryStream();
+        var n = 0;
+        (int files, int notInstalled, double seconds)? stats;
+        using (var z = new GZipStream(ms, CompressionLevel.Optimal, leaveOpen: true))
+        using (var w = new StreamWriter(z, new System.Text.UTF8Encoding(false)))
+        {
+            w.Write($"LAIA-NET\t1\t{DateTime.UtcNow:O}\n");
+            static string C(string s) => s.Replace('\t', ' ').Replace('\n', ' ').Replace('\r', ' ');
+            stats = Scan(community, catalog, (_, _) => true, l =>
+            {
+                n++;
+                w.Write($"{C(l.Airline)}\t{C(l.Operator)}\t{C(l.Type)}\t{C(l.Reg)}\t{C(l.Flight)}\t{C(l.Dep)}\t{C(l.Arr)}\t{l.DepMin}\t{l.ArrMin}\t{C(l.Title)}\n");
+            });
+        }
+        if (stats is null) return null;
+        Log.Write($"AIG schedules: whole sky — {n} flights a week from {stats.Value.files} airline files ({ms.Length / 1024} kB), {stats.Value.notInstalled} more need models that aren't installed; read in {stats.Value.seconds:0.0} s");
+        return (ms.ToArray(), n);
+    }
+
+    /// <summary>One pass over the AIG flight plans, handing over every wanted leg flown by an installed model.</summary>
+    private static (int files, int notInstalled, double seconds)? Scan(string community, AigCatalog catalog, Func<string, string, bool> want, Action<ScheduleLeg> found)
+    {
         var folder = Folder(community);
         if (folder is null) return null;
         var started = DateTime.UtcNow;
@@ -67,8 +112,6 @@ internal static class AigSchedules
         }
         catch (Exception ex) { Log.Write("AIG schedules: couldn't read FPDatabase.xml: " + ex.Message); }
 
-        var result = airports.Select(a => a.Trim().ToUpperInvariant()).Distinct()
-            .ToDictionary(a => a, a => new ScheduleData { Airport = a, Source = "AIG", ReadUtc = DateTime.UtcNow }, StringComparer.OrdinalIgnoreCase);
         int files = 0, notInstalled = 0;
         foreach (var file in Directory.GetFiles(folder, "*.aigfp"))
         {
@@ -93,23 +136,18 @@ internal static class AigSchedules
                         case "Registration": reg = xr.GetAttribute("id") ?? ""; break;
                         case "Leg":
                         {
-                            var dep = xr.GetAttribute("dep-apt") ?? "";
-                            var arr = xr.GetAttribute("arr-apt") ?? "";
-                            var hits = result.TryGetValue(dep, out var d1) ? d1 : null;
-                            var hita = result.TryGetValue(arr, out var d2) ? d2 : null;
-                            if (hits is null && hita is null) break;
+                            var dep = (xr.GetAttribute("dep-apt") ?? "").Trim().ToUpperInvariant();
+                            var arr = (xr.GetAttribute("arr-apt") ?? "").Trim().ToUpperInvariant();
+                            if (!want(dep, arr)) break;
                             if (!installed.TryGetValue(title, out var model)) { notInstalled++; break; }
                             if (!int.TryParse(xr.GetAttribute("dep-time"), out var dm) || !int.TryParse(xr.GetAttribute("arr-time"), out var am)) break;
                             var airline = info.icao.Length == 3 ? info.icao : model.Airline;
-                            var op = OperatorOf(title) ?? airline;
-                            var leg = new ScheduleLeg
+                            found(new ScheduleLeg
                             {
-                                Airline = airline, Operator = op, Title = title, Type = model.Type, Reg = reg,
-                                Flight = xr.GetAttribute("flightnumber") ?? "", Dep = dep.ToUpperInvariant(), Arr = arr.ToUpperInvariant(),
+                                Airline = airline, Operator = OperatorOf(title) ?? airline, Title = title, Type = model.Type, Reg = reg,
+                                Flight = xr.GetAttribute("flightnumber") ?? "", Dep = dep, Arr = arr,
                                 DepMin = ((dm % 10080) + 10080) % 10080, ArrMin = ((am % 10080) + 10080) % 10080,
-                            };
-                            hits?.Legs.Add(leg);
-                            if (hita is not null && hita != hits) hita.Legs.Add(leg);
+                            });
                             break;
                         }
                     }
@@ -117,10 +155,7 @@ internal static class AigSchedules
             }
             catch (Exception ex) { Log.Write($"AIG schedules: couldn't read {name}: {ex.Message}"); }
         }
-        foreach (var d in result.Values)
-            Log.Write($"AIG schedules: {d.Airport} — {d.Legs.Count} flights a week from {files} airline files");
-        Log.Write($"AIG schedules: {notInstalled} more flights need models that aren't installed; read in {(DateTime.UtcNow - started).TotalSeconds:0.0} s");
-        return result;
+        return (files, notInstalled, (DateTime.UtcNow - started).TotalSeconds);
     }
 }
 
@@ -130,6 +165,33 @@ internal sealed class ScheduleUploader
     private readonly Dictionary<string, DateTime> _tried = new(StringComparer.OrdinalIgnoreCase);
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(60) };
     private int _busy;
+
+    private DateTime _netTried = DateTime.MinValue;
+    private int _netBusy;
+
+    /// <summary>The whole sky: every schedule, sent as one compressed file (at most every 10 minutes).</summary>
+    public void RequestNetwork(string serverBase, AigCatalog catalog, CancellationToken ct)
+    {
+        if (catalog.Community is null || DateTime.UtcNow - _netTried < TimeSpan.FromMinutes(10)) return;
+        if (Interlocked.CompareExchange(ref _netBusy, 1, 0) != 0) return;
+        _netTried = DateTime.UtcNow;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                Log.Write("AIG schedules: reading every schedule for the whole sky");
+                var data = AigSchedules.ReadAll(catalog.Community, catalog);
+                if (data is null) { Log.Write("AIG schedules: no AIG flight plans found"); return; }
+                using var content = new ByteArrayContent(data.Value.gz);
+                content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/gzip");
+                using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(3) };
+                using var resp = await http.PostAsync(serverBase + "/api/network", content, ct);
+                Log.Write(resp.IsSuccessStatusCode ? $"AIG schedules: whole sky sent ({data.Value.legs} flights a week)" : $"AIG schedules: the ATC PC refused the whole sky ({(int)resp.StatusCode})");
+            }
+            catch (Exception ex) { Log.Write("AIG schedules (whole sky) error: " + ex.Message); }
+            finally { Interlocked.Exchange(ref _netBusy, 0); }
+        }, ct);
+    }
 
     public void Request(IEnumerable<string>? airports, string serverBase, AigCatalog catalog, CancellationToken ct)
     {

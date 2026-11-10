@@ -63,6 +63,7 @@
       <span><i class="sw" style="background:var(--warn)"></i>You</span>
       <span><i class="sw" style="background:var(--accent)"></i>Drawn in the sim</span>
       <span><i class="sw" style="background:var(--sim)"></i>Simulated, not drawn</span>
+      <span><i class="sw" style="background:var(--sim);width:7px;height:7px;border-radius:50%"></i>Rest of the sky (on schedule)</span>
       <span title="Click an aircraft"><i style="display:inline-block;width:16px;border-top:2px solid var(--warn)"></i>Flown</span>
       <span title="Click an aircraft"><i style="display:inline-block;width:16px;border-top:2px dashed #fff"></i>Upcoming</span>
     </div>
@@ -72,6 +73,7 @@
       <label><input type="checkbox" id="tLabels" checked>Labels</label>
       <label><input type="checkbox" id="tAllPaths">All routes</label>
       <label><input type="checkbox" id="tFollow">Follow me</label>
+      <label><input type="checkbox" id="tSky" checked>Whole sky</label>
     </div>
     <div style="margin-top:8px;display:flex;gap:6px"><button id="bAirport">Airport</button><button id="bMe">Me</button><button id="bList">Flights</button></div>
   </div>
@@ -93,6 +95,10 @@ L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png?key=c
 
 const layers = { rwy: L.layerGroup().addTo(map), ring: L.layerGroup().addTo(map), paths: L.layerGroup().addTo(map), sel: L.layerGroup().addTo(map), ac: L.layerGroup().addTo(map) };
 const markers = new Map();      // id -> marker
+const skyRenderer = L.canvas({ padding: .3 });
+const skyLayer = L.layerGroup().addTo(map);
+const skyMarkers = new Map();   // id -> circle marker (the rest of the sky: many, so drawn on a canvas)
+let sky = [], skyAt = 0;
 let userMarker = null, selected = null, data = null, centred = false, lastRwyKey = "", pathTimer = 0;
 
 function planeIcon(color, hdg, size) {
@@ -193,10 +199,48 @@ function detailsHtml(f) {
     <div style="margin-top:8px;display:flex;gap:6px"><button id="bZoomSel">Zoom to it</button><button id="bClose">Close</button></div>`;
 }
 
+function findSel(id) { return (data && data.flights.find(x => x.id === id)) || sky.find(x => x.id === id); }
+
+function skyDetailsHtml(f) {
+  const rows = [
+    ["Aircraft", `${f.type}${f.title ? ` <span class="muted">· ${f.title.replace(/^AIGAIM_/, "")}</span>` : ""}`],
+    ["Registration", f.reg || "—"],
+    ["Route", `${f.dep} → ${f.arr}`],
+    ["Phase", f.phase],
+    ["Altitude", f.alt >= 18000 ? "FL" + Math.round(f.alt / 100) : f.alt.toLocaleString() + " ft"],
+    ["Cruise level", "FL" + Math.round(f.cruise / 100)],
+    ["Ground speed", `${f.gs} kt`],
+    ["Lands in", f.eta >= 60 ? `${Math.floor(f.eta / 60)} h ${f.eta % 60} min` : `${f.eta} min`],
+    ["Drawn in the sim", "no (flying on its schedule)"],
+  ];
+  return `<h2>${f.cs} <small>${f.airline}</small></h2>
+    <dl>${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>
+    <div style="margin-top:8px;display:flex;gap:6px"><button id="bZoomSel">Zoom to it</button><button id="bClose">Close</button></div>`;
+}
+
+function updateSky() {
+  const show = $("tSky").checked;
+  const seen = new Set();
+  if (show) for (const f of sky) {
+    seen.add(f.id);
+    let m = skyMarkers.get(f.id);
+    const on = f.id === selected;
+    if (!m) {
+      m = L.circleMarker([f.lat, f.lon], { renderer: skyRenderer, radius: 3, weight: 1, color: "#0b1020", fillColor: COLORS.sim, fillOpacity: .9 }).addTo(skyLayer);
+      m.on("click", e => { L.DomEvent.stopPropagation(e); select(f.id); });
+      m.bindTooltip("", { direction: "right", offset: [6, 0], className: "ac-label" });
+      skyMarkers.set(f.id, m);
+    } else m.setLatLng([f.lat, f.lon]);
+    m.setStyle({ radius: on ? 5 : 3, fillColor: on ? "#ffffff" : COLORS.sim });
+    m.setTooltipContent(`${f.cs}<br><span class="l2">${f.type} · ${f.dep}→${f.arr} · ${Math.round(f.alt / 100).toString().padStart(3, "0")}</span>`);
+  }
+  for (const [id, m] of skyMarkers) if (!seen.has(id)) { skyLayer.removeLayer(m); skyMarkers.delete(id); }
+}
+
 function select(id) {
   selected = id;
   layers.sel.clearLayers();
-  const f = data && data.flights.find(x => x.id === id);
+  const f = findSel(id);
   if (!f) { $("sel").hidden = true; selected = null; return; }
   renderSel(f);
   drawPath(true);
@@ -205,17 +249,18 @@ function select(id) {
 
 function renderSel(f) {
   $("sel").hidden = false;
-  $("sel").innerHTML = detailsHtml(f);
+  $("sel").innerHTML = f.dep !== undefined ? skyDetailsHtml(f) : detailsHtml(f);
   $("bClose").onclick = () => { selected = null; $("sel").hidden = true; layers.sel.clearLayers(); render(); };
-  $("bZoomSel").onclick = () => map.setView([f.lat, f.lon], f.ground ? 15 : 11);
+  $("bZoomSel").onclick = () => map.setView([f.lat, f.lon], f.dep !== undefined ? 8 : f.ground ? 15 : 11);
 }
 
 async function drawPath(force) {
   if (!selected) return;
-  if (!force && Date.now() - pathTimer < 2000) return;
+  const isSky = selected.startsWith("net-");
+  if (!force && Date.now() - pathTimer < (isSky ? 10000 : 2000)) return; // a great circle barely changes
   pathTimer = Date.now();
   try {
-    const r = await fetch(`/api/map/path/${encodeURIComponent(selected)}`, { cache: "no-store" });
+    const r = await fetch(isSky ? `/api/map/net/${encodeURIComponent(selected)}` : `/api/map/path/${encodeURIComponent(selected)}`, { cache: "no-store" });
     if (!r.ok) return;
     const p = await r.json();
     if (p.id !== selected) return;
@@ -257,17 +302,21 @@ function render() {
   updateRing(data);
   updateAircraft(data.flights);
   updateUser(data.user);
+  updateSky();
   renderList();
-  if (selected) { const f = data.flights.find(x => x.id === selected); if (f) renderSel(f); else { selected = null; $("sel").hidden = true; layers.sel.clearLayers(); } }
+  if (selected) { const f = findSel(selected); if (f) renderSel(f); else { selected = null; $("sel").hidden = true; layers.sel.clearLayers(); } }
 }
 
 async function poll() {
   try {
-    const r = await fetch("/api/map", { cache: "no-store" });
+    // The rest of the sky moves slowly and can be a lot of flights: fetched every 4 seconds.
+    const wantSky = $("tSky").checked && Date.now() - skyAt > 4000;
+    const r = await fetch(wantSky ? "/api/map?sky=1" : "/api/map", { cache: "no-store" });
     data = await r.json();
+    if (data.net) { sky = data.net; skyAt = Date.now(); }
     const a = data.airport;
     const moving = data.flights.filter(f => !(f.kind === "parked" && f.phase === "parked")).length;
-    $("status").textContent = a ? `${a.icao} ${a.name} · ${moving} moving, ${data.flights.length} in all · level ${data.level}${data.peak ? " · peak test" : ""}${data.user ? "" : " · MSFS not connected"}`
+    $("status").textContent = a ? `${a.icao} ${a.name} · ${moving} moving, ${data.flights.length} in all · level ${data.level}${data.peak ? " · peak test" : ""}${sky.length ? ` · ${sky.length} more in the sky nearby` : ""}${data.user ? "" : " · MSFS not connected"}`
       : (data.user ? "No traffic airport near you yet" : "Waiting for MSFS");
     if (!centred && (a || data.user)) { centred = true; map.setView(a ? [a.lat, a.lon] : [data.user.lat, data.user.lon], 11); }
     render();
@@ -283,6 +332,7 @@ $("bList").onclick = () => $("panel").classList.toggle("open");
 $("tRwy").onchange = () => { lastRwyKey = ""; render(); };
 $("tRing").onchange = render;
 $("tLabels").onchange = render;
+$("tSky").onchange = () => { skyAt = 0; if (!$("tSky").checked) sky = []; render(); };
 $("tAllPaths").onchange = () => { allPathsAt = 0; drawAllPaths(); };
 map.on("click", () => { if (selected) { selected = null; $("sel").hidden = true; layers.sel.clearLayers(); render(); } });
 poll();
