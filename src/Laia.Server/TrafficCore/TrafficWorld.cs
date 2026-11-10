@@ -81,8 +81,12 @@ public sealed class Flight
     public bool StableChecked;
     /// <summary>Predicted seconds to the threshold (updated every 5 s), its place in the landing order on its runway,
     /// and the landing times predicted 30, 10 and 5 minutes out (world time), to measure the prediction.</summary>
+    public double EtaNominal = double.NaN;
     public double EtaSec = double.NaN, EtaAt = -999, Pred30 = double.NaN, Pred10 = double.NaN, Pred5 = double.NaN;
     public int Seq;
+    /// <summary>Arrival manager: seconds this arrival must lose to land at its slot behind the one ahead (0 = none),
+    /// and whether it's flying slower to lose it.</summary>
+    public double Delay; public bool Slowed;
     /// <summary>Cruise level of a flight handed over from the whole sky (0 for one started near the airport).</summary>
     public double CruiseFt;
     /// <summary>The STAR (with its entry transition) or SID (with its exit) chosen with the runway, so the two match.</summary>
@@ -137,6 +141,10 @@ public sealed class TrafficWorld
     public List<RunwayEnd> ArrRwys { get; private set; } = new();
     /// <summary>Every departure runway in use; DepRwy is the main one.</summary>
     public List<RunwayEnd> DepRwys { get; private set; } = new();
+    /// <summary>The FAA preferred routes (which STAR and SID a flight files, by airport pair and flow), when loaded.</summary>
+    public PreferredRoutes? Routes { get; set; }
+    /// <summary>How many SIDs/STARs came from the preferred routes (vs. picked by direction).</summary>
+    public int RoutesUsed { get; private set; }
     /// <summary>The airport's own published runway rules (read from its FAA AAUPs), when it has any.</summary>
     public AirportRules? Rules { get; set; }
     /// <summary>Where an airport is (lat, lon), for choosing the STAR from the origin and the SID towards the destination.</summary>
@@ -356,11 +364,22 @@ public sealed class TrafficWorld
             catch (Exception ex) { Log($"{f.Callsign}: {ex.Message}; removed"); f.Done = true; }
         }
         foreach (var f in Flights.Where(f => f.Done && f.Spot is not null)) f.Spot = null;
-        // Landing order on each runway, by predicted time.
-        foreach (var g in Flights.Where(f => f.Kind == "arrival" && !f.OnGround && !f.Done && !double.IsNaN(f.EtaSec) && f.Rwy is not null).GroupBy(f => f.Rwy!.Runway))
+        // Landing order on each runway, by predicted time, and the arrival manager: each arrival's slot is the later of
+        // its own unhindered time and the slot ahead plus the gap needed; the difference is the delay it should lose
+        // far out with speed (cruise and descent slower), so it reaches the approach already spaced instead of holding.
+        foreach (var g in Flights.Where(f => f.Kind == "arrival" && !f.OnGround && !f.Done && !double.IsNaN(f.EtaSec) && f.Rwy is not null && f.Phase != "go-around").GroupBy(f => f.Rwy!.Runway))
         {
             var i = 0;
-            foreach (var f in g.OrderBy(f => f.EtaSec - (Time - f.EtaAt))) f.Seq = ++i;
+            Flight? prev = null; double prevSlot = 0;
+            foreach (var f in g.OrderBy(f => f.EtaNominal))
+            {
+                f.Seq = ++i;
+                var slot = f.EtaNominal;
+                if (prev is not null) slot = Math.Max(slot, prevSlot + ThresholdGapNeeded(prev, f, forDepartures: false) + 15);
+                f.Delay = slot - f.EtaNominal;
+                if (f.Delay > 30) f.Slowed = true; else if (f.Delay < 5) f.Slowed = false;
+                prev = f; prevSlot = slot;
+            }
         }
         Flights.RemoveAll(f => f.Done);
     }
@@ -1190,7 +1209,7 @@ public sealed class TrafficWorld
     /// 50 kt wet (ICAO Annex 14 3.8.15, code 3–4) and up to 60 kt dry; crews typically enter at 40–60 kt and slow on
     /// it — and about 20 kt onto a 90° one. The exit's own curve still limits the speed (scenery arcs can be tight).
     /// </summary>
-    private const double ExitSpeedFast = 23, ExitSpeedSquare = 10;
+    private const double ExitSpeedFast = 25, ExitSpeedSquare = 10;
 
     /// <summary>
     /// Seconds a landing aircraft occupies this runway: braking at about 2 m/s² from touchdown (~400 m in) to the
@@ -1202,7 +1221,7 @@ public sealed class TrafficWorld
         var key = (rwy, p.Heavy);
         if (_rot.TryGetValue(key, out var t)) return t;
         var v0 = (p.Vapp - 5) * Kt;
-        double Needed(double dot) { var vx = dot > 0.5 ? ExitSpeedFast : ExitSpeedSquare; return 400 + Math.Max(250, (v0 * v0 - vx * vx) / (2 * 2.0)); }
+        double Needed(double dot) { var vx = dot > 0.5 ? ExitSpeedFast : ExitSpeedSquare; return 500 + Math.Max(250, (v0 * v0 - vx * vx) / (2 * 2.4)); }
         var links = Apt.HasGround ? Apt.RunwayLinks(rwy.Runway)
             .Select(l => (along: rwy.Along(Apt.Nodes[l.on]), dot: V2.Dot((Apt.Nodes[l.off] - Apt.Nodes[l.on]).Unit, rwy.Dir)))
             .Where(l => l.dot > -0.2 && l.along < rwy.LengthM + 30).ToList() : new();
@@ -1416,6 +1435,14 @@ public sealed class TrafficWorld
         var list = rwys.ToList();
         var cands = Apt.Data.Departures.Where(d => (d.RunwayTransitions.Count > 0 || d.Legs.Count > 0) && list.Any(r => Serves(d, r))).ToList();
         if (cands.Count == 0) return null;
+        // The FAA preferred route for this pair names the SID (and its exit) airlines file: use it when it's published here.
+        if (Routes is not null && dest is not null && list.Count > 0 &&
+            Routes.Departure(Apt.Icao, dest, ArrRwy?.Heading ?? list[0].Heading, true, tok => cands.Any(c => AirportRules.Base(c.Name) == AirportRules.Base(tok))) is { } pr)
+        {
+            var sid = cands.First(c => AirportRules.Base(c.Name) == AirportRules.Base(pr.sid));
+            var tr = sid.EnrouteTransitions.FirstOrDefault(t => t.Name.Equals(pr.transition, StringComparison.OrdinalIgnoreCase));
+            if (tr is not null || sid.EnrouteTransitions.Count == 0) { RoutesUsed++; return (sid, tr); }
+        }
         var want = BearingTo(dest);
         var options = new List<(Procedure p, Transition? t, double score)>();
         foreach (var sid in cands)
@@ -1430,6 +1457,17 @@ public sealed class TrafficWorld
         var list = rwys.ToList();
         var cands = Apt.Data.Arrivals.Where(a => list.Any(r => Serves(a, r))).ToList();
         if (cands.Count == 0) return null;
+        // The FAA preferred route from this origin names the STAR (and the fix it's joined at) airlines file, by flow:
+        // use it when that STAR is published here for a runway in use.
+        if (Routes is not null && origin is not null && list.Count > 0 &&
+            Routes.Arrival(origin, Apt.Icao, list[0].Heading, true, tok => cands.Any(c => AirportRules.Base(c.Name) == AirportRules.Base(tok))) is { } pr)
+        {
+            var star = cands.First(c => AirportRules.Base(c.Name) == AirportRules.Base(pr.star));
+            var tr = star.EnrouteTransitions.FirstOrDefault(t => t.Name.Equals(pr.transition, StringComparison.OrdinalIgnoreCase))
+                ?? star.EnrouteTransitions.FirstOrDefault(t => t.Legs.Any(l => l.Fix.Equals(pr.transition, StringComparison.OrdinalIgnoreCase)));
+            if (tr is not null || star.EnrouteTransitions.Count == 0 || star.Legs.Any(l => l.Fix.Equals(pr.transition, StringComparison.OrdinalIgnoreCase)))
+            { RoutesUsed++; return (star, tr); }
+        }
         var want = BearingTo(origin);
         var options = new List<(Procedure p, Transition? t, double score)>();
         // Stopgap until real filed routes: a STAR also published at a neighbouring field counts as 60° worse, so it's
@@ -2107,18 +2145,21 @@ public sealed class TrafficWorld
     /// per nm on the glidepath, stable by 1,000 ft about 3 nm out). "170 to a 5-mile final" only fits jets whose
     /// approach speed is 150 kt or more.
     /// </summary>
-    private static double PlannedSpeed(Flight f, double d)
+    private static double PlannedSpeed(Flight f, double d, bool nominal = false)
     {
         // Descent speed above 10,000 ft (about 280 kt for jets), slowing to 250 kt on the level piece at 10,000 ft.
         var high = f.Rwy is not null && d > D10(f.Rwy) + 4;
         double t = high ? (f.P.Family == "turboprop" ? 230 : 280) : d > 20 ? 250 : d > 12 ? 210 : d > 7 ? 180 : d > 5 ? 170 : f.P.Vapp;
+        // Losing time for its slot (arrival manager): slower in the cruise and descent and 210 kt below 10,000 ft until
+        // 20 nm — the controller's speed control far out (7110.65 5-7) instead of a hold.
+        if (f.Slowed && !nominal && d > 20) t = high ? (f.P.Family == "turboprop" ? 200 : 250) : Math.Min(t, f.P.Family == "turboprop" ? 200 : 210);
         if (f.P.Family == "turboprop" && d <= 20) t = Math.Min(t, d > 5 ? 170 : f.P.Vapp);
         if (d < 12) t = Math.Min(t, f.P.Vapp + 10 * Math.Max(0, d - 3));
         return Math.Max(t, f.P.Vapp);
     }
 
     /// <summary>Predicted seconds until this arrival crosses the threshold, flying its planned speeds (and the wind on final).</summary>
-    private double EtaToThreshold(Flight f, double dth)
+    private double EtaToThreshold(Flight f, double dth, bool nominal = false)
     {
         if (dth <= 0) return 0;
         var hw = f.Rwy is null ? 0 : Wind.Headwind(f.Rwy.Heading);
@@ -2126,8 +2167,8 @@ public sealed class TrafficWorld
         const double step = 0.25;
         for (var d = dth; d > 0; d -= step)
         {
-            var v = PlannedSpeed(f, d);
-            if (d > dth - 1.5) v = Math.Min(v, Math.Max(f.Ias, f.P.Vapp));      // it can't be faster than it is now right away
+            var v = PlannedSpeed(f, d, nominal);
+            if (d > dth - 1.5 && !nominal) v = Math.Min(v, Math.Max(f.Ias, f.P.Vapp));      // it can't be faster than it is now right away
             if (f.WentAround) v = Math.Min(v, 200);
             var alt = Profile(f.Rwy!, d);
             if (f.CruiseFt > 0) alt = Math.Min(alt, f.CruiseFt);
@@ -2321,7 +2362,7 @@ public sealed class TrafficWorld
             // Exits on the terminal side (where the gate is) first, then the first one the aircraft can make
             // with normal braking (about 2 m/s²): a high-speed exit is taken at about 45 kt, a 90° one at about 20 kt.
             var side = gate is null ? 0 : Math.Sign(rwy.Offset(gate.P));
-            double Needed(double dot) { var vx = dot > 0.5 ? ExitSpeedFast : ExitSpeedSquare; return tdAlong + Math.Max(250, (v0 * v0 - vx * vx) / (2 * 2.0)); }
+            double Needed(double dot) { var vx = dot > 0.5 ? ExitSpeedFast : ExitSpeedSquare; return tdAlong + Math.Max(250, (v0 * v0 - vx * vx) / (2 * 2.4)); }
             var links = Apt.RunwayLinks(rwy.Runway)
                 .Select(l => (l.on, l.off, along: rwy.Along(Apt.Nodes[l.on]), dir: (Apt.Nodes[l.off] - Apt.Nodes[l.on]).Unit))
                 .Where(l => V2.Dot(l.dir, rwy.Dir) > -0.2 && l.along < rwy.LengthM + 30) // never turn back
@@ -2714,6 +2755,7 @@ public sealed class TrafficWorld
             {
                 f.EtaAt = Time;
                 f.EtaSec = EtaToThreshold(f, dth);
+                f.EtaNominal = Time + (f.Slowed ? EtaToThreshold(f, dth, nominal: true) : f.EtaSec);
                 var land = Time + f.EtaSec;
                 if (!f.WentAround)
                 {

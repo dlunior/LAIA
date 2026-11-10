@@ -758,6 +758,48 @@ Console.WriteLine("== Neighbouring fields: runway traffic only, on the main airp
     Check(before.StartsWith("ARRVL1") && after.StartsWith("OWNED2"), "a STAR a neighbouring field also publishes is only used when nothing else fits");
 }
 
+Console.WriteLine("== FAA preferred routes: the STAR and SID a flight would file, by airport pair and flow");
+{
+    var csv = new[]
+    {
+        "Orig,Route String,Dest,Hours1,Hours2,Hours3,Type,Area,Altitude,Aircraft,Direction,Seq,DCNTR,ACNTR",
+        "ACY,ACY LEEAH ATR TRPOD Q409 CRPLR Q85 LPERD SNFLD3 MCO,MCO,,,,H,TO ISM.MCO,,JETS: RNAV 1  - DME/DME/IRU OR GPS REQUIRED,MCO LANDING NORTH,1,ZDC,ZJX",
+        "ACY,ACY LEEAH ATR TRPOD Q409 CRPLR EARZZ Q131 WAALT Y289 BAHAA HIBAC ALYNA4 MCO,MCO,,,,H,TO ISM.LEE.MCO.ORL.SFB,,JETS. TURBOPROPS:  RNAV 1-DME/DME/IRU OR GPS,WATER,2,ZDC,ZJX",
+        "ACY,ACY LEEAH ATR TRPOD Q409 CRPLR Q85 LPERD GTOUT1 MCO,MCO,,,,H,,,JETS: RNAV 1  - DME/DME/IRU OR GPS REQUIRED,MCO LANDING SOUTH,3,ZDC,ZJX",
+        "ATL,ATL SMLTZ3 WALET ZJAYX GRNCH5 MCO,MCO,,,,H,,,,,2,ZTL,ZJX",
+    };
+    var db = PreferredRoutes.Parse(csv);
+    var stars = new HashSet<string> { "SNFLD", "GTOUT", "ALYNA", "GRNCH" };
+    bool IsStar(string t) => stars.Contains(AirportRules.Base(t));
+    var north = db.Arrival("KACY", "KMCO", 359, true, IsStar);
+    var south = db.Arrival("KACY", "KMCO", 179, true, IsStar);
+    var atl = db.Arrival("KATL", "KMCO", 359, true, IsStar);
+    var dep = db.Departure("KATL", "KMCO", 90, true, t => AirportRules.Base(t) == "SMLTZ");
+    Console.WriteLine($"  ACY→MCO north flow {north?.star} via {north?.transition}; south flow {south?.star}; ATL→MCO {atl?.star} via {atl?.transition}; ATL departs {dep?.sid}.{dep?.transition}");
+    Check(north?.star == "SNFLD3" && north?.transition == "LPERD" && south?.star == "GTOUT1" && atl?.star == "GRNCH5" && atl?.transition == "ZJAYX" && dep?.sid == "SMLTZ3" && dep?.transition == "WALET",
+        "the right STAR for the flow (not the oceanic/weather ALYNA4 option), its entry fix, and the SID with its exit");
+}
+
+Console.WriteLine("== Arrival manager: two arrivals bunched far out are spaced with speed, not a hold");
+{
+    var world = new TrafficWorld(new AirportModel(TestAirport.Build(false)), new TestSource(), seed: 11) { Automatic = false, Wind = new Wind(270, 10) };
+    world.SelectRunways(true);
+    Laia.Common.Airports.ScheduleLeg L(string reg, string fl) => new() { Airline = "DAL", Operator = "DAL", Type = "A321", Reg = reg, Flight = fl, Dep = "KXXX", Arr = "TEST" };
+    var a = world.SpawnArrival(58, false, L("N1", "11"))!;
+    var b = world.SpawnArrival(59, false, L("N2", "22"))!;
+    double landA = -1, landB = -1; var hA = a.LastHold; var hB = b.LastHold; var holds = 0;
+    for (var t = 0.0; t < 3600 && (landA < 0 || landB < 0); t += 0.5)
+    {
+        world.Step(0.5);
+        if (a.LastHold != hA || b.LastHold != hB) { holds++; hA = a.LastHold; hB = b.LastHold; }
+        if (landA < 0 && a.OnGround) landA = world.Time;
+        if (landB < 0 && b.OnGround) landB = world.Time;
+    }
+    Console.WriteLine($"  landed {Math.Abs(landB - landA):0} s apart; holds {holds}; go-arounds {(a.WentAround || b.WentAround ? "yes" : "no")}");
+    Check(landA > 0 && landB > 0 && Math.Abs(landB - landA) >= 60 && holds == 0 && !a.WentAround && !b.WentAround,
+        "both land, properly spaced, with no hold and no go-around");
+}
+
 Console.WriteLine("== After a go-around, the aircraft comes back around and lands normally");
 {
     var apt = new AirportModel(TestAirport.Build(false));

@@ -31,6 +31,8 @@ builder.Services.AddSingleton<ScheduleStore>();
 builder.Services.AddSingleton<WorldAirports>();
 builder.Services.AddSingleton<NetworkStore>();
 builder.Services.AddHostedService<NetworkUpdater>();
+builder.Services.AddSingleton<RoutesDb>();
+builder.Services.AddHostedService<RoutesUpdater>();
 builder.Services.AddSingleton<FlightSource>();
 builder.Services.AddSingleton<TrafficEngine>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<TrafficEngine>());
