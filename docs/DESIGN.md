@@ -52,6 +52,7 @@ work runs on a second PC on the home network, so the sim PC stays fast.
   Cloud sessions read these through the connected-folder bridge.
 - **Test after each update:** **Remove traffic**, then set the level again on the control page.
 - **Release notes go to the user, not into the app.**
+- **Research first (the user's rule, 9 Nov 2026).** The user is not the only source of truth. When a concept is added to the design, research it independently (FAA orders, AIM, FARs, manufacturer and safety-foundation guidance, real ATC tools) and check the user's idea against what's found. Write the numbers and the sources into this document. Where findings differ from what was planned, change the plan and say so.
 
 ---
 
@@ -86,7 +87,7 @@ work runs on a second PC on the home network, so the sim PC stays fast.
   - **Crossing-runway operations (3-9-8, 3-10-4):** a crossing runway is used for departures at Normal and Busy levels when its departures stay clear of the final.
   - **Runway choice:** tailwind limit 5 kt, crosswind limit 25 kt.
   - **Stabilized approach by 1,000 ft (AIM 5-4),** or the aircraft goes around.
-  - **Holding (AIM 5-3-8)** far out. 360s are used only within 15 nm.
+  - **Holding (AIM 5-3-8)** far out. 360s are used only within 15 nm. Today's holds use 200 kt up to 6,000 ft and 230 kt above. The full AIM limits are 200 kt up to 6,000 ft MSL, 230 kt from 6,001 to 14,000 ft (210 where charted), and 265 kt above 14,000 ft, with one-minute legs at or below 14,000 ft and 1.5 minutes above. The 265 kt and 1.5-minute rules still need adding.
   - **Taxi speeds:** 20 kt straight, 16 kt for heavies, slower in turns, 10 kt on the ramp.
 - **Safety nets:** a stuck-aircraft watchdog (reroute after 20 s, another gate after 2 min, removed after 5 min with the reason logged), ground separation and intersection yielding.
 
@@ -225,8 +226,20 @@ airport the user is at) must be as close to the real world as possible:
 
 **A sequence that is dynamic but stable (the user's decision, 9 Nov 2026).** The sequence keeps adapting to reality
 (winds, delays, a slow climber, the user), but it must not churn so much that aircraft keep needing new instructions.
-- **Far out (before the freeze, about 30–40 minutes or ~150 nm from landing):** the order may change, but two aircraft only swap places if it saves real delay (at least about a minute in total), and an aircraft changes position at most a couple of times.
-- **Inside the freeze:** the order is fixed. Only the timing is fine-tuned, and a landing time moves by at most about 30 s per update.
+- **Modelled on real arrival managers.** Researched 9 Nov 2026: FAA TBFM, and the MAESTRO arrival manager used on VATSIM.
+  - Aircraft join the sequence about 150–200 nm out, with an ETA and a scheduled time of arrival (STA).
+  - The sequence passes through set states, timed against the feeder (meter) fix at the TRACON boundary and against landing:
+
+    | State | When | What may change |
+    |---|---|---|
+    | **Unstable** | More than about 12 min from the feeder fix | Order and times may be recalculated, under the swap rules below |
+    | **Stable** | Within 12 min of the feeder fix | The order is kept; times are only fine-tuned |
+    | **Super-stable** | Within 8 min of the feeder fix | No changes, except putting a missed approach back in |
+    | **Frozen** | Within 5 min of landing | No changes |
+  - **Delay is shown as time to lose (or gain)** against the STA. Controllers absorb it with speed, delaying vectors or holding, and gain time with shortcuts. A sector hands its aircraft on at the feeder fix's STA, with no delay left.
+  - **Rescheduling everyone ("rippling") is avoided** once metering is running, as TBFM guidance says.
+- **Unstable, the order may still change,** but two aircraft only swap places if it saves real delay (at least about a minute in total), and an aircraft changes position at most a couple of times.
+- **Stable onward, the order is fixed.** A landing time moves by at most about 30 s per update.
 - **Instructions:** each aircraft gets a new speed or vector at most every 3–5 minutes, except for safety (a real loss of spacing). One clear plan per aircraft (for example "210 knots until DIXIE", or "turn left heading 240, expect direct CAMRN in 10 miles") rather than constant nudges.
 - **The user gets no priority: a sequence is a sequence (the user's decision).** The user is sequenced like any other flight, in the normal order (by predicted arrival, with wake and runway rules), so others don't always yield to them.
 - **The user's slot is the most stable,** because the user can't react as instantly as an AI. Once set, it is only moved for a real reason: the user being well off their prediction, or a go-around.
@@ -355,6 +368,14 @@ LAIA must notice quickly when the real airport changes flow, and switch over log
 
 **Act before it gets busy**
 - Predict the next 60 minutes of each sector: the aircraft in it, the instructions each will need, and radio seconds per minute.
+- **The workload model** (researched 9 Nov 2026: FAA Monitor Alert Parameters and MIT Lincoln Lab's sector workload model):
+  - The FAA alerts when a sector's predicted peak aircraft count passes its Monitor Alert Parameter (MAP). The older FAA rule set the MAP from the average time aircraft spend in the sector: about 5 aircraft for a 3-minute transit, rising by about 1.7 aircraft per minute of transit, capped at 18. Since 2019 the FAA uses a workload-based baseline, adjusted per sector (for example, lowered in bad weather).
+  - Lincoln Lab's model of controller workload per sector:
+    - A constant background load of about 10%.
+    - About 28 s of work for each aircraft entering or leaving.
+    - About 62 s per potential conflict, which grows with the square of the number of aircraft and with how many are climbing or descending.
+    - A sector is at its limit at about 80% workload.
+  - LAIA uses this model, plus each aircraft's predicted radio time, to decide when to split.
 - Open the next split when a sector is predicted to pass its limit in about 15–20 minutes.
 - Combine only when the next 45 minutes stay well under the limit.
 - The trigger for combining is much lower than the one for splitting, and a split stays open for at least 30–45 minutes, so it never flip-flops.
