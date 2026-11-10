@@ -673,14 +673,65 @@ public sealed class TrafficWorld
             route = route.Take(holdIndex + 1).ToList();
         }
         pts.AddRange(route.Select(n => Apt.Nodes[n]));
-        if (f.Phase == "taxi in" && f.Spot is { } gate)
+        if (f.Phase == "taxi in" && f.Spot is { } gate) LeadIntoGate(pts, route, offset, gate, f.P);
+        SetGroundPath(f, pts, route, offset);
+        Log($"{f.Callsign}: taking another way round {otherName}");
+        return true;
+    }
+
+    /// <summary>
+    /// The turn into a stand, as a pilot flies the lead-in line: the turn starts on the taxiway well before the stand,
+    /// as one smooth arc sized for the aircraft (about 0.7 × wingspan, at least 20 m), and ends lined up with the
+    /// stand with a short straight to the stop. Scenery often has only a short stub at a right angle from the
+    /// taxiway to the stand (KLGA Parking 83: 15 m), which would otherwise mean turning almost on the spot.
+    /// pts[i + offset] is the node route[i]; the route ends at the stand's access node.
+    /// </summary>
+    private void LeadIntoGate(List<V2> pts, List<int> route, int offset, AirportModel.ParkingSpot gate, Perf p)
+    {
+        void Plain()
         {
             pts.Add(gate.P - V2.FromBearing(gate.Heading) * Math.Min(40, Math.Max(15, (gate.P - Apt.Nodes[gate.Access]).Length * 0.5)));
             pts.Add(gate.P);
         }
-        SetGroundPath(f, pts, route, offset);
-        Log($"{f.Callsign}: taking another way round {otherName}");
-        return true;
+        if (route.Count < 2 || pts.Count < offset + route.Count) { Plain(); return; }
+        // The taxiway direction just before the stub: from the node before the junction to the junction.
+        var junction = Apt.Nodes[route[^2]];
+        var before = route.Count >= 3 ? Apt.Nodes[route[^3]] : pts[Math.Max(0, offset + route.Count - 3)];
+        var u = junction - before;
+        if (u.Length < 1) { Plain(); return; }
+        u = u.Unit;
+        var v = V2.FromBearing(gate.Heading);                 // into the stand, nose first
+        var cross = V2.Cross(u, v);
+        var turn = Math.Acos(Math.Clamp(V2.Dot(u, v), -1, 1));
+        if (turn < 10 * Math.PI / 180 || turn > 150 * Math.PI / 180 || Math.Abs(cross) < 1e-6) { Plain(); return; }
+        // Where the taxiway line meets the stand's centreline.
+        var w = gate.P - junction;
+        var a = V2.Cross(w, v) / cross;
+        var x = junction + u * a;
+        var toStand = V2.Dot(gate.P - x, v);
+        if (toStand < 15 || a < -60) { Plain(); return; }
+        var tanHalf = Math.Tan(turn / 2);
+        var r = Math.Max(20, p.SpanM * 0.7);
+        var straight = Math.Min(20, toStand * 0.3);
+        r = Math.Min(r, (toStand - straight) / tanHalf);
+        if (r < 12) { Plain(); return; }
+        var t = r * tanHalf;
+        var start = x - u * t;
+        var end = x + v * t;
+        // Drop the route's tail (junction and stub) from where the turn starts.
+        var keep = route.Count;
+        while (keep > 1 && V2.Dot(Apt.Nodes[route[keep - 1]] - start, u) > -2) keep--;
+        if (keep < 1) { Plain(); return; }
+        pts.RemoveRange(offset + keep, pts.Count - (offset + keep));
+        route.RemoveRange(keep, route.Count - keep);
+        pts.Add(start);
+        var side = cross > 0 ? 1.0 : -1.0;                    // + : turning left
+        var centre = start + new V2(-u.Y, u.X) * (r * side);
+        var a0 = (start - centre).Bearing;
+        var sweep = turn * 180 / Math.PI;
+        for (var k = 1; k < 8; k++) pts.Add(centre + V2.FromBearing(a0 - side * sweep * k / 8, r));
+        pts.Add(end);
+        pts.Add(gate.P);
     }
 
     /// <summary>No pushback while another aircraft is taxiing or pushing right behind the gate.</summary>
@@ -1396,12 +1447,7 @@ public sealed class TrafficWorld
                 route.AddRange(taxi ?? new List<int> { x.off });
                 offset = 2;
                 pts.AddRange(route.Select(n => Apt.Nodes[n]));
-                if (gate is not null)
-                {
-                    var lead = gate.P - V2.FromBearing(gate.Heading) * Math.Min(40, Math.Max(15, (gate.P - Apt.Nodes[gate.Access]).Length * 0.5));
-                    pts.Add(lead);
-                    pts.Add(gate.P);
-                }
+                if (gate is not null) LeadIntoGate(pts, route, offset, gate, f.P);
             }
         }
         if (pts.Count == 1) pts.Add(rwy.FarEnd);
