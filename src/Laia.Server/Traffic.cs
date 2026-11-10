@@ -23,12 +23,12 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
 
     public TrafficLevel Level
     {
-        get => (settings.Get("traffic_level") ?? "normal") switch { "off" => TrafficLevel.Off, "light" => TrafficLevel.Light, "busy" => TrafficLevel.Busy, _ => TrafficLevel.Normal };
+        get => (settings.Get("traffic_level") ?? "normal") switch { "off" => TrafficLevel.Off, "light" => TrafficLevel.Light, "busy" => TrafficLevel.Busy, "peak" => TrafficLevel.Peak, _ => TrafficLevel.Normal };
     }
 
     public void SetLevel(string level)
     {
-        if (level is not ("off" or "light" or "normal" or "busy")) return;
+        if (level is not ("off" or "light" or "normal" or "busy" or "peak")) return;
         settings.Update(System.Text.Json.JsonSerializer.SerializeToElement(new Dictionary<string, string> { ["traffic_level"] = level }));
         lock (_gate) if (_world is not null) _world.Level = Level;
         log.LogInformation("Traffic level: {level}", level);
@@ -106,7 +106,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 departing = w?.DepRwy?.Ident,
                 airportsOnFile = airports.Count,
                 catalog = source.HasCatalog,
-                schedule = (w?.Schedule is { } sd ? $"Real {sd.Source} schedule: {sd.Legs.Count} flights a week at {sd.Airport}" : source.ScheduleStatus)
+                schedule = (w?.PeakInfo is { } pk ? pk + " · " : "") + (w?.Schedule is { } sd ? $"Real {sd.Source} schedule: {sd.Legs.Count} flights a week at {sd.Airport}" : source.ScheduleStatus)
                     + (w?.Plan is { } gp ? $" · real gates: {gp.Matched} of {gp.Gates} found in the scenery" : ""),
                 flights = Worlds().SelectMany(x => x.Flights.Select(f => new
                 {

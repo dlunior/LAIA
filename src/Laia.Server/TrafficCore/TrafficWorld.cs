@@ -2,7 +2,8 @@ using Laia.Common.Airports;
 
 namespace Laia.Server.TrafficCore;
 
-public enum TrafficLevel { Off, Light, Normal, Busy }
+/// <summary>Peak is a test setting: the airport's busiest hours from its real schedule, replayed now (not the real time).</summary>
+public enum TrafficLevel { Off, Light, Normal, Busy, Peak }
 
 public sealed record AircraftIdentity(string Airline, string Type, string Callsign, string Other);
 
@@ -113,9 +114,10 @@ public sealed class TrafficWorld
         set
         {
             if (_level == value) return;
-            var wasBusy = _level is TrafficLevel.Normal or TrafficLevel.Busy;
+            var wasBusy = _level is TrafficLevel.Normal or TrafficLevel.Busy or TrafficLevel.Peak;
             _level = value;
-            var isBusy = value is TrafficLevel.Normal or TrafficLevel.Busy;
+            var isBusy = value is TrafficLevel.Normal or TrafficLevel.Busy or TrafficLevel.Peak;
+            if (value != TrafficLevel.Peak) { _peakSet = false; _peakOffset = 0; PeakInfo = null; }
             if (wasBusy != isBusy && ArrRwy is not null) SelectRunways(true);
         }
     }
@@ -184,6 +186,7 @@ public sealed class TrafficWorld
         TrafficLevel.Light => (12, 4, 10, 0.25),
         TrafficLevel.Normal => (22, 7, 20, 0.40),
         TrafficLevel.Busy => (34, 11, 32, 0.55),
+        TrafficLevel.Peak => (44, 14, 40, 0.65),
         _ => (0, 0, 0, 0),
     };
 
@@ -213,7 +216,7 @@ public sealed class TrafficWorld
         var group = usable.Where(e => Math.Abs(Geo2.Diff(e.Heading, best.Heading)) < 25).OrderByDescending(e => e.LengthM).ToList();
         var arr = group[0];
         var dep = group.Skip(1).FirstOrDefault(e => e.Runway != arr.Runway && e.LengthM >= 2000);
-        if (dep is null && Level is TrafficLevel.Normal or TrafficLevel.Busy)
+        if (dep is null && Level is TrafficLevel.Normal or TrafficLevel.Busy or TrafficLevel.Peak)
         {
             var nm = Geo2.MPerNm;
             dep = usable.Where(e => e.Runway != arr.Runway && e.LengthM >= 1900 && WindOk(e) && Crossing(arr, e) is not null)
@@ -334,12 +337,52 @@ public sealed class TrafficWorld
     private bool _schedStarted;
 
     /// <summary>Signed minutes from now until a time of the week (-5040..5040).</summary>
-    private double Until(int weekMin) => ((weekMin - WeekMinute) % 10080 + 10080 + 5040) % 10080 - 5040;
+    private double Until(int weekMin) => ((weekMin - SchedNow) % 10080 + 10080 + 5040) % 10080 - 5040;
+
+    // ------------------------------------------------------------------ peak-hour test setting
+    private double _peakOffset;
+    private bool _peakSet;
+    private double _peakStart, _peakLen = 180;
+    /// <summary>What the peak test is replaying, for the control page (null when not in use).</summary>
+    public string? PeakInfo { get; private set; }
+
+    /// <summary>The schedule's clock: the real time, or in the peak test the replayed busiest hours.</summary>
+    private double SchedNow => ((WeekMinute + _peakOffset) % 10080 + 10080) % 10080;
+
+    /// <summary>
+    /// Finds the airport's busiest three hours in the week from its real schedule (movements per 15 minutes)
+    /// and shifts the schedule clock so they start now. When they're over, they are replayed again.
+    /// </summary>
+    private void PlanPeak(List<ScheduleLeg> legs)
+    {
+        var me = Apt.Icao;
+        var bins = new int[672];
+        foreach (var l in legs)
+        {
+            if (l.Dep == me) bins[(l.DepMin % 10080) / 15]++;
+            if (l.Arr == me) bins[(l.ArrMin % 10080) / 15]++;
+        }
+        var win = (int)(_peakLen / 15);
+        int best = 0, bestSum = -1;
+        for (var b = 0; b < 672; b++)
+        {
+            var sum = 0;
+            for (var k = 0; k < win; k++) sum += bins[(b + k) % 672];
+            if (sum > bestSum) { bestSum = sum; best = b; }
+        }
+        _peakStart = best * 15;
+        _peakOffset = _peakStart - WeekMinute;
+        _peakSet = true;
+        var day = new[] { "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday" }[(int)(_peakStart / 1440) % 7];
+        var t = TimeSpan.FromMinutes(_peakStart % 1440);
+        PeakInfo = $"Peak test: replaying {Apt.Icao}'s busiest 3 hours ({day} {t:hh\\:mm} UTC, {bestSum} movements), not the real time";
+        Log($"{Apt.Icao}: {PeakInfo}");
+    }
 
     /// <summary>The traffic level thins the real schedule (the same flights each time).</summary>
     private bool Keep(ScheduleLeg l)
     {
-        var pct = Level switch { TrafficLevel.Light => 35, TrafficLevel.Normal => 65, _ => 100 };
+        var pct = Level switch { TrafficLevel.Light => 35, TrafficLevel.Normal => 65, _ => 100 };   // Busy and Peak: every flight
         // Whole airframes are kept or left out (so an aircraft that lands also leaves again), the same ones every time.
         uint h = 2166136261;
         foreach (var c in l.Reg.Length > 0 ? l.Reg : l.Callsign) h = (h ^ c) * 16777619;
@@ -360,6 +403,17 @@ public sealed class TrafficWorld
         var (maxObjects, maxActive, _, _) = Budget;
         var legs = Schedule!.Legs;
         var me = Apt.Icao;
+        if (Level == TrafficLevel.Peak)
+        {
+            if (!_peakSet) { PlanPeak(legs); _schedStarted = false; foreach (var f in Flights.Where(f => f.Kind == "parked" && f.Phase == "parked" && f.Reg.Length > 0)) f.Done = true; }
+            else if (((SchedNow - _peakStart) % 10080 + 10080) % 10080 >= _peakLen)
+            {
+                // The busiest hours are over: replay them (each flight may run again, but never one that's still around).
+                _peakOffset -= _peakLen;
+                _done.Clear();
+                Log($"{me}: peak test: replaying the busiest hours again");
+            }
+        }
         var deps = legs.Where(l => l.Dep == me && Keep(l)).ToList();
         var arrs = legs.Where(l => l.Arr == me && Keep(l)).ToList();
         if (!_schedStarted)
@@ -431,6 +485,7 @@ public sealed class TrafficWorld
         {
             var u = Until(l.ArrMin);
             if (u > 13 || u < 1) continue;
+            if (l.Reg.Length > 0 && Flights.Any(f => !f.Done && f.Reg == l.Reg)) continue;   // that airframe is still around
             if (!_done.Add(Key(l, 'A'))) continue;
             if (active >= maxActive || Flights.Count >= maxObjects) { Log($"{l.Callsign}: skipped (traffic limit)"); continue; }
             // Two flights due the same minute: the second one starts further out.

@@ -329,6 +329,23 @@ Console.WriteLine("== Real gates override the scenery's gate assignments");
     Check(two.Count == 2 && (two[0].Pos - two[1].Pos).Length > 4 * 1852, "two arrivals due at the same time start at least 4 nm apart");
 }
 
+Console.WriteLine("== Peak-hour test setting replays the busiest hours now");
+{
+    var apt = new AirportModel(TestAirport.Build(false));
+    var sched = new Laia.Common.Airports.ScheduleData { Airport = "TEST", Source = "AIG" };
+    const int now = 3 * 1440 + 180;                 // a quiet night
+    const int rush = 4 * 1440 + 900;                // the next afternoon's rush
+    for (var i = 0; i < 8; i++)
+        sched.Legs.Add(new() { Airline = "DAL", Operator = "DAL", Title = "T", Type = "B739", Reg = $"N{i}PK", Flight = $"{700 + i}", Dep = "TEST", Arr = "KYYY", DepMin = rush + 10 + i * 6, ArrMin = rush + 150 });
+    var world = new TrafficWorld(apt, new TestSource(), seed: 9) { Level = TrafficLevel.Peak, Wind = new Wind(270, 8), Schedule = sched, WeekMinute = now };
+    var log = new List<string>(); world.Log = s => log.Add(s);
+    for (var i = 0; i < 40 * 60 * 4; i++) { world.WeekMinute = now + world.Time / 60; world.Step(0.25); }
+    var airborne = log.Count(l => l.Contains("airborne"));
+    Console.WriteLine("  " + (world.PeakInfo ?? "(no peak info)") + $"; {airborne} departures in 40 min");
+    Check(world.PeakInfo is not null && log.Any(l => l.Contains("busiest 3 hours")), "the peak test finds the busiest hours and says so");
+    Check(airborne >= 4, $"the rush is replayed now, at night ({airborne} departures in 40 min)");
+}
+
 Console.WriteLine("== Traffic starts even when no installed model fits the small gates");
 {
     var apt = new AirportModel(TestAirport.Build(false));
