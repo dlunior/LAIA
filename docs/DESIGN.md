@@ -396,6 +396,21 @@ LAIA must notice quickly when the real airport changes flow, and switch over log
 - **How they're used:** their paths are predicted, and LAIA's flights are sequenced and spaced around them.
 - **The user gets a slot too,** from their SimBrief plan and live position.
 
+### Step 4a: Ground control (the user's notes, 10 Nov 2026: "golden towbar" on taxiway A, then an unrealistic 180 by SWA)
+Today the ground logic only sees a conflict when two aircraft meet head-on, and breaks the stand-off by turning one
+around. Airliners can't do that on a taxiway, and a real ground controller never lets it happen. The plan:
+- **Routes planned so head-ons don't happen:**
+  - One-way flows by runway configuration (inbound on one taxiway, outbound on another, as busy airports do; learned from real ADS-B ground tracks in M13).
+  - Each route reserves its taxiway segments in time, and new routes avoid segments that opposing traffic will use.
+- **Ground instructions, as controllers give them:**
+  - "Hold short of taxiway B" at an intersection until crossing traffic passes.
+  - "Give way to the Delta A220 from your left", decided ahead of time.
+  - "Follow the Southwest 737" where routes merge.
+  - The aircraft that waits stops at the hold line before the junction, never face to face.
+- **No 180s on taxiways.** Aircraft turn around only on a ramp, a holding pad or a wide apron. If a head-on still happens (the user, or traffic LAIA doesn't control), one waits and the other is rerouted from an earlier junction.
+- **For the user:** ground hints in traffic mode; real ground instructions in ATC mode.
+- **Built with planned departures (M10),** since both use predicted taxi times.
+
 ### Step 4: Planned departures
 - Pushback and taxi times are planned so each departure reaches the runway as a gap opens, including crossing-runway departures.
 
@@ -500,7 +515,7 @@ Status key: **Next**, **Planned**, **Done**.
 | **M7** | **Every aircraft in the sky** | LAIA Sim reads all other aircraft within about 100 nm (other traffic programs, live traffic, multiplayer); their paths are predicted; LAIA's flights are sequenced around them; the user's slot comes from the SimBrief plan | Run with MSFS live traffic or another traffic program on, and watch the fourth colour on the map | LAIA's flights space around traffic they don't control; no conflicts with it |
 | **M8** | **Guidance in traffic mode** | Always-on-top LAIA Sim window (works in VR), optional first-officer voice: the user's place, who to follow, simple speeds (no time targets), rare extensions; ground hints (wait, give way, hold short, line up after …) | Fly an LGA arrival and departure following only the hints | Hints are few, flyable and always make sense; the user never meets traffic on the ground |
 | **M9** | **Real-world traffic at the user's fields** | Today's real flights from AirLabs (delays, gates) plus live positions from OpenSky (credentials box in LAIA Sim settings), matched to AIG liveries, with no duplicates; falls back to AIG | Compare LAIA's LGA traffic with a live flight tracker at the same time | The same flights at about the same times, positions and gates; API call counts shown |
-| **M10** | **Planned departures** | Pushback and taxi times planned so each departure reaches the runway as its gap opens (including crossing-runway departures) | Busy LGA: watch the hold-short line | Short holding-short waits; departures fill the arrival gaps |
+| **M10** | **Planned departures and ground control** (step 4a: one-way flows, segment reservation, hold short and give way, no 180s on taxiways) | Pushback and taxi times planned so each departure reaches the runway as its gap opens (including crossing-runway departures) | Busy LGA: watch the hold-short line | Short holding-short waits; departures fill the arrival gaps |
 | **M11** | **Flow and runway changes** | A real-world ATIS (D-ATIS) feed at major airports, a wind check that requires the change to persist, a planned changeover (last and first aircraft), and notes to the user | Change the wind in the sim (or wait for a real ATIS change) | One clean changeover; committed aircraft keep their runway; the user gets a note with lead time |
 | **M12** | **Sectors, workload and frequencies** | Sector map per TRACON (feeders by STAR group, final, departures, satellites, altitude layers), fixed split plans, the workload model, splits opened ahead of time and kept stable, handoffs, traffic management (miles-in-trail, gate holds); map layer | The LGA evening push: watch splits happen on the map before the sectors fill | Splits happen 15–20 min before overload, never flip-flop, and always split along neighbouring STAR groups |
 | **M13** | **Learned airport profiles (GPU)** | Overnight training on the 2080 Ti: runway configurations by wind, speeds actually flown, delays, corridors, sector limits; shared learned data | Compare a learned airport against how it behaved before it was learned | Visible improvement in realism at learned airports |
