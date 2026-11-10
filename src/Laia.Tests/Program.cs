@@ -711,6 +711,49 @@ Console.WriteLine("== Hand-over: a scheduled arrival taken over from the whole s
     Check(holds == 0, "no holding far out on its own");
 }
 
+Console.WriteLine("== Neighbouring fields: runway traffic only, on the main airport's clock; satellite STARs are a last resort");
+{
+    var nm = Geo2.MPerNm;
+    var data = TestAirport.Build(false);
+    var map = new LocalMap(data.Lat, data.Lon);
+    var far = map.ToLatLon(new V2(-300 * nm, 60 * nm));
+    var sched = new Laia.Common.Airports.ScheduleData { Airport = "TEST", Source = "AIG" };
+    sched.Legs.Add(new() { Airline = "JBU", Operator = "JBU", Type = "A320", Reg = "N501JB", Flight = "501", Dep = "TEST", Arr = "KFAR", DepMin = 1990, ArrMin = 2060 });
+    var clock = 2000.0;
+    var nb = new TrafficWorld(new AirportModel(data), new TestSource(), seed: 2)
+    {
+        RunwayOnly = true, Level = TrafficLevel.Busy, Wind = new Wind(270, 10), WeekMinute = 2000, ClockFrom = () => clock,
+        Locate = c => c == "KFAR" ? far : null, Schedule = sched,
+    };
+    nb.SelectRunways(true);
+    Laia.Server.TrafficCore.Flight? dep = null; var airborne = false; var gone = false;
+    for (var t = 0.0; t < 1800 && !gone; t += 0.5)
+    {
+        clock = 2000 + t / 60 + 3;                        // 13–16 minutes after its gate time: it appears lined up
+        nb.WeekMinute = clock;
+        nb.Step(0.5);
+        dep ??= nb.Flights.FirstOrDefault(f => f.Callsign == "JBU501");
+        if (dep is not null && !dep.OnGround) airborne = true;
+        if (dep is not null && airborne && !nb.Flights.Contains(dep)) gone = true;
+    }
+    Check(dep is not null && dep.Spot is null, "a neighbour's departure appears lined up on the runway (no gate, no taxi)");
+    Check(airborne && gone, "it takes off and climbs away into the whole sky");
+    // Satellite STARs: an arrival from the south-east would pick ARRVL1, but if a neighbour also publishes it, it's a last resort.
+    var data2 = TestAirport.Build(false);
+    var map2 = new LocalMap(data2.Lat, data2.Lon);
+    Laia.Common.Airports.ProcedureLeg Fx(string name, double x, double y, int type = 18) { var (la, lo) = map2.ToLatLon(new V2(x, y)); return new() { Type = type, Fix = name, Lat = la, Lon = lo }; }
+    data2.Arrivals.Add(new() { Name = "OWNED2", Legs = { Fx("OWNAA", 20 * nm, -40 * nm, 15), Fx("OWNBB", 12 * nm, -18 * nm) } });
+    var se = map2.ToLatLon(new V2(300 * nm, -300 * nm));
+    var w2 = new TrafficWorld(new AirportModel(data2), new TestSource(), seed: 3) { Automatic = false, Wind = new Wind(270, 10), Locate = c => c == "KSEE" ? se : null };
+    w2.SelectRunways(true);
+    Laia.Common.Airports.ScheduleLeg L2(int n) => new() { Airline = "DAL", Operator = "DAL", Type = "A321", Reg = "N" + n, Flight = n.ToString(), Dep = "KSEE", Arr = "TEST" };
+    var before = w2.SpawnArrival(30, false, L2(1))!.Route;
+    w2.NeighbourStars = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "ARRVL" };
+    var after = w2.SpawnArrival(36, false, L2(2))!.Route;
+    Console.WriteLine($"  from the south-east: {before}  |  with ARRVL1 also published at a neighbour: {after}");
+    Check(before.StartsWith("ARRVL1") && after.StartsWith("OWNED2"), "a STAR a neighbouring field also publishes is only used when nothing else fits");
+}
+
 Console.WriteLine("== After a go-around, the aircraft comes back around and lands normally");
 {
     var apt = new AirportModel(TestAirport.Build(false));

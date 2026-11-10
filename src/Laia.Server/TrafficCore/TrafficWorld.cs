@@ -335,7 +335,11 @@ public sealed class TrafficWorld
                 foreach (var e in Apt.Ends)
                     if (e.Contains(f.Pos, 3)) { f.OnRunway = e.Runway; break; }
         }
-        if (Automatic && Level != TrafficLevel.Off && Apt.HasGround)
+        if (Automatic && Level != TrafficLevel.Off && RunwayOnly)
+        {
+            if (Schedule is { Legs.Count: > 0 } && WeekMinute >= 0) RunNeighbour();
+        }
+        else if (Automatic && Level != TrafficLevel.Off && Apt.HasGround)
         {
             if (Schedule is { Legs.Count: > 0 } && WeekMinute >= 0) RunSchedule();
             else Schedule_();
@@ -449,7 +453,18 @@ public sealed class TrafficWorld
     /// <summary>The schedule's clock: the real time, or in the peak test the replayed busiest hours.</summary>
     /// <summary>The schedule clock (minute of the week), shifted during the peak test.</summary>
     public double ScheduleClock => SchedNow;
-    private double SchedNow => ((WeekMinute + _peakOffset) % 10080 + 10080) % 10080;
+    private double SchedNow => ClockFrom?.Invoke() ?? ((WeekMinute + _peakOffset) % 10080 + 10080) % 10080;
+
+    /// <summary>
+    /// A neighbouring field (JFK and EWR around LGA, SFB around MCO): its traffic only appears on its runways —
+    /// arrivals land and disappear once slowed, departures appear lined up and take off — no gates or taxiing.
+    /// </summary>
+    public bool RunwayOnly { get; init; }
+    /// <summary>The schedule clock to follow (a neighbour follows the main airport's, so the peak test lines up).</summary>
+    public Func<double>? ClockFrom { get; set; }
+    public TrafficWorld? ClockOwner { get; set; }
+    /// <summary>STAR names also published at a neighbouring field (satellites): only used when nothing else fits.</summary>
+    public HashSet<string> NeighbourStars { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Finds the airport's busiest three hours in the week from its real schedule (movements per 15 minutes)
@@ -516,6 +531,68 @@ public sealed class TrafficWorld
             d = clash + 5;
         }
         return -1;
+    }
+
+    /// <summary>
+    /// A neighbouring field's schedule, runway only: departures appear lined up about 12 minutes after their gate time
+    /// (when the real one would be taking off) and climb out into the whole sky; arrivals are taken over from the whole
+    /// sky within 60 nm and land, disappearing once slowed on the runway.
+    /// </summary>
+    private void RunNeighbour()
+    {
+        var legs = Schedule!.Legs;
+        var me = Apt.Icao;
+        var active = Flights.Count(f => !f.Done);
+        const int cap = 10;
+        foreach (var l in legs)
+        {
+            if (active >= cap) break;
+            if (l.Dep == me && Keep(l))
+            {
+                var u = Until(l.DepMin);
+                if (u > -12 || u < -16 || _done.Contains(Key(l, 'D'))) continue;
+                if (l.Reg.Length > 0 && Flights.Any(f => !f.Done && f.Reg == l.Reg)) continue;
+                if (SpawnLinedUp(l) is not null) { _done.Add(Key(l, 'D')); active++; Movements++; }
+            }
+            else if (l.Arr == me && Keep(l))
+            {
+                var u = Until(l.ArrMin);
+                if (u > 30 || u < 1 || _done.Contains(Key(l, 'A'))) continue;
+                if (l.Reg.Length > 0 && Flights.Any(f => !f.Done && f.Reg == l.Reg)) continue;
+                var np = NetworkPosition(l);
+                if (np is null) continue;
+                var dist = Geo2.DistanceNm(Apt.Data.Lat, Apt.Data.Lon, np.Lat, np.Lon);
+                if (dist > 60) continue;
+                _done.Add(Key(l, 'A'));
+                if (dist > 12 && SpawnFromNetwork(l, np) is not null) { active++; Movements++; }
+            }
+        }
+    }
+
+    /// <summary>A neighbour's departure, lined up on the runway for its SID's side (runway-only fields).</summary>
+    private Flight? SpawnLinedUp(ScheduleLeg l)
+    {
+        if (DepRwy is null) SelectRunways(true);
+        if (DepRwy is null) return null;
+        var f = new Flight
+        {
+            Id = NewId(), Callsign = l.Callsign, Airline = l.Operator, Type = l.Type, Other = l.Arr, Kind = "departure", P = Perf.For(l.Type),
+            Reg = l.Reg, Title = l.Title, Brand = l.Airline,
+        };
+        f.Rwy = DepartureRunwayFor(f);
+        var rwy = f.Rwy;
+        if (rwy is null) return null;
+        // Only one at a time on the runway; the next one appears when it's free.
+        if (Flights.Any(o => !o.Done && o.Rwy?.Runway == rwy.Runway && o.OnGround) || ArrivalEta(rwy.Runway) < 60) return null;
+        f.Pos = rwy.Threshold + rwy.Dir * 60;
+        f.Heading = rwy.Heading;
+        f.AltFt = rwy.ElevationFt;
+        f.OnGround = true;
+        f.Timer = 10;
+        f.SetPhase("lined up", Time);
+        f.Lights = Nav | Beacon | Logo | Strobes | Landing | Taxi;
+        Flights.Add(f);
+        return f;
     }
 
     private void RunSchedule()
@@ -1313,9 +1390,11 @@ public sealed class TrafficWorld
         if (cands.Count == 0) return null;
         var want = BearingTo(origin);
         var options = new List<(Procedure p, Transition? t, double score)>();
+        // A STAR also published at a neighbouring field is really that field's (MSFS lists JOKRS4 and ALYNA4 for MCO
+        // too): it counts as 60° worse, so it's only used when nothing of the airport's own fits.
         foreach (var st in cands)
             foreach (var t in st.EnrouteTransitions.Count > 0 ? st.EnrouteTransitions.Select(t => (Transition?)t).ToList() : new List<Transition?> { null })
-                options.Add((st, t, Score(want, EntryFix(st, t))));
+                options.Add((st, t, Score(want, EntryFix(st, t)) + (NeighbourStars.Contains(AirportRules.Base(st.Name)) ? 60 : 0)));
         return Best(options);
     }
 
@@ -2191,7 +2270,7 @@ public sealed class TrafficWorld
         List<int>? route = null;
         var offset = 0;
         AirportModel.ParkingSpot? gate = null;
-        if (Apt.HasGround)
+        if (Apt.HasGround && !RunwayOnly)
         {
             gate = FindGate(f.P, f.Airline, f.Brand, f.Callsign);
             // Exits on the terminal side (where the gate is) first, then the first one the aircraft can make
@@ -2307,7 +2386,7 @@ public sealed class TrafficWorld
                     f.SetPhase("taxi in", Time); f.MaxKt = f.P.Heavy ? 16 : 20;
                 }
                 if (f.Phase == "landing roll" && f.Gs < 35) f.MaxKt = Math.Min(f.MaxKt, 30);
-                if (!Apt.HasGround && f.Phase == "landing roll" && f.Gs < 30) { f.Done = true; break; }
+                if ((!Apt.HasGround || RunwayOnly) && f.Phase == "landing roll" && f.Gs < 30) { f.Done = true; break; }
                 if (done)
                 {
                     if (f.Spot is not null && (f.Pos - f.Spot.P).Length < 5) { f.Heading = f.Spot.Heading; f.SetPhase("at gate", Time); f.Gs = 0; }

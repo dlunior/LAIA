@@ -161,6 +161,24 @@ public sealed class NetworkStore(WorldAirports world, ILogger<NetworkStore> log)
         }
     }
 
+    /// <summary>Airports within a radius with at least this many scheduled flights a week, busiest first.</summary>
+    public List<string> BusyAirportsNear(double lat, double lon, double radiusNm, int minWeekly, string except)
+    {
+        lock (_gate)
+        {
+            var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            foreach (var l in _legs)
+            {
+                counts[l.Dep] = counts.GetValueOrDefault(l.Dep) + 1;
+                counts[l.Arr] = counts.GetValueOrDefault(l.Arr) + 1;
+            }
+            return counts.Where(kv => kv.Value >= minWeekly && !kv.Key.Equals(except, StringComparison.OrdinalIgnoreCase))
+                .Select(kv => (kv.Key, kv.Value, p: world.Find(kv.Key)))
+                .Where(x => x.p is { } p && Geo2.DistanceNm(lat, lon, p.lat, p.lon) <= radiusNm)
+                .OrderByDescending(x => x.Value).Select(x => x.Key).ToList();
+        }
+    }
+
     public int AirborneNow(double weekMin)
     {
         lock (_gate)

@@ -12,6 +12,9 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     SimBriefService simbrief, ServerState state, ScheduleStore schedules, NetworkStore network, WorldAirports worldAirports, ILogger<TrafficEngine> log) : BackgroundService
 {
     private readonly object _gate = new();
+    private readonly List<TrafficWorld> _neighbours = new();
+    private List<string> _neighbourWant = new();
+    private DateTime _neighbourAt = DateTime.MinValue;
     private AtisReader? _atisReader;
     private AtisReader Atis => _atisReader ??= new AtisReader(log);
     private AaupReader? _aaupReader;
@@ -71,6 +74,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     private IEnumerable<TrafficWorld> Worlds()
     {
         if (_world is not null) yield return _world;
+        foreach (var n in _neighbours) yield return n;
         if (_testWorld is not null) yield return _testWorld;
         foreach (var w in _retiring) yield return w;
     }
@@ -253,6 +257,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                     alt = Math.Round(f.AltFt), gs = Math.Round(f.Gs), gate = f.Spot?.Label, ground = f.OnGround,
                 })).Where(f => f.Kind != "parked").ToList(),
                 parked = Worlds().Sum(x => x.Flights.Count(f => f.Kind == "parked")),
+                neighbours = _neighbours.Count == 0 ? null : string.Join(", ", _neighbours.Select(n => $"{n.Apt.Icao} ({n.Flights.Count} flying)")),
                 sky = network.Count == 0 ? network.Status : $"{network.AirborneNow(w?.ScheduleClock ?? WeekMinuteNow()):N0} flights in the air worldwide · {network.Status}",
             };
         }
@@ -267,6 +272,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         var near = freqs.NearestAirport(sim.Lat, sim.Lon);
         if (near is { } n && n.nm < 40)
             want.Add(n.ident.Length == 3 && n.ident.All(char.IsLetter) ? "K" + n.ident : n.ident);
+        want.AddRange(_neighbourWant);
         return airports.Missing(want, sim.Simulator ?? "");
     }
 
@@ -274,7 +280,11 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     public List<string> NeededSchedules(AircraftState sim)
     {
         var want = new List<string>();
-        lock (_gate) if (_world is not null) want.Add(_world.Apt.Icao);
+        lock (_gate)
+        {
+            if (_world is not null) want.Add(_world.Apt.Icao);
+            want.AddRange(_neighbourWant);
+        }
         var plan = simbrief.Plan;
         if (plan is not null) { want.Add(plan.Origin); want.Add(plan.Destination); }
         var list = schedules.Wanted(want);
@@ -316,7 +326,55 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
 
     // ------------------------------------------------------------------ loop
 
+    /// <summary>
+    /// The neighbouring fields around the traffic airport: the busiest scheduled airports within 40 nm (up to four),
+    /// flown runway-only on the main airport's schedule clock. Their STARs also tell the main airport which of its
+    /// published STARs really belong to a satellite (MSFS publishes some, like JOKRS4 at MCO, for both).
+    /// </summary>
+    private void UpdateNeighbours()
+    {
+        var main = _world;
+        if (main is null)
+        {
+            foreach (var n in _neighbours) { n.Automatic = false; _retiring.Add(n); }
+            _neighbours.Clear();
+            return;
+        }
+        if (DateTime.UtcNow - _neighbourAt > TimeSpan.FromMinutes(2))
+        {
+            _neighbourAt = DateTime.UtcNow;
+            _neighbourWant = network.BusyAirportsNear(main.Apt.Data.Lat, main.Apt.Data.Lon, 40, 14, main.Apt.Icao).Take(4).ToList();
+        }
+        foreach (var n in _neighbours.Where(n => !_neighbourWant.Contains(n.Apt.Icao) || n.ClockOwner != main).ToList())
+        {
+            n.Automatic = false; _retiring.Add(n); _neighbours.Remove(n);
+        }
+        var shared = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var icao in _neighbourWant)
+        {
+            var model = airports.Model(icao);
+            if (model is null) continue;
+            foreach (var a in model.Data.Arrivals) shared.Add(AirportRules.Base(a.Name));
+            if (_neighbours.Any(n => n.Apt.Icao == icao)) continue;
+            var nb = new TrafficWorld(model, source)
+            {
+                RunwayOnly = true, Level = Level, ClockFrom = () => main.ScheduleClock, ClockOwner = main,
+                Log = s => log.LogInformation("{msg}", s),
+            };
+            nb.Wind = main.Wind;
+            nb.SelectRunways(true);
+            _neighbours.Add(nb);
+            log.LogInformation("Neighbouring field: {icao} {name} (runway traffic only)", model.Icao, model.Name);
+        }
+        main.NeighbourStars = shared;
+    }
+
     private void UpdateWorld(AircraftState sim)
+    {
+        try { UpdateWorldCore(sim); } finally { UpdateNeighbours(); }
+    }
+
+    private void UpdateWorldCore(AircraftState sim)
     {
         var near = airports.Nearest(sim.Lat, sim.Lon, 40);
         if (near is { } n && n.model.HasGround)
@@ -374,12 +432,12 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                             w.UserPos = w.Apt.Map.ToXY(sim.Lat, sim.Lon);
                             w.UserOnGround = sim.OnGround;
                         }
-                        if (w == _world)
+                        if (w == _world || _neighbours.Contains(w))
                         {
                             w.Level = Level;
                             // The installed AIG schedule is the real one to follow (exact models and registrations).
                             if (w.Schedule is null) w.Schedule = schedules.Get(w.Apt.Icao);
-                            w.Gates = source.Gates(w.Apt.Icao);
+                            if (w == _world) w.Gates = source.Gates(w.Apt.Icao);
                             w.Atis = Atis.Get(w.Apt.Icao);
                             if (w.Rules is null && Aaup.Get(w.Apt.Icao) is { } aaup)
                             {
