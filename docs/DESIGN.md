@@ -283,9 +283,18 @@ LAIA must notice quickly when the real airport changes flow, and switch over log
 - **Learned per airport:**
   - Runway configurations used in each wind.
   - Real approach paths and vector patterns.
+  - **Radar-vector procedures, researched ahead of time.** Many SIDs are "fly runway heading, expect vectors" (LaGuardia's LGA departure, for example), and many STARs end in vectors with no joining point to an approach. For those, LAIA learns from real previous flights (ADS-B tracks) where they actually go:
+    - **Departures:** the headings, turn points and climb at each altitude after takeoff, per runway and per departure fix or direction, until they join their route.
+    - **Arrivals:** the downwind, base and intercept paths from the STAR's end to final, per runway configuration. This includes how far out they're turned in at busy and quiet times, and where traffic is extended or turned short.
+    - **Stored per airport and runway configuration,** as typical paths plus their normal spread, so not every flight flies exactly the same line.
+    - **Used by:** the AI traffic (vectors that look like the real airport's), the sequencer (its vector and extension options are the ones real controllers use there) and, in ATC mode, the controller's instructions to the user.
+    - **Until an airport has been learned,** the current generic vectors (downwind, base, intercept about 8 nm out) are used.
   - Arrival corridors (used to check and adjust the STAR groups and sector limits).
   - The speeds actually flown.
   - Typical delays.
+- **Researched ahead of time, tied to flight planning:**
+  - When a SimBrief plan is loaded, LAIA researches the departure and arrival airports and their neighbours in the background, so the learned data is ready before the user gets there.
+  - Airports already learned are refreshed now and then, for example when the procedures change or the profile is a few months old.
 - **Training** runs on the 2080 Ti overnight. Learned data is shareable with other users, all in the background with no user action.
 
 ### Step 7: The radio
