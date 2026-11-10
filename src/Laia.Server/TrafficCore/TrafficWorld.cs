@@ -660,8 +660,11 @@ public sealed class TrafficWorld
         if (route is null) return false;
         var pts = new List<V2> { f.Pos };
         var fwd = V2.FromBearing(f.Heading);
-        if (V2.Dot(Apt.Nodes[route[0]] - f.Pos, fwd) < 0)
+        var toFirst = Apt.Nodes[route[0]] - f.Pos;
+        if (V2.Dot(toFirst, fwd) < 0)
             pts.Add(f.Pos + fwd * 25 + fwd.Perp * 30); // turn around in a teardrop rather than on the spot
+        else if (toFirst.Length > 1 && V2.Dot(toFirst.Unit, fwd) < 0.85)
+            pts.Add(f.Pos + fwd * 20);                  // roll ahead a little and turn in an arc, not on the spot
         var offset = pts.Count;
         if (f.Phase == "taxi")
         {
