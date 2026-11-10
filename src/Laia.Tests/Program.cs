@@ -785,14 +785,14 @@ Console.WriteLine("== Arrival manager: two arrivals bunched far out are spaced w
     var world = new TrafficWorld(new AirportModel(TestAirport.Build(false)), new TestSource(), seed: 11) { Automatic = false, Wind = new Wind(270, 10) };
     world.SelectRunways(true);
     Laia.Common.Airports.ScheduleLeg L(string reg, string fl) => new() { Airline = "DAL", Operator = "DAL", Type = "A321", Reg = reg, Flight = fl, Dep = "KXXX", Arr = "TEST" };
-    var a = world.SpawnArrival(58, false, L("N1", "11"))!;
-    var b = world.SpawnArrival(59, false, L("N2", "22"))!;
+    // 4 nm apart (about a minute) on the same STAR: under the ~95 s needed at the runway.
+    var a = world.SpawnArrival(30, false, L("N1", "11"))!;
+    var b = world.SpawnArrival(34, false, L("N2", "22"))!;
     double landA = -1, landB = -1; var hA = a.LastHold; var hB = b.LastHold; var holds = 0;
     for (var t = 0.0; t < 3600 && (landA < 0 || landB < 0); t += 0.5)
     {
         world.Step(0.5);
         if (a.LastHold != hA || b.LastHold != hB) { holds++; hA = a.LastHold; hB = b.LastHold; Console.WriteLine($"  hold at t={t:0}: a {(a.ThrS - a.S) / Geo2.MPerNm:0.0} nm {a.Ias:0} kt; b {(b.ThrS - b.S) / Geo2.MPerNm:0.0} nm {b.Ias:0} kt slowed {b.Slowed} delay {b.Delay:0} / a delay {a.Delay:0}"); }
-        if (t % 60 == 0 && t <= 600) Console.WriteLine($"  t={t:0}: a {(a.ThrS - a.S) / Geo2.MPerNm:0.0} nm {a.Ias:0} kt {a.AltFt:0} ft seq {a.Seq}; b {(b.ThrS - b.S) / Geo2.MPerNm:0.0} nm {b.Ias:0} kt seq {b.Seq} slowed {b.Slowed} delay {b.Delay:0} etaNom {b.EtaNominal - a.EtaNominal:0}");
         if (landA < 0 && a.OnGround) landA = world.Time;
         if (landB < 0 && b.OnGround) landB = world.Time;
     }
