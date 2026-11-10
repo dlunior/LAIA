@@ -154,6 +154,22 @@ airport the user is at) must be as close to the real world as possible:
   3. Holding as the last resort.
 - **The plan is frozen** as aircraft get close, so nobody is re-sequenced on final.
 
+**A sequence that is dynamic but stable (the user's decision, 9 Nov 2026).** The sequence keeps adapting to reality
+(winds, delays, a slow climber, the user), but it must not churn so much that aircraft keep needing new instructions.
+- **Far out (before the freeze, about 30–40 minutes or ~150 nm from landing):** the order may change, but two aircraft only swap places if it saves real delay (at least about a minute in total), and an aircraft changes position at most a couple of times.
+- **Inside the freeze:** the order is fixed. Only the timing is fine-tuned, and a landing time moves by at most about 30 s per update.
+- **Instructions:** each aircraft gets a new speed or vector at most every 3–5 minutes, except for safety (a real loss of spacing). One clear plan per aircraft (for example "210 knots until DIXIE", or "turn left heading 240, expect direct CAMRN in 10 miles") rather than constant nudges.
+- **The user's slot is the most stable of all,** because the user can't react as instantly as an AI. It is only moved for a real reason (the user being well off their predicted time, or a go-around).
+
+### Step 2b: The live map (on the control page)
+An interactive map on the ATC PC's control page, which works from any PC, tablet or phone on the home network.
+- **Colours:** drawn (injected) traffic in one colour, the user in another, and simulated-but-not-drawn traffic in a third. Optionally a fourth for the other traffic from step 3 (injected by other programs, multiplayer).
+- **Click an aircraft** to see its callsign, type, airline, origin and destination, altitude and speed, phase, sector and frequency, its sequence number and landing time (ETA and scheduled), the delay being absorbed and how (speed, vector, hold), and its current instruction.
+- **Procedure overlays:** the SID, STAR and approach the selected aircraft (or every drawn aircraft) is flying, drawn on the map with its fixes and the published altitude and speed limits.
+- **Sequence panel:** the arrival sequence for each runway (order, landing times, spacing, delay, frozen or not), and the departure queue. Changes are highlighted, so you can watch the sequence adapt.
+- **Layers to switch on and off:** the drawn-traffic radius (40 nm), sector boundaries with the open splits and their frequencies, the airspace layer (250 nm), runways in use, and holding patterns.
+- **Style:** a dark map, as in SimRouteGen. Updated about once a second.
+
 ### Step 3: Every aircraft in the sky
 - **What LAIA Sim reads:** every other aircraft MSFS knows about within about 100 nm (injected, live traffic, multiplayer), plus the user's aircraft. It sends them to the server as traffic LAIA can't control.
 - **How they're used:** their paths are predicted, and LAIA's flights are sequenced and spaced around them.
