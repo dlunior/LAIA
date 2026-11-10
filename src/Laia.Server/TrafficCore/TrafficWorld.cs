@@ -1975,7 +1975,7 @@ public sealed class TrafficWorld
         if (f.WentAround) t = Math.Min(t, 200);
         // Published speed limits on the STAR and approach, and 250 knots below 10,000 ft (14 CFR 91.117(a)).
         t = Math.Min(t, ProcedureLimit(f, false));
-        if (f.AltFt < 10000) t = Math.Min(t, 250);
+        if (f.AltFt < 11500) t = Math.Min(t, 250);   // slowing for 250 kt by 10,000 ft
         return Math.Max(t, f.P.Vapp);
     }
 
@@ -2646,6 +2646,8 @@ public sealed class TrafficWorld
                 // Told to slow (or still too fast) outside the final approach: shallow the descent so it can slow
                 // ("descend OR slow down"); it catches up with the path afterwards.
                 if (f.Ias - target > 5 && dth > 6.5 && !f.Gear) vsTarget = Math.Max(vsTarget, -400);
+                // Not below 10,000 ft until slowed to 250 kt (14 CFR 91.117(a)): level off at 10,000 if need be.
+                if (f.Ias > 252 && f.AltFt > 9900 && f.AltFt < 12000) vsTarget = Math.Max(vsTarget, Math.Clamp((10000 - f.AltFt) * 1.5, -1500, 0));
                 f.Vs += Math.Clamp(vsTarget - f.Vs, -500 * dt, 500 * dt);
             }
             f.AltFt += f.Vs / 60 * dt;
