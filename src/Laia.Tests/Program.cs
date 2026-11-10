@@ -422,6 +422,20 @@ Console.WriteLine("== Vectored to an approach's own first fix, not a straight-in
     world.SelectRunways(true);
     var f = world.SpawnArrival(40, true)!;
     var pts = f.Path!.Points;
+    // With a published transition starting near the end of the STAR (like FEDEM for LGA's southwest arrivals),
+    // that transition is flown as published.
+    var data2 = TestAirport.Build(false);
+    data2.Arrivals.Clear(); data2.Approaches.Clear();
+    data2.Arrivals.Add(new() { Name = "WEST1", Legs = { Fix("WESTA", -35 * nm, 6 * nm, 15), Fix("WESTB", -20 * nm, 8 * nm) } });
+    data2.Approaches.Add(new() { Type = 10, Runway = "27", Suffix = "Y",
+        Transitions = { new() { Name = "FEDXM", Legs = { Fix("FEDXM", -14 * nm, 9 * nm, 15), Fix("DRIXS", 0, 9 * nm), Fix("GEMKX", 7 * nm, 7 * nm) } } },
+        FinalLegs = { Fix("GEMKX", 7 * nm, 7 * nm, 15), Fix("NYJXT", 5 * nm, 1.5 * nm), Fix("MANLX", 3.5 * nm, 0), Fix("RW27", 1500, 0) } });
+    var world2 = new TrafficWorld(new AirportModel(data2), new TestSource(), seed: 5) { Automatic = false, Wind = new Wind(270, 10) };
+    world2.SelectRunways(true);
+    var f2 = world2.SpawnArrival(40, true)!;
+    Console.WriteLine($"  with a transition: {f2.Route}");
+    Check(f2.Route.Contains("via FEDXM"), "the published approach transition nearest the end of the STAR is flown");
+    Check(f2.Path!.Points.Count(q => q.X > 6.5 * nm && Math.Abs(q.Y) < 2 * nm) == 0, "the transition keeps it out of the neighbour's airspace too");
     // The "neighbour" sits on the extended centreline 8–12 nm east: nothing should go there.
     var intoNeighbour = pts.Count(q => q.X > 6.5 * nm && Math.Abs(q.Y) < 2 * nm);
     var overField = pts.Count(q => q.Length < 3 * nm && !(Math.Abs(q.Y) < 600 && q.X > -1600));

@@ -1263,6 +1263,35 @@ public sealed class TrafficWorld
                     // the real approach — not a generic straight-in final on the extended centreline, which can run
                     // through a neighbour's airspace (LGA's RNAV Y 31 curves in from GEMKE in the east, clear of JFK;
                     // a straight 10-nm final to 31 points right at JFK).
+                    // First choice: the approach's published transition that starts closest to where the STAR ends
+                    // (within about 12 nm), flown exactly as published — e.g. LGA's RNAV Y 31 from the southwest STARs
+                    // (ending at PROUD) via FEDEM, crossing the field at 4,000 ft and round to the east.
+                    var label0 = $"{typeLabel} {rwy.Ident}{(app.Suffix.Length > 0 ? " " + app.Suffix : "")}";
+                    var e0 = starPts[^1].P;
+                    Transition? bestT = null; var bestD = double.MaxValue;
+                    foreach (var tr in app.Transitions)
+                    {
+                        var first = tr.Legs.FirstOrDefault(l => l.Lat != 0 || l.Lon != 0);
+                        if (first is null) continue;
+                        var dd = (Apt.ToXY(first.Lat, first.Lon) - e0).Length;
+                        if (dd < bestD) { bestD = dd; bestT = tr; }
+                    }
+                    if (bestT is not null && bestD <= 12 * Geo2.MPerNm)
+                    {
+                        var tl = new List<ProcedureLeg>(bestT.Legs);
+                        tl.AddRange(app.FinalLegs);
+                        var tp = Apt.LegsToPoints(tl, e0, 4000, out _);
+                        var tc = tp.FindIndex(p => p.Fix.StartsWith("RW") || rwy.Along(p.P) > -200);
+                        if (tc >= 0) tp.RemoveRange(tc, tp.Count - tc);
+                        if (tp.Count >= 2)
+                        {
+                            var lt = tp[^1].P;
+                            var at = rwy.Along(lt);
+                            if (at <= -2 * Geo2.MPerNm && Math.Abs(rwy.Offset(lt)) <= Math.Abs(at) * Math.Tan(25 * Math.PI / 180))
+                                return ($"{label0} via {bestT.Name}", tp);
+                        }
+                    }
+                    // Otherwise: vectors to the approach's first fix.
                     var app1 = Apt.LegsToPoints(app.FinalLegs, starPts[^1].P, 3000, out _);
                     var cut1 = app1.FindIndex(p => p.Fix.StartsWith("RW") || rwy.Along(p.P) > -200);
                     if (cut1 >= 0) app1.RemoveRange(cut1, app1.Count - cut1);
