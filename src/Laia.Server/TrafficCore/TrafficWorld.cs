@@ -131,6 +131,8 @@ public sealed class TrafficWorld
     public List<RunwayEnd> ArrRwys { get; private set; } = new();
     /// <summary>Every departure runway in use; DepRwy is the main one.</summary>
     public List<RunwayEnd> DepRwys { get; private set; } = new();
+    /// <summary>The airport's own published runway rules (read from its FAA AAUPs), when it has any.</summary>
+    public AirportRules? Rules { get; set; }
     /// <summary>Where an airport is (lat, lon), for choosing the STAR from the origin and the SID towards the destination.</summary>
     public Func<string, (double lat, double lon)?>? Locate { get; set; }
 
@@ -1341,6 +1343,12 @@ public sealed class TrafficWorld
         var pos = Across(list, out var axis).Select(x => Math.Abs(x) < 0.3 ? x : Math.Sign(x)).ToList();
         var serving = Enumerable.Range(0, list.Count).Where(i => star is null || Serves(star.Value.p, list[i])).ToList();
         if (serving.Count == 0) serving = Enumerable.Range(0, list.Count).ToList();
+        // The airport's published rule for this STAR (its AAUP), when it names runways that are in use.
+        if (star is { } srr && Rules?.ForStar(srr.p.Name) is { } rule)
+        {
+            var ruled = serving.Where(i => rule.Runways.Contains(list[i].Ident)).ToList();
+            if (ruled.Count > 0) serving = ruled;
+        }
         var side = star is { } st ? SideOf(axis, EntryFix(st.p, st.t)) : BearingTo(origin) is { } b ? V2.Cross(axis, V2.FromBearing(b)) : 0;
         int Queue(RunwayEnd e) => Flights.Count(o => !o.Done && o.Kind == "arrival" && !o.OnGround && o.Rwy?.Runway == e.Runway);
         var minQ = serving.Min(i => Queue(list[i]));
@@ -1368,7 +1376,7 @@ public sealed class TrafficWorld
         var serving = Enumerable.Range(0, list.Count).Where(i => sid is null || Serves(sid.Value.p, list[i])).ToList();
         if (serving.Count == 0) serving = Enumerable.Range(0, list.Count).ToList();
         // The airport's own rule for this SID (its AAUP), when it names runways that are in use.
-        var rule = sid is { } sr ? AirportRules.ForSid(Apt.Icao, sr.p.Name) : null;
+        var rule = sid is { } sr ? Rules?.ForSid(sr.p.Name) : null;
         if (rule is not null)
         {
             var ruled = serving.Where(i => rule.Runways.Contains(list[i].Ident)).ToList();

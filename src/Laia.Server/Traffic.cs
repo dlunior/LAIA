@@ -14,6 +14,8 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     private readonly object _gate = new();
     private AtisReader? _atisReader;
     private AtisReader Atis => _atisReader ??= new AtisReader(log);
+    private AaupReader? _aaupReader;
+    private AaupReader Aaup => _aaupReader ??= new AaupReader(log);
     private TrafficWorld? _world;       // the airport near the user (with layout)
     private TrafficWorld? _testWorld;   // runway-only world for test buttons at airports without layout
     private readonly List<TrafficWorld> _retiring = new();
@@ -237,6 +239,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 layout = w is null ? null : $"{w.Apt.Spots.Count} parking spots, {w.Apt.Data.Departures.Count} SIDs, {w.Apt.Data.Arrivals.Count} STARs, {w.Apt.Data.Approaches.Count} approaches",
                 landing = w is null ? null : string.Join(", ", w.ArrRwys.Select(e => e.Ident).DefaultIfEmpty(w.ArrRwy?.Ident ?? "")),
                 approach = w?.ApproachInUse,
+                rules = w?.Rules is { Charts.Length: > 0 } ru ? ru.Describe() : null,
                 atis = w?.Atis.CodeArr is { } code ? $"real ATIS info {code}" : w is null ? null : "no ATIS: runways from the wind",
                 departing = w is null ? null : string.Join(", ", w.DepRwys.Select(e => e.Ident).DefaultIfEmpty(w.DepRwy?.Ident ?? "")),
                 airportsOnFile = airports.Count,
@@ -377,6 +380,11 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                             if (w.Schedule is null) w.Schedule = schedules.Get(w.Apt.Icao);
                             w.Gates = source.Gates(w.Apt.Icao);
                             w.Atis = Atis.Get(w.Apt.Icao);
+                            if (w.Rules is null && Aaup.Get(w.Apt.Icao) is { } aaup)
+                            {
+                                w.Rules = AaupReader.Rules(aaup.text, aaup.charts, w.Apt.Data);
+                                if (aaup.charts.Length > 0) log.LogInformation("{icao}: {rules}", w.Apt.Icao, w.Rules.Describe());
+                            }
                             w.Locate ??= code => worldAirports.Find(code) is { } p ? (p.lat, p.lon) : null;
                         }
                         w.WeekMinute = live && sim!.ZuluWeekMinute >= 0 ? sim.ZuluWeekMinute : WeekMinuteNow();

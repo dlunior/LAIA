@@ -631,12 +631,40 @@ Console.WriteLine("== Vectors to final: downwind, base, a 20–30° intercept 8�
     }
 }
 
-Console.WriteLine("== An airport's own published rules (its AAUP) narrow the runway choice");
+Console.WriteLine("== Airport rules read from the FAA's AAUP text (any airport, no airport-specific code)");
 {
-    var r1 = AirportRules.ForSid("KMCO", "JEEMY4");
-    var r2 = AirportRules.ForSid("KMCO", "OSPRY1");
-    Check(r1 is not null && r1.Runways.Contains("35L") && r2 is not null && r2.Runways.Contains("36R") && AirportRules.ForSid("KMCO", "CITR1") is null && AirportRules.ForSid("KLGA", "JEEMY4") is null,
-        "Orlando: JEEMY/FATHE/DDANY/MZULO depart the east runways, RDSOX/OSPRY/FSHUN the west (MCO RNAV Departure AAUP)");
+    // The text of Orlando's RNAV Departure AAUP (AL-571), as a PDF text extractor gives it.
+    var text = string.Join("\n", new[]
+    {
+        "5. SPECIFIC INFORMATION: 0700-2300 local runway 36L/R, 35L/R RNAV simultaneous",
+        "departures, all RNAV equipped aircraft departing should expect to fly an MCO RNAV DEPARTURE",
+        "• Final runway assignments will be issued on initial contact with Ground Control",
+        "Departing Runways 35L/R 17L/R",
+        "DDANY, MZULO, JEEMY, FATHE - Expect to Depart Runway 35L",
+        "Departing Runways 36L/R 18L/R",
+        "RDSOX, OSPRY, FSHUN - Expect to Depart Runway 36R",
+        "RDSOX, OSPRY,", "FSHUN", "DDANY, MZULO,", "JEEMY, FATHE", "18R 18L", "36L 36R 35L",
+    });
+    var sids = new[] { "CITR1", "DDANY3", "FATHE4", "FSHUN4", "JEEMY4", "MZULO3", "ORLA6", "OSPRY1", "RDSOX1" };
+    var stars = new[] { "GRNCH5", "PRICY5", "SNFLD3", "MUNGI1" };
+    var rules = AirportRules.Parse(text, sids, stars, "RNAV DEPARTURE AAUP");
+    Console.WriteLine("  " + rules.Describe());
+    var east = rules.ForSid("JEEMY4"); var west = rules.ForSid("OSPRY1");
+    Check(rules.Rules.Count == 2 && east is not null && string.Join(" ", east.Runways) == "35L 35R 17L 17R" && west is not null && string.Join(" ", west.Runways) == "36L 36R 18L 18R"
+        && rules.ForSid("CITR1") is null && rules.ForStar("GRNCH5") is null,
+        "Orlando: JEEMY/FATHE/DDANY/MZULO → the east runways, RDSOX/OSPRY/FSHUN → the west (read from the AAUP text)");
+    Check(AaupReader_Cycle(new DateTime(2026, 11, 10)) == "2611" && AaupReader_Cycle(new DateTime(2026, 11, 26)) == "2612" && AaupReader_Cycle(new DateTime(2027, 1, 5)) == "2613" && AaupReader_Cycle(new DateTime(2027, 1, 25)) == "2701",
+        "the FAA chart cycle is worked out from the date (29 OCT 2026 = 2611)");
+    static string AaupReader_Cycle(DateTime d)
+    {
+        // Same arithmetic as AaupReader.Cycle (the server class isn't compiled into these checks).
+        var refStart = new DateTime(2026, 10, 29);
+        var n = (int)Math.Floor((d.Date - refStart).TotalDays / 28);
+        var start = refStart.AddDays(28 * n);
+        var first = start;
+        while (first.AddDays(-28).Year == start.Year) first = first.AddDays(-28);
+        return $"{start:yy}{(int)((start - first).TotalDays / 28) + 1:00}";
+    }
 }
 
 Console.WriteLine("== After a go-around, the aircraft comes back around and lands normally");

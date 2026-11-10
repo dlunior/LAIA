@@ -140,6 +140,7 @@ async function pollTraffic(){try{const r=await fetch("/api/traffic");const t=awa
   else{a=st.airportsOnFile?`No airport layout near you yet (${st.airportsOnFile} airports on file). LAIA Sim reads your departure and destination airports from MSFS automatically.`:"No airport layout yet: LAIA Sim reads your departure and destination airports from MSFS automatically once you load a flight.";}
   if(st.schedule)a+=" "+esc(st.schedule)+".";
   if(st.sky)a+=" Whole sky: "+esc(st.sky)+".";
+  if(st.rules)a+=" Airport rules: "+esc(st.rules)+".";
   $("tAirport").innerHTML=a;
   $("tList").innerHTML=(st.flights||[]).map(f=>`<dt>${esc(f.callsign)} · ${esc(f.type)} · ${f.kind==="departure"?"to":"from"} ${esc(f.other||"?")}</dt><dd>${esc(f.phase)}${f.runway?" · runway "+esc(f.runway):""}${f.gate?" · "+esc(f.gate):""}${f.route?" · "+esc(f.route):""} · ${f.gs} kt${f.ground?"":" · "+f.alt.toLocaleString()+" ft"}</dd>`).join("");}catch(e){}}
 setInterval(pollTraffic,1000);
