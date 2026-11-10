@@ -101,10 +101,24 @@ work runs on a second PC on the home network, so the sim PC stays fast.
 
 ## 4. Roadmap (agreed order)
 
-### Step 1: TRACON-wide world and prediction
-- **Simulate every airport inside the TRACON** from its real AIG schedule. Around LGA that is JFK, EWR, the satellites (ISP, HPN, TEB …) and overflights. Draw only the aircraft near the user (about 25–40 nm); everything else lives on the ATC PC.
-- **Arrivals start about 200 nm out:** in cruise, then top of descent, then the STAR. Departures climb all the way out of the area.
-- **Trajectory prediction** for every flight: its ETA at each fix and at the runway, from its route, speed profile and winds, recomputed every few seconds.
+### Step 1: The whole sky, simulated in layers, with prediction
+
+All scheduled traffic flies logically, not just at the user's departure and arrival airports. Every flight in
+the installed AIG schedules exists and moves according to its schedule. Only the aircraft near the user are drawn in
+the sim. The user's decision (9 Nov 2026): "they all don't need to be rendered in the sim but definitely flying logically".
+
+Three layers, with a flight moving smoothly from one to the next:
+
+| Layer | Where | How it's simulated | Cost |
+|---|---|---|---|
+| **Network** | Every scheduled flight in the AIG schedules (the whole region, about 480,000 legs a week) | Its position along the route from the schedule's times: at the gate, taxi, climb, cruise, descent, landed. Its gate time comes from the schedule. | Tiny: thousands of flights, a few milliseconds |
+| **Airspace** | Within about 250 nm of the user, plus the user's departure and arrival TRACONs | Full flight paths (SID, airways or a direct route, STAR, approach), speeds and winds; trajectory prediction (ETAs at fixes and runways); sequencing; sectors and frequencies. Every airport in those TRACONs is active: around LGA that is JFK, EWR, the satellites (ISP, HPN, TEB …) and overflights. | Modest: the ATC PC's CPU handles hundreds of flights |
+| **Rendered** | Within about 25–40 nm of the user | Everything above, plus ground movement on the real taxiways and gates, drawn in MSFS. | As today |
+
+- **Moving between layers:** a flight entering the airspace layer keeps its position, altitude, speed and schedule. On the ground at an airport without a layout read from MSFS, gate and taxi times are simulated, not drawn.
+- **Arrivals start in cruise:** they're already flying when they reach the airspace layer (top of descent, then the STAR). Departures climb all the way out of the area.
+- **Trajectory prediction** for every flight in the airspace layer: its ETA at each fix and at the runway, from its route, speed profile and winds, recomputed every few seconds.
+- **Reading the schedules:** the server reads all of them at once (one pass over the AIG files, a few seconds), instead of one airport at a time.
 
 ### Step 2: Arrival sequencing (like a real arrival manager)
 - **Landing order and times:** build them from the predictions, respecting CWT spacing, the runway's landing rate and departure gaps.
