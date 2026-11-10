@@ -278,8 +278,10 @@ public sealed class TrafficWorld
     private bool Keep(ScheduleLeg l)
     {
         var pct = Level switch { TrafficLevel.Light => 35, TrafficLevel.Normal => 65, _ => 100 };
-        var h = (uint)(l.Callsign + l.Dep + l.Arr + l.DepMin).GetHashCode() % 100;
-        return h < pct;
+        // Whole airframes are kept or left out (so an aircraft that lands also leaves again), the same ones every time.
+        uint h = 2166136261;
+        foreach (var c in l.Reg.Length > 0 ? l.Reg : l.Callsign) h = (h ^ c) * 16777619;
+        return h % 100 < pct;
     }
 
     private static string Key(ScheduleLeg l, char kind) => $"{kind}|{l.Reg}|{l.Flight}|{l.DepMin}";
@@ -289,6 +291,8 @@ public sealed class TrafficWorld
     /// push back at their scheduled times, arrivals are placed so they land at theirs, and an arriving airframe
     /// later leaves again on its next scheduled flight.
     /// </summary>
+    private double _lastSchedArr = -1e9, _lastSchedArrDist;
+
     private void RunSchedule()
     {
         var (maxObjects, maxActive, _, _) = Budget;
@@ -302,10 +306,23 @@ public sealed class TrafficWorld
             _filled = true;
             // Made-up aircraft from before the schedule arrived make way for the real ones.
             foreach (var f in Flights.Where(f => f.Kind == "parked" && f.Phase == "parked" && f.Reg.Length == 0)) f.Done = true;
-            // Aircraft at the gates now: the ones leaving in the next few hours.
+            // Aircraft at the gates now: every airframe whose last flight landed here and whose next one leaves
+            // from here (overnight too — at night the gates fill up with the morning's first departures), plus
+            // aircraft leaving in the next few hours. Soonest departures first if there isn't room for all.
             var parked = Flights.Count(f => f.Kind == "parked");
-            var upcoming = deps.Where(l => Until(l.DepMin) is > 4 and < 240).OrderBy(l => Until(l.DepMin))
-                .GroupBy(l => l.Reg).Select(g => g.First()).ToList();
+            var upcoming = new List<ScheduleLeg>();
+            foreach (var g in deps.Where(l => l.Reg.Length > 0 && Until(l.DepMin) is > 4 and < 1080).GroupBy(l => l.Reg))
+            {
+                var next = g.OrderBy(l => Until(l.DepMin)).First();
+                var untilDep = Until(next.DepMin);
+                var lastArr = arrs.Where(a => a.Reg == g.Key && Until(a.ArrMin) is < -2 and > -1440).Select(a => -Until(a.ArrMin)).DefaultIfEmpty(double.MaxValue).Min();
+                var lastDep = deps.Where(d => d.Reg == g.Key && Until(d.DepMin) is <= 4 and > -1440).Select(d => -Until(d.DepMin)).DefaultIfEmpty(double.MaxValue).Min();
+                var arrivedAndWaiting = lastArr < double.MaxValue && lastArr < lastDep;
+                var flyingIn = arrs.Any(a => a.Reg == g.Key && Until(a.ArrMin) is >= -2 && Until(a.ArrMin) < untilDep);
+                if (flyingIn) continue;                                  // it lands first, then leaves
+                if (arrivedAndWaiting || untilDep < 240) upcoming.Add(next);
+            }
+            upcoming = upcoming.OrderBy(l => Until(l.DepMin)).ToList();
             var room = Math.Max(0, maxObjects - maxActive - parked);
             var placed = 0;
             foreach (var l in upcoming)
@@ -318,10 +335,15 @@ public sealed class TrafficWorld
                 try { SpawnParked(gate, l); placed++; } catch (Exception ex) { Log($"Couldn't park {l.Callsign}: {ex.Message}"); }
             }
             // Arrivals already on their way in.
+            var lastDist = 0.0;
             foreach (var l in arrs.Where(l => Until(l.ArrMin) is >= 1 and <= 13).OrderBy(l => Until(l.ArrMin)))
             {
                 _done.Add(Key(l, 'A'));
-                SpawnArrival(Math.Clamp(Until(l.ArrMin) * 3.2, 7, 40), false, l);
+                // Spread out along the approach, at least 5 nm apart, rather than all at the same point.
+                var d = Math.Max(Math.Clamp(Until(l.ArrMin) * 3.2, 7, 40), lastDist + 5);
+                if (d > 45) break;
+                lastDist = d;
+                SpawnArrival(d, false, l);
             }
             Log($"{me}: following the real {Schedule.Source} schedule ({deps.Count} departures and {arrs.Count} arrivals a week at this level); {placed} aircraft at the gates waiting for their next flight");
         }
@@ -349,7 +371,10 @@ public sealed class TrafficWorld
             if (u > 13 || u < 1) continue;
             if (!_done.Add(Key(l, 'A'))) continue;
             if (active >= maxActive || Flights.Count >= maxObjects) { Log($"{l.Callsign}: skipped (traffic limit)"); continue; }
-            if (SpawnArrival(Math.Clamp(u * 3.2, 7, 40), false, l) is not null) { active++; Movements++; }
+            // Two flights due the same minute: the second one starts further out.
+            var d = Math.Clamp(u * 3.2, 7, 40);
+            if (Time - _lastSchedArr < 60) d = Math.Max(d, _lastSchedArrDist + 5);
+            if (SpawnArrival(d, false, l) is not null) { active++; Movements++; _lastSchedArr = Time; _lastSchedArrDist = d; }
         }
         // Too many parked aircraft: remove the ones with no flight soon.
         if (Flights.Count > maxObjects)

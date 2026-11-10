@@ -110,6 +110,7 @@ internal sealed class Updater
                     try
                     {
                         Process.Start(new ProcessStartInfo(file) { UseShellExecute = true });
+                        StartAgainLater();
                         Log.Write("Closing LAIA Sim so the installer can replace it");
                         ExitRequested?.Invoke();
                         break;
@@ -125,6 +126,23 @@ internal sealed class Updater
             }
         }
         else if (!ServerUpdate) Notify?.Invoke("LAIA", $"Both PCs are up to date ({_latest.Version}).");
+    }
+
+    /// <summary>
+    /// If the installer doesn't finish (a Windows prompt left unanswered, or cancelled), LAIA Sim would stay closed.
+    /// A hidden Windows PowerShell waits five minutes and starts LAIA Sim again if it isn't running by then.
+    /// </summary>
+    private static void StartAgainLater()
+    {
+        try
+        {
+            var exe = Environment.ProcessPath;
+            if (string.IsNullOrEmpty(exe)) return;
+            var cmd = $"Start-Sleep -Seconds 300; if (-not (Get-Process LaiaSim -ErrorAction SilentlyContinue)) {{ Start-Process -FilePath '{exe.Replace("'", "''")}' }}";
+            Process.Start(new ProcessStartInfo("powershell.exe", $"-NoProfile -WindowStyle Hidden -Command \"{cmd}\"")
+                { UseShellExecute = false, CreateNoWindow = true });
+        }
+        catch (Exception ex) { Log.Write("Couldn't set up the restart after the update: " + ex.Message); }
     }
 
     private async Task CopyLogAsync(ServerInfo server, string name, string fileName)

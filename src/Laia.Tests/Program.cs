@@ -245,6 +245,12 @@ Console.WriteLine("== Real gates override the scenery's gate assignments");
         sched.Legs.Add(new() { Airline = "DAL", Operator = "DAL", Title = "T", Type = "B739", Reg = $"N{i}DL", Flight = $"{150 + i}", Dep = "TEST", Arr = "KYYY", DepMin = start + 30 + i * 5, ArrMin = start + 150 });
         sched.Legs.Add(new() { Airline = "UAL", Operator = "UAL", Title = "U", Type = "A320", Reg = $"N{i}UA", Flight = $"{300 + i}", Dep = "TEST", Arr = "KZZZ", DepMin = start + 32 + i * 5, ArrMin = start + 120 });
     }
+    // An aircraft that landed three hours ago and leaves tomorrow morning is at its gate overnight.
+    sched.Legs.Add(new() { Airline = "DAL", Operator = "DAL", Title = "T", Type = "B739", Reg = "N900DL", Flight = "900", Dep = "KYYY", Arr = "TEST", DepMin = start - 330, ArrMin = start - 180 });
+    sched.Legs.Add(new() { Airline = "DAL", Operator = "DAL", Title = "T", Type = "B739", Reg = "N900DL", Flight = "901", Dep = "TEST", Arr = "KYYY", DepMin = start + 600, ArrMin = start + 750 });
+    // Two arrivals due the same minute don't appear on top of each other.
+    sched.Legs.Add(new() { Airline = "UAL", Operator = "UAL", Title = "U", Type = "A320", Reg = "N800UA", Flight = "800", Dep = "KZZZ", Arr = "TEST", DepMin = start - 120, ArrMin = start + 3 });
+    sched.Legs.Add(new() { Airline = "UAL", Operator = "UAL", Title = "U", Type = "A320", Reg = "N801UA", Flight = "801", Dep = "KZZZ", Arr = "TEST", DepMin = start - 125, ArrMin = start + 3 });
     var world = new TrafficWorld(apt, new TestSource(), seed: 5) { Level = TrafficLevel.Busy, Wind = new Wind(270, 8), Schedule = sched, WeekMinute = start, Gates = real };
     var log = new List<string>();
     world.Log = s => log.Add(s);
@@ -256,6 +262,9 @@ Console.WriteLine("== Real gates override the scenery's gate assignments");
     Check(at.Where(a => a.Airline == "DAL" && a.Callsign != "DAL150").All(a => Num(a.gate) is <= 5 or >= 14), "Delta parks at its real gates (or next to them), not the scenery's");
     Check(at.Where(a => a.Airline == "UAL").All(a => Num(a.gate) is >= 9 and <= 13), "United parks at its real gates (or next to them)");
     Check(log.Any(l => l.Contains("real gates from AirLabs")), "the real-gate plan is logged");
+    Check(world.Flights.Any(f => f.Reg == "N900DL" && f.Kind == "parked"), "an aircraft that landed earlier waits at its gate overnight for its morning flight");
+    var two = world.Flights.Where(f => f.Callsign is "UAL800" or "UAL801").ToList();
+    Check(two.Count == 2 && (two[0].Pos - two[1].Pos).Length > 4 * 1852, "two arrivals due at the same time start at least 4 nm apart");
 }
 
 Console.WriteLine("== Traffic starts even when no installed model fits the small gates");
