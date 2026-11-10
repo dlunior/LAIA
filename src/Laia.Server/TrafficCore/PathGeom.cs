@@ -85,12 +85,12 @@ public sealed class PathGeom
                 {
                     if ((p[i + 1] - p[i]).Length > 30) continue;
                     var a0 = p[i - 1]; var a1 = p[i]; var b0 = p[i + 1]; var b1 = p[i + 2];
-                    var r = a1 - a0; var q = b1 - b0;
-                    var den = V2.Cross(r, q);
-                    if (Math.Abs(den) < 1e-6 * r.Length * q.Length) continue;
-                    var t = V2.Cross(b0 - a0, q) / den;
-                    var x = a0 + r * t;
-                    if ((x - a1).Length > 18 || (x - b0).Length > 18 || t < 0.5) continue;
+                    var rv = a1 - a0; var qv = b1 - b0;
+                    var den = V2.Cross(rv, qv);
+                    if (Math.Abs(den) < 1e-6 * rv.Length * qv.Length) continue;
+                    var tm = V2.Cross(b0 - a0, qv) / den;
+                    var x = a0 + rv * tm;
+                    if ((x - a1).Length > 18 || (x - b0).Length > 18 || tm < 0.5) continue;
                     p[i] = x;
                     p.RemoveAt(i + 1);
                     for (var j = 0; j < map.Count; j++) if (map[j] > i) map[j]--;
