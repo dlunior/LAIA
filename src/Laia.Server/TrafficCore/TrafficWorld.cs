@@ -627,6 +627,11 @@ public sealed class TrafficWorld
         pools.Add(free.Where(s => AirlinesAt(s).Count == 0).ToList());
         pools.Add(free);
         var pool = pools.First(x => x.Count > 0);
+        // Not next to an aircraft that is pushing back or about to (it would meet the inbound head-on in the lane),
+        // when another suitable stand is free.
+        var calm = pool.Where(s => !Flights.Any(o => !o.Done && (o.Pos - s.P).Length < 130 &&
+            (o.Phase is "pushback" or "engine start" || (o.Phase == "boarding" && o.Timer < 150) || (o.Phase == "taxi" && NearStands(o.Pos, 60))))).ToList();
+        if (calm.Count > 0) pool = calm;
         // The smallest stand that fits, so the big ones stay free for the big aircraft.
         var minSize = pool.Min(s => s.Size);
         pool = pool.Where(s => s.Size == minSize).ToList();
