@@ -1356,6 +1356,16 @@ public sealed class TrafficWorld
         var minQ = serving.Min(i => Queue(list[i]));
         var best = serving.OrderByDescending(i => pos[i] * side * 2 + pos[i] * ramp * 4 - (ArrRwys.Any(a => a.Runway == list[i].Runway) ? 0.5 : 0) - 0.25 * (Queue(list[i]) - minQ))
             .ThenByDescending(i => list[i].LengthM).First();
+        // For the log: why this runway.
+        string Side(double v) => Math.Abs(v) < 0.25 ? "straight out" : (V2.Cross(axis, V2.FromBearing(Geo2.Norm(axis.Bearing + 90))) * v > 0 ? "to the right of the runways" : "to the left of the runways");
+        var why = new List<string>();
+        if (sid is { } sd2) why.Add($"{sd2.p.Name}{(sd2.t is { } tt ? "." + tt.Name : "")} towards {f.Other} exits {Side(side)}");
+        else why.Add($"no SID; {f.Other} lies {Side(side)}");
+        if (ramp != 0) why.Add($"its stand is outside the runways, {(ramp * pos[best] > 0 ? "on this runway's side" : "on the other side")}");
+        var q = Queue(list[best]) - minQ;
+        if (q > 0) why.Add($"{q} more waiting here than on the least busy runway");
+        if (ArrRwys.Any(a => a.Runway == list[best].Runway)) why.Add("also a landing runway");
+        Log($"{f.Callsign}: departing runway {list[best].Ident} of {string.Join("/", list.Select(e => e.Ident))} — {string.Join("; ", why)}");
         return list[best];
     }
 
