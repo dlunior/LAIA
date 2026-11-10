@@ -61,7 +61,7 @@ Console.WriteLine("== Eased taxi turns");
         var (q, _, k) = dpath.At(sd);
         maxK = Math.Max(maxK, Math.Abs(k));
         var off = q.Y > -1 ? Math.Abs(q.Y) : Math.Abs(q.X - 310);
-        if (q.X < 300 || q.Y < -40) maxOff = Math.Max(maxOff, off);
+        if (q.X < 220 || q.Y < -90) maxOff = Math.Max(maxOff, off);   // on the straights, away from the turn
     }
     Console.WriteLine($"  alley turn: tightest radius {1 / Math.Max(1e-9, maxK):0} m, furthest off the line on the straights {maxOff:0.0} m");
     Check(1 / Math.Max(1e-9, maxK) >= 20, $"a turn into an alley through short scenery pieces stays a proper curve (tightest {1 / Math.Max(1e-9, maxK):0} m radius)");

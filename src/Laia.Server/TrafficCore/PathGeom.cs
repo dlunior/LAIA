@@ -76,6 +76,30 @@ public sealed class PathGeom
                 for (var j = 0; j < map.Count; j++) map[j] = remap[map[j]];
                 p = kept;
             }
+            // Two corners close together (a junction drawn as a short dog-leg) become one turn where the line in
+            // and the line out meet, so the turn has room for its full curve.
+            for (var pass = 0; pass < 4; pass++)
+            {
+                var merged = false;
+                for (var i = 1; i + 2 < p.Count; i++)
+                {
+                    if ((p[i + 1] - p[i]).Length > 30) continue;
+                    var a0 = p[i - 1]; var a1 = p[i]; var b0 = p[i + 1]; var b1 = p[i + 2];
+                    var r = a1 - a0; var q = b1 - b0;
+                    var den = V2.Cross(r, q);
+                    if (Math.Abs(den) < 1e-6 * r.Length * q.Length) continue;
+                    var t = V2.Cross(b0 - a0, q) / den;
+                    var x = a0 + r * t;
+                    if ((x - a1).Length > 18 || (x - b0).Length > 18 || t < 0.5) continue;
+                    p[i] = x;
+                    p.RemoveAt(i + 1);
+                    for (var j = 0; j < map.Count; j++) if (map[j] > i) map[j]--;
+                    dropped.Add(-1);   // positions changed: re-project the original points below
+                    merged = true;
+                    break;
+                }
+                if (!merged) break;
+            }
         }
         Points = p;
         var keptS = new double[p.Count];
