@@ -1756,7 +1756,9 @@ public sealed class TrafficWorld
             else
             {
                 var err = f.AltFt - Profile(rwy, dth);
-                vsTarget = Math.Clamp(glideVs - Math.Clamp(err * 1.5, -800, 1500), -3000, 0);
+                // Below the descent path (after a go-around, or vectored in low): level off until the path comes down
+                // to meet the aircraft, as pilots do, rather than carry on descending.
+                vsTarget = Math.Clamp(glideVs - Math.Clamp(err * 1.5, -6000, 1500), -3000, 0);
                 f.Vs += Math.Clamp(vsTarget - f.Vs, -500 * dt, 500 * dt);
             }
             f.AltFt += f.Vs / 60 * dt;
