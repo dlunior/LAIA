@@ -1061,6 +1061,11 @@ public sealed class TrafficWorld
         {
             var star = PickStar(rwy, out var starLegs);
             var starPts = star is null ? new List<AirPoint>() : Apt.LegsToPoints(starLegs, V2.FromBearing(Rng.Next(360), 40 * Geo2.MPerNm), 11000, out _);
+            // Many STARs run on to a fix at or near the airport and end in "expect radar vectors" (LaGuardia's VADDR1
+            // ends right over the field). Real controllers turn the traffic off them well before that, onto a downwind
+            // or base, so the STAR is only flown until it's about 8 nm from the airport.
+            var near = starPts.FindIndex(p => p.P.Length < 8 * Geo2.MPerNm);
+            if (near >= 0) starPts.RemoveRange(near, starPts.Count - near);
             if (star is not null && starPts.Count > 0) names.Add(star.Name);
             var (appName, appPts) = ApproachPoints(rwy, starPts);
             if (appName.Length > 0) names.Add(appName);
@@ -1132,6 +1137,16 @@ public sealed class TrafficWorld
                 if (k >= 0) { join = t; joinIndex = k; break; }
             }
             var keep = join is not null ? joinIndex : starPts.Count;
+            var typeLabel = app.Type switch { 4 => "ILS", 10 => "RNAV", 1 => "GPS", 5 => "LOC", 2 => "VOR", 7 => "LDA", _ => "approach" };
+            // The STAR doesn't lead into this approach: real controllers vector the arrival from the end of the
+            // STAR onto final (downwind, base, intercept) rather than sending it straight across to the approach's
+            // first fix, which could mean flying over the airport.
+            if (join is null && starPts.Count > 0)
+            {
+                var firstFix = app.FinalLegs.FirstOrDefault(l => l.Lat != 0 || l.Lon != 0);
+                var gap = firstFix is null ? double.MaxValue : (Apt.ToXY(firstFix.Lat, firstFix.Lon) - starPts[^1].P).Length;
+                if (gap > 5 * Geo2.MPerNm) return ($"vectors to the {typeLabel} {rwy.Ident}{(app.Suffix.Length > 0 ? " " + app.Suffix : "")}", new List<AirPoint>());
+            }
             if (join is not null) legs.AddRange(join.Legs);
             legs.AddRange(app.FinalLegs);
             var start = keep > 0 ? starPts[keep - 1].P : rwy.Threshold - rwy.Dir * (15 * Geo2.MPerNm);

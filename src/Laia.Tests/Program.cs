@@ -329,6 +329,38 @@ Console.WriteLine("== Real gates override the scenery's gate assignments");
     Check(two.Count == 2 && (two[0].Pos - two[1].Pos).Length > 4 * 1852, "two arrivals due at the same time start at least 4 nm apart");
 }
 
+Console.WriteLine("== A STAR that ends over the airport is vectored off it, not flown across the field");
+{
+    // Like LaGuardia's VADDR1: from the north, ending at a fix right over the airport, "expect vectors".
+    var data = TestAirport.Build(false);
+    var map = new LocalMap(data.Lat, data.Lon);
+    var nm = Geo2.MPerNm;
+    Laia.Common.Airports.ProcedureLeg Fix(string name, double x, double y, int type = 18)
+    {
+        var (la, lo) = map.ToLatLon(new V2(x, y));
+        return new() { Type = type, Fix = name, Lat = la, Lon = lo };
+    }
+    data.Arrivals.Add(new() { Name = "OVRHD1", Legs = { Fix("NORTH", 0, 35 * nm, 15), Fix("MIDDL", 2 * nm, 20 * nm), Fix("OVERF", 0, 0.4 * nm) } });
+    data.Approaches.Add(new() { Type = 4, Runway = "27", FinalLegs = { Fix("FINAL", 10 * nm, 0, 15), Fix("RW27", 1500, 0, 4) } });
+    var apt = new AirportModel(data);
+    var world = new TrafficWorld(apt, new TestSource(), seed: 4) { Automatic = false, Wind = new Wind(270, 10) };
+    world.SelectRunways(true);
+    var bad = 0; string route = "";
+    for (var k = 0; k < 8; k++)
+    {
+        var f = world.SpawnArrival(38, true);
+        if (f?.Path is null) continue;
+        route = f.Route;
+        // Anything within 3 nm of the field must be on the final approach course (east of the runway, on the centreline).
+        foreach (var q in f.Path.Points)
+            if (q.Length < 3 * nm && !(Math.Abs(q.Y) < 600 && q.X > 1300)) bad++;
+        f.Done = true;
+    }
+    Console.WriteLine($"  route: {route}");
+    Check(bad == 0, $"arrivals don't cross the airport on the way to final ({bad} points over the field)");
+    Check(route.Contains("vectors to the ILS 27"), "the arrival is vectored to the approach, as controllers do");
+}
+
 Console.WriteLine("== Peak-hour test setting replays the busiest hours now");
 {
     var apt = new AirportModel(TestAirport.Build(false));
