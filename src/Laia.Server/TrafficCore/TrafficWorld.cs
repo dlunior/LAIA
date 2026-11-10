@@ -79,6 +79,8 @@ public sealed class Flight
     public string DepRoute = "";
     public double DepCourse = double.NaN;   // the track about 4 nm after the runway end
     public bool StableChecked;
+    /// <summary>Cruise level of a flight handed over from the whole sky (0 for one started near the airport).</summary>
+    public double CruiseFt;
     /// <summary>The STAR (with its entry transition) or SID (with its exit) chosen with the runway, so the two match.</summary>
     public (Procedure p, Transition? t)? StarPick, SidPick;
     public double LastHold = -999;
@@ -403,6 +405,38 @@ public sealed class TrafficWorld
     private bool _schedStarted;
 
     /// <summary>Signed minutes from now until a time of the week (-5040..5040).</summary>
+    /// <summary>How far out arrivals are taken over from the whole sky (nm).</summary>
+    public double HandoverNm { get; set; } = 200;
+
+    /// <summary>An arrival still far out (beyond 60 nm): simulated, but not near enough to count or be drawn.</summary>
+    private static bool Far(Flight f) => f.Kind == "arrival" && !f.OnGround && f.Path is not null && (f.ThrS - f.S) / Geo2.MPerNm > 60;
+
+    /// <summary>Where the whole-sky layer has a scheduled arrival right now (null if it isn't airborne or can't be placed).</summary>
+    internal NetPos? NetworkPosition(ScheduleLeg l)
+    {
+        if (Locate?.Invoke(l.Dep) is not { } d) return null;
+        var leg = new NetLeg
+        {
+            Airline = l.Airline, Operator = l.Operator, Type = l.Type, Reg = l.Reg, Flight = l.Flight, Dep = l.Dep, Arr = Apt.Icao,
+            DepMin = l.DepMin, ArrMin = l.ArrMin, DepLat = d.lat, DepLon = d.lon, ArrLat = Apt.Data.Lat, ArrLon = Apt.Data.Lon,
+            ArrElev = Apt.ElevationFt, Located = true,
+        };
+        leg.DistNm = Geo2.DistanceNm(leg.DepLat, leg.DepLon, leg.ArrLat, leg.ArrLon);
+        return NetworkModel.At(leg, SchedNow);
+    }
+
+    /// <summary>
+    /// Takes over a scheduled arrival from the whole sky where it is now (position, level): it flies direct to its
+    /// STAR, descends from its cruise level at the top of descent, and then the STAR, approach and landing as usual.
+    /// </summary>
+    internal Flight? SpawnFromNetwork(ScheduleLeg l, NetPos np)
+    {
+        var plan = PlanArrival(l.Dep);
+        var f = SpawnArrival(0, false, l, plan, entry: (Apt.Map.ToXY(np.Lat, np.Lon), np.AltFt, np.CruiseFt));
+        if (f is not null) Log($"{f.Callsign}: taken over from the whole sky {Geo2.DistanceNm(Apt.Data.Lat, Apt.Data.Lon, np.Lat, np.Lon):0} nm out at {np.AltFt:0} ft ({np.Phase}), {f.Route} for runway {f.Rwy?.Ident}");
+        return f;
+    }
+
     private double Until(int weekMin) => ((weekMin - SchedNow) % 10080 + 10080 + 5040) % 10080 - 5040;
 
     // ------------------------------------------------------------------ peak-hour test setting
@@ -549,7 +583,10 @@ public sealed class TrafficWorld
             }
             Log($"{me}: following the real {Schedule.Source} schedule ({deps.Count} departures and {arrs.Count} arrivals a week at this level); {placed} aircraft at the gates waiting for their next flight");
         }
-        var active = Flights.Count(f => f.Kind != "parked" && !f.Test);
+        // Arrivals still far out (handed over from the whole sky) don't count against the traffic level: only what's
+        // near the airport does (and only that is ever drawn in the sim).
+        var active = Flights.Count(f => f.Kind != "parked" && !f.Test && !Far(f));
+        var objects = Flights.Count(f => !Far(f));
         // Departures: board a few minutes before, push back on time.
         foreach (var l in deps)
         {
@@ -566,14 +603,29 @@ public sealed class TrafficWorld
             }
             if (StartDeparture(f, Math.Max(20, u * 60), l) is not null) { active++; Movements++; }
         }
-        // Arrivals: appear about 40 track miles out so they land on time.
+        // Arrivals: handed over from the whole sky about 200 nm out, where the schedule has them flying; if their
+        // origin can't be placed, they appear about 40 track miles out so they land on time.
         foreach (var l in arrs)
         {
             var u = Until(l.ArrMin);
-            if (u > 13 || u < 1) continue;
+            if (u > 75 || u < 1) continue;
             if (l.Reg.Length > 0 && Flights.Any(f => !f.Done && f.Reg == l.Reg)) continue;   // that airframe is still around
             if (_done.Contains(Key(l, 'A'))) continue;
-            if (active >= maxActive || Flights.Count >= maxObjects) { _done.Add(Key(l, 'A')); Log($"{l.Callsign}: skipped (traffic limit)"); continue; }
+            if (u > 13 || NetworkPosition(l) is not null)
+            {
+                var np = NetworkPosition(l);
+                if (np is null) continue;                                   // not airborne yet, or can't be placed: later
+                var dist = Geo2.DistanceNm(Apt.Data.Lat, Apt.Data.Lon, np.Lat, np.Lon);
+                if (dist > HandoverNm) continue;                             // still in the whole sky
+                if (dist > 25)
+                {
+                    _done.Add(Key(l, 'A'));
+                    if (SpawnFromNetwork(l, np) is not null) Movements++;
+                    continue;
+                }
+            }
+            if (u > 13) continue;
+            if (active >= maxActive || objects >= maxObjects) { _done.Add(Key(l, 'A')); Log($"{l.Callsign}: skipped (traffic limit)"); continue; }
             // Start clear of every arrival already flying (a little later than scheduled if needed); if there's no
             // room yet, try again on the next step.
             var plan = PlanArrival(l.Dep);
@@ -1428,7 +1480,8 @@ public sealed class TrafficWorld
     // ------------------------------------------------------------------ arrivals
 
     /// <summary>Spawns an arrival <paramref name="distNm"/> track miles from touchdown.</summary>
-    public Flight? SpawnArrival(double distNm, bool test, ScheduleLeg? leg = null, (RunwayEnd? rwy, (Procedure p, Transition? t)? star)? planned = null)
+    public Flight? SpawnArrival(double distNm, bool test, ScheduleLeg? leg = null, (RunwayEnd? rwy, (Procedure p, Transition? t)? star)? planned = null,
+        (V2 pos, double altFt, double cruiseFt)? entry = null)
     {
         if (ArrRwy is null) SelectRunways(true);
         var plan = planned ?? (leg is not null ? PlanArrival(leg.Dep) : (ArrRwy, null));
@@ -1461,6 +1514,21 @@ public sealed class TrafficWorld
         f.StarPick = plan.Item2;
         f.OnGround = false;
         f.Gear = false;
+        if (entry is { } en)
+        {
+            BuildArrivalPath(f, null, en.pos);
+            f.S = 0;
+            var (ep, edir, _) = f.Path!.At(0);
+            f.Pos = ep; f.Heading = edir;
+            f.CruiseFt = Math.Max(en.cruiseFt, en.altFt);
+            f.AltFt = en.altFt;
+            var dth0 = f.ThrS / Geo2.MPerNm;
+            f.Ias = ArrivalSpeed(f, dth0);
+            f.Gs = Wind.Tas(f.Ias, f.AltFt);
+            f.SetPhase("arriving", Time);
+            Flights.Add(f);
+            return f;
+        }
         BuildArrivalPath(f, null);
         f.S = Math.Max(0, f.ThrS - distNm * Geo2.MPerNm);
         var (p, dir, _) = f.Path!.At(f.S);
@@ -1484,6 +1552,22 @@ public sealed class TrafficWorld
     /// for 0.8 nm at 7 nm; the glidepath is then joined at about 2,000 ft, 6 nm out.
     /// </summary>
     private static double Profile(RunwayEnd rwy, double dthNm)
+    {
+        // Above 10,000 ft: the same 3° path, with a 3 nm level piece at 10,000 ft to slow to 250 kt (14 CFR 91.117).
+        var d10 = D10(rwy);
+        if (dthNm > d10 + 3) return ProfileLow(rwy, dthNm - 3);
+        if (dthNm > d10) return 10000;
+        return ProfileLow(rwy, dthNm);
+    }
+
+    /// <summary>Distance from the runway where the planned descent reaches 10,000 ft.</summary>
+    private static double D10(RunwayEnd rwy)
+    {
+        var level = SlowSteps.Sum(st => (st.fromKt - st.toKt) / (st.fromKt > 210 ? 10.0 : 12.5));
+        return (10000 - rwy.ElevationFt - 50) / 318.4 + level;
+    }
+
+    private static double ProfileLow(RunwayEnd rwy, double dthNm)
     {
         var d = Math.Max(0, dthNm);
         var level = 0.0;
@@ -1514,7 +1598,7 @@ public sealed class TrafficWorld
     }
 
     /// <summary>The arrival route: STAR, then the approach (or vectors to final), then the runway.</summary>
-    private void BuildArrivalPath(Flight f, V2? from)
+    private void BuildArrivalPath(Flight f, V2? from, V2? entry = null)
     {
         var rwy = f.Rwy!;
         var route = new List<V2>();
@@ -1528,7 +1612,15 @@ public sealed class TrafficWorld
         else
         {
             var star = PickStar(f, rwy, out var starLegs);
-            var starPts = star is null ? new List<AirPoint>() : Apt.LegsToPoints(starLegs, V2.FromBearing(Rng.Next(360), 40 * Geo2.MPerNm), 11000, out _);
+            var starPts = star is null ? new List<AirPoint>() : Apt.LegsToPoints(starLegs, entry ?? V2.FromBearing(Rng.Next(360), 40 * Geo2.MPerNm), 11000, out _);
+            // Handed over from the whole sky: direct to the STAR, joining it at the first fix that isn't further out
+            // than the aircraft already is.
+            if (entry is { } en0)
+            {
+                var k0 = starPts.FindIndex(p => p.P.Length <= en0.Length + 5 * Geo2.MPerNm);
+                if (k0 > 0) starPts.RemoveRange(0, k0);
+                else if (k0 < 0) starPts.Clear();
+            }
             // Many STARs run on to a fix at or near the airport and end in "expect radar vectors" (LaGuardia's VADDR1
             // ends right over the field). Real controllers turn the traffic off them well before that, onto a downwind
             // or base, so the STAR is only flown until it's about 8 nm from the airport.
@@ -1537,7 +1629,12 @@ public sealed class TrafficWorld
             if (star is not null && starPts.Count > 0) names.Add(star.Name);
             var (appName, appPts) = ApproachPoints(rwy, starPts);
             if (appName.Length > 0) names.Add(appName);
-            if (starPts.Count == 0)
+            if (entry is { } en1)
+            {
+                route.Add(en1);
+                speeds.Add(0);
+            }
+            else if (starPts.Count == 0)
             {
                 var bearing = Rng.Next(360);
                 if (appPts.Count > 0)
@@ -1888,7 +1985,9 @@ public sealed class TrafficWorld
     /// </summary>
     private static double PlannedSpeed(Flight f, double d)
     {
-        double t = d > 20 ? 250 : d > 12 ? 210 : d > 7 ? 180 : d > 5 ? 170 : f.P.Vapp;
+        // Descent speed above 10,000 ft (about 280 kt for jets), slowing to 250 kt on the level piece at 10,000 ft.
+        var high = f.Rwy is not null && d > D10(f.Rwy) + 3;
+        double t = high ? (f.P.Family == "turboprop" ? 230 : 280) : d > 20 ? 250 : d > 12 ? 210 : d > 7 ? 180 : d > 5 ? 170 : f.P.Vapp;
         if (f.P.Family == "turboprop" && d <= 20) t = Math.Min(t, d > 5 ? 170 : f.P.Vapp);
         if (d < 12) t = Math.Min(t, f.P.Vapp + 10 * Math.Max(0, d - 3));
         return Math.Max(t, f.P.Vapp);
@@ -2493,7 +2592,7 @@ public sealed class TrafficWorld
                 var od = o.OnGround ? -1 : (o.ThrS - o.S) / Geo2.MPerNm;
                 if (od < dth && od > leaderD) { leaderD = od; leader = o; }
             }
-            if (leader is not null && !leader.OnGround)
+            if (leader is not null && !leader.OnGround && dth < 45)
             {
                 // Measured and predicted all the time: the gap now, and the predicted gap when each crosses the
                 // threshold (compression: the leader slows to its approach speed first), against the gap needed there.
@@ -2535,7 +2634,7 @@ public sealed class TrafficWorld
             }
             else
             {
-                var err = f.AltFt - Profile(rwy, dth);
+                var err = f.AltFt - (f.CruiseFt > 0 ? Math.Min(Profile(rwy, dth), f.CruiseFt) : Profile(rwy, dth));
                 // Below the descent path (after a go-around, or vectored in low): level off until the path comes down
                 // to meet the aircraft, as pilots do, rather than carry on descending.
                 vsTarget = Math.Clamp(glideVs - Math.Clamp(err * 1.5, -6000, 1500), -3000, 0);

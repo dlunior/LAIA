@@ -163,7 +163,8 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         if (lat is not null) { clat = lat.Value; clon = lon!.Value; }
         else if (w is not null) (clat, clon) = w.Apt.Map.ToLatLon(new V2(0, 0));
         else return list;
-        var exclude = new HashSet<string>(Worlds().Select(x => x.Apt.Icao), StringComparer.OrdinalIgnoreCase);
+        // Flights the detailed traffic is flying (handed over, or at and around the airport) aren't shown twice.
+        var exclude = new HashSet<string>(Worlds().SelectMany(x => x.Flights).Select(f => f.Reg).Where(r => r.Length > 0), StringComparer.OrdinalIgnoreCase);
         var clock = w?.ScheduleClock ?? WeekMinuteNow();
         foreach (var p in network.Around(clock, clat, clon, NetRadiusNm, exclude))
             list.Add(new

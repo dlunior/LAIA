@@ -667,6 +667,50 @@ Console.WriteLine("== Airport rules read from the FAA's AAUP text (any airport, 
     }
 }
 
+Console.WriteLine("== Hand-over: a scheduled arrival taken over from the whole sky ~200 nm out, descending from cruise to land");
+{
+    var nm = Geo2.MPerNm;
+    var data = TestAirport.Build(false);
+    var map = new LocalMap(data.Lat, data.Lon);
+    var origin = map.ToLatLon(new V2(450 * nm, -150 * nm));   // ~475 nm east-southeast
+    var world = new TrafficWorld(new AirportModel(data), new TestSource(), seed: 9)
+    {
+        Automatic = false, Wind = new Wind(270, 10), WeekMinute = 2000,
+        Locate = c => c == "KFAR" ? origin : null,
+    };
+    world.SelectRunways(true);
+    // A 475 nm flight: find the departure time that has it about 180 nm out now.
+    Laia.Common.Airports.ScheduleLeg Leg(int dep) => new() { Airline = "DAL", Operator = "DAL", Type = "B738", Reg = "N900DL", Flight = "900", Dep = "KFAR", Arr = "TEST", DepMin = dep, ArrMin = dep + 85 };
+    Laia.Common.Airports.ScheduleLeg? leg = null; NetPos? np = null;
+    for (var dep = 2000 - 80; dep <= 2000; dep++)
+    {
+        var l = Leg(dep); var p = world.NetworkPosition(l);
+        if (p is not null && Geo2.DistanceNm(data.Lat, data.Lon, p.Lat, p.Lon) is > 170 and < 195) { leg = l; np = p; break; }
+    }
+    Check(leg is not null && np is not null, "the whole sky has the arrival about 180 nm out");
+    var f = world.SpawnFromNetwork(leg!, np!)!;
+    var startNm = f.ThrS / nm; var startAlt = f.AltFt;
+    var startPos = map.ToLatLon(f.Pos);
+    Console.WriteLine($"  taken over {Geo2.DistanceNm(data.Lat, data.Lon, startPos.lat, startPos.lon):0} nm out at {startAlt:0} ft, {startNm:0} track nm to go: {f.Route}");
+    Check(Geo2.DistanceNm(startPos.lat, startPos.lon, np!.Lat, np.Lon) < 1 && startAlt > 20000, "it starts exactly where the whole sky had it, at its level");
+    double over250Low = 0, maxDescent = 0, maxClimb = 0, t = 0; var holds = 0; var landed = false; var prevAlt = f.AltFt;
+    var lastHold = f.LastHold;
+    while (t < 3 * 3600 && !landed)
+    {
+        world.Step(0.5); t += 0.5;
+        if (f.LastHold != lastHold) { holds++; lastHold = f.LastHold; }
+        if (!f.OnGround && f.AltFt < 9800 && f.Ias > 255) over250Low = Math.Max(over250Low, f.Ias);
+        var vs = (f.AltFt - prevAlt) / 0.5 * 60; prevAlt = f.AltFt;
+        maxDescent = Math.Min(maxDescent, vs); maxClimb = Math.Max(maxClimb, vs);
+        if (f.OnGround) landed = true;
+    }
+    Console.WriteLine($"  landed after {t / 60:0} min; steepest descent {-maxDescent:0} ft/min, highest climb {maxClimb:0} ft/min");
+    Check(landed, "it flies all the way in and lands");
+    Check(over250Low == 0, $"250 kt or less below 10,000 ft ({over250Low:0} kt)");
+    Check(maxClimb < 300 && -maxDescent < 4000, "it only descends, at airliner rates");
+    Check(holds == 0, "no holding far out on its own");
+}
+
 Console.WriteLine("== After a go-around, the aircraft comes back around and lands normally");
 {
     var apt = new AirportModel(TestAirport.Build(false));

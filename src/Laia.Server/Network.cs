@@ -143,7 +143,7 @@ public sealed class NetworkStore(WorldAirports world, ILogger<NetworkStore> log)
     }
 
     /// <summary>Flights in the air now within a radius, nearest first, leaving out the airports run in detail.</summary>
-    public List<NetPos> Around(double weekMin, double lat, double lon, double radiusNm, ICollection<string> exclude, int max = 1500)
+    public List<NetPos> Around(double weekMin, double lat, double lon, double radiusNm, ICollection<string> excludeRegs, int max = 1500)
     {
         lock (_gate)
         {
@@ -151,7 +151,7 @@ public sealed class NetworkStore(WorldAirports world, ILogger<NetworkStore> log)
             var list = new List<(NetPos p, double d)>();
             foreach (var l in _legs)
             {
-                if (!l.Located || exclude.Contains(l.Dep) || exclude.Contains(l.Arr)) continue;
+                if (!l.Located || (l.Reg.Length > 0 && excludeRegs.Contains(l.Reg))) continue;
                 var p = NetworkModel.At(l, weekMin);
                 if (p is null) continue;
                 var d = Geo2.DistanceNm(lat, lon, p.Lat, p.Lon);
