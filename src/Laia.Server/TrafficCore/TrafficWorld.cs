@@ -2152,7 +2152,8 @@ public sealed class TrafficWorld
         double t = high ? (f.P.Family == "turboprop" ? 230 : 280) : d > 20 ? 250 : d > 12 ? 210 : d > 7 ? 180 : d > 5 ? 170 : f.P.Vapp;
         // Losing time for its slot (arrival manager): slower in the cruise and descent and 210 kt below 10,000 ft until
         // 20 nm — the controller's speed control far out (7110.65 5-7) instead of a hold.
-        if (f.Slowed && !nominal && d > 20) t = high ? (f.P.Family == "turboprop" ? 200 : 250) : Math.Min(t, f.P.Family == "turboprop" ? 200 : 210);
+        if (f.Slowed && !nominal && d > 20)
+            t = high && f.AltFt >= 11500 ? (f.P.Family == "turboprop" ? 200 : 240) : Math.Min(t, f.P.Family == "turboprop" ? 200 : 210);
         if (f.P.Family == "turboprop" && d <= 20) t = Math.Min(t, d > 5 ? 170 : f.P.Vapp);
         if (d < 12) t = Math.Min(t, f.P.Vapp + 10 * Math.Max(0, d - 3));
         return Math.Max(t, f.P.Vapp);
