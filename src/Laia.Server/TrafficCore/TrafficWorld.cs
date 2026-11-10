@@ -1304,6 +1304,8 @@ public sealed class TrafficWorld
         return (o.p, o.t);
     }
 
+    private static string Compass(double deg) => new[] { "north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest" }[(int)Math.Round(deg / 45) % 8];
+
     /// <summary>Where each runway sits across the airport, -1 … +1 between the outermost two.</summary>
     private static List<double> Across(List<RunwayEnd> list, out V2 axis)
     {
@@ -1371,15 +1373,22 @@ public sealed class TrafficWorld
         var lats = list.Select(e => V2.Cross(axis, (e.Threshold + e.FarEnd) * 0.5)).ToList();
         var g = V2.Cross(axis, gate);
         var ramp = g < lats.Min() - 150 ? -1.0 : g > lats.Max() + 150 ? 1.0 : 0.0;
+        // Where the stand sits across the field (-1 … +1 between the outermost runways): for a departure going
+        // straight out, the runway on the terminal's side (no crossing the field to depart).
+        var mid = (lats.Max() + lats.Min()) / 2; var half = Math.Max(1, (lats.Max() - lats.Min()) / 2);
+        var gatePos = Math.Clamp((g - mid) / half, -1, 1);
+        var straight = Math.Abs(side) < 0.4;
         int Queue(RunwayEnd e) => Flights.Count(o => !o.Done && o.Kind == "departure" && o.OnGround && o.Rwy?.Runway == e.Runway);
         var minQ = serving.Min(i => Queue(list[i]));
-        var best = serving.OrderByDescending(i => pos[i] * side * 2 + pos[i] * ramp * 4 - (ArrRwys.Any(a => a.Runway == list[i].Runway) ? 1.0 : 0) - 0.25 * (Queue(list[i]) - minQ))
+        var best = serving.OrderByDescending(i => pos[i] * side * 2 + pos[i] * ramp * 4 + (straight ? pos[i] * gatePos * 1.5 : 0)
+                - (ArrRwys.Any(a => a.Runway == list[i].Runway) ? 1.0 : 0) - 0.25 * (Queue(list[i]) - minQ))
             .ThenByDescending(i => list[i].LengthM).First();
-        // For the log: why this runway.
-        string Side(double v) => Math.Abs(v) < 0.25 ? "straight out" : (V2.Cross(axis, V2.FromBearing(Geo2.Norm(axis.Bearing + 90))) * v > 0 ? "to the right of the runways" : "to the left of the runways");
+        // For the log: why this runway, in compass terms (the side of the field the SID heads for).
+        string Side(double v) => Math.Abs(v) < 0.25 ? "straight out" : "to the " + Compass(Geo2.Norm(axis.Bearing + (v > 0 ? -90 : 90)));
         var why = new List<string>();
         if (sid is { } sd2) why.Add($"{sd2.p.Name}{(sd2.t is { } tt ? "." + tt.Name : "")} towards {f.Other} exits {Side(side)}");
         else why.Add($"no SID; {f.Other} lies {Side(side)}");
+        if (straight && ramp == 0 && Math.Abs(gatePos) > 0.2) why.Add($"its stand is on the {Compass(Geo2.Norm(axis.Bearing + (gatePos > 0 ? -90 : 90)))} side of the field");
         if (ramp != 0) why.Add($"its stand is outside the runways, {(ramp * pos[best] > 0 ? "on this runway's side" : "on the other side")}");
         var q = Queue(list[best]) - minQ;
         if (q > 0) why.Add($"{q} more waiting here than on the least busy runway");
