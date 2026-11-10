@@ -466,10 +466,10 @@ public sealed class TrafficWorld
     /// Where a new arrival can start: the wanted distance from the runway (nm), moved further out until it's at least
     /// 5 nm from every arrival already flying to the landing runway. -1 if that would be more than 50 nm out.
     /// </summary>
-    private double ArrivalSlot(double wantNm, string? origin = null)
+    private double ArrivalSlot(double wantNm, RunwayEnd? rwy)
     {
         if (ArrRwy is null) SelectRunways(true);
-        var rwy = ArrivalRunwayFor(origin);
+        rwy ??= ArrRwy;
         var taken = Flights.Where(o => !o.Done && o.Kind == "arrival" && !o.OnGround && o.Rwy is not null && rwy is not null && o.Rwy.Runway == rwy.Runway)
             .Select(o => o.Phase == "go-around" ? 12.0 : (o.ThrS - o.S) / Geo2.MPerNm).OrderBy(x => x).ToList();
         var d = wantNm;
@@ -539,10 +539,11 @@ public sealed class TrafficWorld
             {
                 if (l.Reg.Length > 0 && Flights.Any(f => !f.Done && f.Reg == l.Reg)) continue;
                 // Spread out along the approach, clear of every arrival already flying, rather than on top of one.
-                var d = ArrivalSlot(Math.Clamp(Until(l.ArrMin) * 3.2, 7, 40), l.Dep);
+                var plan = PlanArrival(l.Dep);
+                var d = ArrivalSlot(Math.Clamp(Until(l.ArrMin) * 3.2, 7, 40), plan.rwy);
                 if (d < 0) break;
                 _done.Add(Key(l, 'A'));
-                SpawnArrival(d, false, l);
+                SpawnArrival(d, false, l, plan);
             }
             Log($"{me}: following the real {Schedule.Source} schedule ({deps.Count} departures and {arrs.Count} arrivals a week at this level); {placed} aircraft at the gates waiting for their next flight");
         }
@@ -573,10 +574,11 @@ public sealed class TrafficWorld
             if (active >= maxActive || Flights.Count >= maxObjects) { _done.Add(Key(l, 'A')); Log($"{l.Callsign}: skipped (traffic limit)"); continue; }
             // Start clear of every arrival already flying (a little later than scheduled if needed); if there's no
             // room yet, try again on the next step.
-            var d = ArrivalSlot(Math.Clamp(u * 3.2, 7, 40), l.Dep);
+            var plan = PlanArrival(l.Dep);
+            var d = ArrivalSlot(Math.Clamp(u * 3.2, 7, 40), plan.rwy);
             if (d < 0) continue;
             _done.Add(Key(l, 'A'));
-            if (SpawnArrival(d, false, l) is not null) { active++; Movements++; }
+            if (SpawnArrival(d, false, l, plan) is not null) { active++; Movements++; }
         }
         // Too many parked aircraft: remove the ones with no flight soon.
         if (Flights.Count > maxObjects)
@@ -696,7 +698,7 @@ public sealed class TrafficWorld
     /// <summary>For the log: a route that turns more than a full circle in its first 25 nm is a loop to look into.</summary>
     private void CheckLoops(Flight f, string what)
     {
-        if (f.Path is null || f.Test) return;
+        if (f.Path is null || f.Test || f.Phase == "go-around") return;
         double total = 0, prev = double.NaN;
         var max = Math.Min(f.Path.Length, 25 * Geo2.MPerNm);
         for (var s2 = 0.0; s2 < max; s2 += 150)
@@ -1000,6 +1002,7 @@ public sealed class TrafficWorld
 
     private readonly Dictionary<int, Flight> _lastDep = new();
     private readonly Dictionary<(RunwayEnd, bool), double> _rot = new();
+    private readonly Dictionary<RunwayEnd, double> _rotSeen = new();
 
     /// <summary>
     /// Seconds a landing aircraft occupies this runway: braking at about 2 m/s² from touchdown (~400 m in) to the
@@ -1271,7 +1274,8 @@ public sealed class TrafficWorld
     /// <summary>How far (degrees) a procedure's outer fix is from the wanted direction; 0 when the direction is unknown.</summary>
     private double Score(double? want, ProcedureLeg? fix)
     {
-        if (want is null || fix is null) return 0;
+        if (want is null) return 0;
+        if (fix is null) return 90;   // radar-vector procedures (no fix to point anywhere): only when nothing points the right way
         var b = Geo2.BearingDeg(Apt.Data.Lat, Apt.Data.Lon, fix.Lat, fix.Lon);
         return Math.Abs(Geo2.Diff(b, want.Value));
     }
@@ -1317,7 +1321,7 @@ public sealed class TrafficWorld
         if (list.Count == 0) return (null, null);
         var star = ChooseStar(list, origin);
         if (list.Count == 1) return (list[0], star);
-        var pos = Across(list, out var axis);
+        var pos = Across(list, out var axis).Select(x => Math.Abs(x) < 0.3 ? x : Math.Sign(x)).ToList();
         var serving = Enumerable.Range(0, list.Count).Where(i => star is null || Serves(star.Value.p, list[i])).ToList();
         if (serving.Count == 0) serving = Enumerable.Range(0, list.Count).ToList();
         var side = star is { } st ? SideOf(axis, EntryFix(st.p, st.t)) : BearingTo(origin) is { } b ? V2.Cross(axis, V2.FromBearing(b)) : 0;
@@ -1343,7 +1347,7 @@ public sealed class TrafficWorld
         var sid = ChooseSid(list, f.Other);
         f.SidPick = sid;
         if (list.Count == 1) return list[0];
-        var pos = Across(list, out var axis);
+        var pos = Across(list, out var axis).Select(x => Math.Abs(x) < 0.3 ? x : Math.Sign(x)).ToList();
         var serving = Enumerable.Range(0, list.Count).Where(i => sid is null || Serves(sid.Value.p, list[i])).ToList();
         if (serving.Count == 0) serving = Enumerable.Range(0, list.Count).ToList();
         var side = sid is { } sd ? SideOf(axis, ExitFix(sd.p, sd.t)) : BearingTo(f.Other) is { } b ? V2.Cross(axis, V2.FromBearing(b)) : 0;
@@ -1354,7 +1358,7 @@ public sealed class TrafficWorld
         var ramp = g < lats.Min() - 150 ? -1.0 : g > lats.Max() + 150 ? 1.0 : 0.0;
         int Queue(RunwayEnd e) => Flights.Count(o => !o.Done && o.Kind == "departure" && o.OnGround && o.Rwy?.Runway == e.Runway);
         var minQ = serving.Min(i => Queue(list[i]));
-        var best = serving.OrderByDescending(i => pos[i] * side * 2 + pos[i] * ramp * 4 - (ArrRwys.Any(a => a.Runway == list[i].Runway) ? 0.5 : 0) - 0.25 * (Queue(list[i]) - minQ))
+        var best = serving.OrderByDescending(i => pos[i] * side * 2 + pos[i] * ramp * 4 - (ArrRwys.Any(a => a.Runway == list[i].Runway) ? 1.0 : 0) - 0.25 * (Queue(list[i]) - minQ))
             .ThenByDescending(i => list[i].LengthM).First();
         // For the log: why this runway.
         string Side(double v) => Math.Abs(v) < 0.25 ? "straight out" : (V2.Cross(axis, V2.FromBearing(Geo2.Norm(axis.Bearing + 90))) * v > 0 ? "to the right of the runways" : "to the left of the runways");
@@ -1384,10 +1388,10 @@ public sealed class TrafficWorld
     // ------------------------------------------------------------------ arrivals
 
     /// <summary>Spawns an arrival <paramref name="distNm"/> track miles from touchdown.</summary>
-    public Flight? SpawnArrival(double distNm, bool test, ScheduleLeg? leg = null)
+    public Flight? SpawnArrival(double distNm, bool test, ScheduleLeg? leg = null, (RunwayEnd? rwy, (Procedure p, Transition? t)? star)? planned = null)
     {
         if (ArrRwy is null) SelectRunways(true);
-        var plan = leg is not null ? PlanArrival(leg.Dep) : (ArrRwy, null);
+        var plan = planned ?? (leg is not null ? PlanArrival(leg.Dep) : (ArrRwy, null));
         var rwy = plan.Item1;
         if (rwy is null) return null;
         AircraftIdentity id;
@@ -1877,7 +1881,7 @@ public sealed class TrafficWorld
     {
         var gs = Math.Max(90, f.P.Vapp - Wind.Headwind(f.Rwy!.Heading));
         var wake = Cwt.MilesBehind(leader.Wake, f.Wake) / gs * 3600;
-        var occupancy = RunwayOccupancy(f.Rwy, leader.P) + 10;
+        var occupancy = Math.Max(RunwayOccupancy(f.Rwy!, leader.P), _rotSeen.GetValueOrDefault(f.Rwy!)) + 10;
         var deps = DepRwys.Count > 0 ? DepRwys : DepRwy is null ? new List<RunwayEnd>() : new() { DepRwy };
         var mixed = deps.Count == 0 || deps.Any(d => d.Runway == f.Rwy.Runway);
         var crossing = deps.Any(d => Crossing(f.Rwy, d) is not null);
@@ -2150,7 +2154,17 @@ public sealed class TrafficWorld
                 f.Lights = f.Phase == "landing roll" && f.Gs > 60 ? Nav | Beacon | Logo | Strobes | Landing : Nav | Beacon | Logo | Taxi;
                 var done = MoveGround(f, dt);
                 if (!done && f.Phase == "taxi in") Unstick(f, dt);
-                if (f.Phase == "landing roll" && f.OnRunway < 0 && f.Gs < 35) { f.SetPhase("taxi in", Time); f.MaxKt = f.P.Heavy ? 16 : 20; }
+                if (f.Phase == "landing roll" && f.OnRunway < 0 && f.Gs < 35)
+                {
+                    // How long it really took to clear: spacing on this runway learns from it.
+                    var rot = Time - f.PhaseTime;
+                    if (f.Rwy is not null && rot is > 20 and < 300)
+                    {
+                        _rotSeen[f.Rwy] = _rotSeen.TryGetValue(f.Rwy, out var old) ? old * 0.7 + rot * 0.3 : rot;
+                        if (rot > 60) Log($"{f.Callsign}: off runway {f.Rwy.Ident} {rot:0} s after touchdown (runway {f.Rwy.Ident} now averages {_rotSeen[f.Rwy]:0} s)");
+                    }
+                    f.SetPhase("taxi in", Time); f.MaxKt = f.P.Heavy ? 16 : 20;
+                }
                 if (f.Phase == "landing roll" && f.Gs < 35) f.MaxKt = Math.Min(f.MaxKt, 30);
                 if (!Apt.HasGround && f.Phase == "landing roll" && f.Gs < 30) { f.Done = true; break; }
                 if (done)
