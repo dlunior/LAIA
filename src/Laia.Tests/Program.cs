@@ -791,7 +791,8 @@ Console.WriteLine("== Arrival manager: two arrivals bunched far out are spaced w
     for (var t = 0.0; t < 3600 && (landA < 0 || landB < 0); t += 0.5)
     {
         world.Step(0.5);
-        if (a.LastHold != hA || b.LastHold != hB) { holds++; hA = a.LastHold; hB = b.LastHold; }
+        if (a.LastHold != hA || b.LastHold != hB) { holds++; hA = a.LastHold; hB = b.LastHold; Console.WriteLine($"  hold at t={t:0}: a {(a.ThrS - a.S) / Geo2.MPerNm:0.0} nm {a.Ias:0} kt; b {(b.ThrS - b.S) / Geo2.MPerNm:0.0} nm {b.Ias:0} kt slowed {b.Slowed} delay {b.Delay:0} / a delay {a.Delay:0}"); }
+        if (t % 60 == 0 && t <= 600) Console.WriteLine($"  t={t:0}: a {(a.ThrS - a.S) / Geo2.MPerNm:0.0} nm {a.Ias:0} kt {a.AltFt:0} ft seq {a.Seq}; b {(b.ThrS - b.S) / Geo2.MPerNm:0.0} nm {b.Ias:0} kt seq {b.Seq} slowed {b.Slowed} delay {b.Delay:0} etaNom {b.EtaNominal - a.EtaNominal:0}");
         if (landA < 0 && a.OnGround) landA = world.Time;
         if (landB < 0 && b.OnGround) landB = world.Time;
     }
