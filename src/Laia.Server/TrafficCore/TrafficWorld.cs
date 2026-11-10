@@ -848,7 +848,11 @@ public sealed class TrafficWorld
         var s = f.Spot;
         if (s is null) return true;
         var behind = s.P - V2.FromBearing(s.Heading) * Math.Max(30, f.P.LengthM);
-        return !Flights.Any(o => o != f && o.OnGround && !o.Done && o.Phase is "pushback" or "taxi" or "taxi in" && (o.Pos - behind).Length < 90);
+        if (Flights.Any(o => o != f && o.OnGround && !o.Done && o.Phase is "pushback" or "taxi" or "taxi in" && (o.Pos - behind).Length < 90)) return false;
+        // Hold the push for an aircraft about to come into a gate next to this one (it would meet it head-on in the lane),
+        // as ground control does: the inbound goes in first.
+        return !Flights.Any(o => o != f && !o.Done && o.Kind == "arrival" && o.Phase is "taxi in" or "landing roll" && o.Spot is { } os
+            && (os.P - s.P).Length < 150 && (o.Pos - s.P).Length < 900);
     }
 
     /// <summary>For the log: plans a pushback at every stand of this airport and summarises.</summary>
@@ -2355,12 +2359,9 @@ public sealed class TrafficWorld
                 f.RerouteTime = Time;
                 if (Reroute(f, by)) { f.BlockedBy = null; f.BlockedFor = 0; return false; }
             }
-            // Head-on on a lane with an aircraft going to its gate: it takes another gate it can reach instead.
-            var inbound = ring.FirstOrDefault(x => x.Phase == "taxi in" && x.Spot is not null && Time - x.RerouteTime > 30);
-            if (f.BlockedFor > 12 && inbound is not null && TryOtherGate(inbound)) { inbound.BlockedBy = null; inbound.BlockedFor = 0; f.BlockedFor = 0; return true; }
-            if (f == oldest && f.BlockedFor > 40)
+            if (f == oldest && f.BlockedFor > 20)
             {
-                if (f.BlockedFor < 40.3) Log($"{f.Callsign}: standoff with {string.Join(", ", ring.Where(x => x != f).Select(x => x.Callsign))}; going first");
+                if (f.BlockedFor < 20.3) Log($"{f.Callsign}: standoff with {string.Join(", ", ring.Where(x => x != f).Select(x => x.Callsign))}; going first");
                 f.Ignore = by;
                 f.IgnoreUntil = Time + 45;
                 return userBlock;
