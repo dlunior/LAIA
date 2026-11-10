@@ -358,7 +358,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     /// <summary>
     /// The neighbouring fields around the traffic airport: the busiest scheduled airports within 40 nm (up to four),
     /// flown runway-only on the main airport's schedule clock. Their STARs also tell the main airport which of its
-    /// published STARs really belong to a satellite (MSFS publishes some, like JOKRS4 at MCO, for both).
+    /// published STARs are also a neighbour's (a stopgap until real filed routes).
     /// </summary>
     private void UpdateNeighbours()
     {

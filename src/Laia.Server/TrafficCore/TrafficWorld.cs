@@ -1432,8 +1432,9 @@ public sealed class TrafficWorld
         if (cands.Count == 0) return null;
         var want = BearingTo(origin);
         var options = new List<(Procedure p, Transition? t, double score)>();
-        // A STAR also published at a neighbouring field is really that field's (MSFS lists JOKRS4 and ALYNA4 for MCO
-        // too): it counts as 60° worse, so it's only used when nothing of the airport's own fits.
+        // Stopgap until real filed routes: a STAR also published at a neighbouring field counts as 60° worse, so it's
+        // only used when nothing of the airport's own fits. (Shared doesn't always mean satellite — MCO's ALYNA4 is for
+        // weather and oceanic routings — so filed routes are the real answer.)
         foreach (var st in cands)
             foreach (var t in st.EnrouteTransitions.Count > 0 ? st.EnrouteTransitions.Select(t => (Transition?)t).ToList() : new List<Transition?> { null })
                 options.Add((st, t, Score(want, EntryFix(st, t)) + (NeighbourStars.Contains(AirportRules.Base(st.Name)) ? 60 : 0)));
