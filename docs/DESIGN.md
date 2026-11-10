@@ -120,6 +120,21 @@ Three layers, with a flight moving smoothly from one to the next:
 - **Trajectory prediction** for every flight in the airspace layer: its ETA at each fix and at the runway, from its route, speed profile and winds, recomputed every few seconds.
 - **Reading the schedules:** the server reads all of them at once (one pass over the AIG files, a few seconds), instead of one airport at a time.
 
+**Hybrid sources (the user's decision, 9 Nov 2026).** Traffic at neighbouring airfields and en route can come
+from the AIG schedules. Traffic into and out of the user's own fields (the SimBrief departure and arrival, or the
+airport the user is at) must be as close to the real world as possible:
+
+| | User's departure and arrival fields | Everything else |
+|---|---|---|
+| **Which flights, when** | Today's real flights, with their real delays and estimated times (AirLabs, already 2 calls per field every 6 h, counted) | AIG schedules |
+| **Where they are now** | Real live positions of airborne inbound and outbound flights (OpenSky, free with the user's account), so arrivals already in the air join at their real position | Their position from the schedule |
+| **Gate** | The real gate (AirLabs, plus the SimRouteGen pool) | Real gates where known, else the scenery's |
+| **Aircraft and livery** | The AIG leg with the same flight number (exact model and registration). Otherwise an installed livery of that airline, on a type the SimRouteGen pool says flies that route. | The AIG model and livery |
+
+- **No duplicates:** at the user's fields, the real-world list replaces the AIG schedule. A real flight whose other end is a neighbouring airport is the same flight there, so it isn't flown twice.
+- **Fallback:** if AirLabs or OpenSky is unavailable, or out of calls, the AIG schedule is used for that field.
+- **No AeroAPI** (it is paid per call), unless the user decides otherwise.
+
 ### Step 2: Arrival sequencing (like a real arrival manager)
 - **Landing order and times:** build them from the predictions, respecting CWT spacing, the runway's landing rate and departure gaps.
 - **Delay is absorbed in this order:**
