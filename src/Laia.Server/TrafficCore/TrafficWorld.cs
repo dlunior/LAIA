@@ -2673,6 +2673,8 @@ public sealed class TrafficWorld
         return true;
     }
 
+    private static bool tooCloseNow(double gapNm, double needNm) => gapNm < needNm - 0.5;
+
     /// <summary>The ring of ground aircraft each waiting for the next, back to this one (null if there's no ring).</summary>
     private static List<Flight>? Ring(Flight f)
     {
@@ -2797,7 +2799,10 @@ public sealed class TrafficWorld
                 // Only for real spacing (wake, radar, runway occupancy): gaps for departures are made with speed, never
                 // by breaking someone off.
                 var short_ = ThresholdGapNeeded(leader, f, forDepartures: false) - gapSec;
-                var tooClose = gap < needNm - 0.5;
+                // What speed control can still absorb before 20 nm (250 → 210 kt) and inside it (down to the 170 kt
+                // floor): a hold only when the shortfall is more than that.
+                if (!tooCloseNow(gap, needNm)) short_ -= Math.Max(0, dth - 20) * (3600 / 210.0 - 3600 / 250.0) + (dth > 12 ? 30 : 0);
+                var tooClose = tooCloseNow(gap, needNm);
                 if ((short_ > 45 || tooClose) && dth > 15 && Time - f.LastHold > 300 && Time - f.LastOrbit > 120) { Hold(f, $"{gap:0.0} nm behind {leader.Callsign}, {short_:0} s short at the runway"); return; }
                 if ((short_ > 45 || tooClose) && dth > 12 && dth <= 15 && Time - f.LastOrbit > 240) { Orbit(f, $"{gap:0.0} nm behind {leader.Callsign}"); return; }
                 if ((short_ > 40 || tooClose) && dth > 5 && dth <= 12 && Time - f.LastOrbit > 240) { BreakOff(f, $"{gap:0.0} nm behind {leader.Callsign}, {short_:0} s short at the runway"); return; }
