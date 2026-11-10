@@ -1528,6 +1528,9 @@ public sealed class TrafficWorld
         // Ease into stops (a sudden stop rocks the aircraft on its nose gear).
         target = Math.Min(target, Math.Sqrt(2 * (f.Phase == "landing roll" ? 1.2 : f.Reverse ? 0.3 : 0.7) * Math.Max(0, path.Length - f.S)) + 0.12);
         if (f.Phase is not ("landing roll" or "lining up") && Blocked(f, v)) target = 0;
+        // Blocked() may have given the aircraft a new route round the other one: carry on along it next step,
+        // not along the old one (which would put it back where the old route started for a moment).
+        if (!ReferenceEquals(path, f.Path)) { var (np, nd, _) = f.Path!.At(f.S); f.Pos = np; f.Heading = f.Reverse ? Geo2.Norm(nd + 180) : nd; return false; }
         var accel = f.Reverse ? 0.25 : 0.6;
         v += Math.Clamp(target - v, -brake * dt, accel * dt);
         v = Math.Max(0, v);
