@@ -464,7 +464,7 @@ public sealed class TrafficWorld
     /// </summary>
     internal Flight? SpawnFromNetwork(ScheduleLeg l, NetPos np)
     {
-        var plan = PlanArrival(l.Dep);
+        var plan = PlanArrival(l.Dep, l.Type);
         var f = SpawnArrival(0, false, l, plan, entry: (Apt.Map.ToXY(np.Lat, np.Lon), np.AltFt, np.CruiseFt));
         if (f is not null) Log($"{f.Callsign}: taken over from the whole sky {Geo2.DistanceNm(Apt.Data.Lat, Apt.Data.Lon, np.Lat, np.Lon):0} nm out at {np.AltFt:0} ft ({np.Phase}), {f.Route} for runway {f.Rwy?.Ident}");
         return f;
@@ -681,7 +681,7 @@ public sealed class TrafficWorld
             {
                 if (l.Reg.Length > 0 && Flights.Any(f => !f.Done && f.Reg == l.Reg)) continue;
                 // Spread out along the approach, clear of every arrival already flying, rather than on top of one.
-                var plan = PlanArrival(l.Dep);
+                var plan = PlanArrival(l.Dep, l.Type);
                 var d = ArrivalSlot(Math.Clamp(Until(l.ArrMin) * 3.2, 7, 40), plan.rwy);
                 if (d < 0) break;
                 _done.Add(Key(l, 'A'));
@@ -734,7 +734,7 @@ public sealed class TrafficWorld
             if (active >= maxActive || objects >= maxObjects) { _done.Add(Key(l, 'A')); Log($"{l.Callsign}: skipped (traffic limit)"); continue; }
             // Start clear of every arrival already flying (a little later than scheduled if needed); if there's no
             // room yet, try again on the next step.
-            var plan = PlanArrival(l.Dep);
+            var plan = PlanArrival(l.Dep, l.Type);
             var d = ArrivalSlot(Math.Clamp(u * 3.2, 7, 40), plan.rwy);
             if (d < 0) continue;
             _done.Add(Key(l, 'A'));
@@ -1462,10 +1462,12 @@ public sealed class TrafficWorld
     }
 
     /// <summary>The STAR and entry (among those serving any of these runways) that starts nearest the origin's direction.</summary>
-    private (Procedure p, Transition? t)? ChooseStar(IEnumerable<RunwayEnd> rwys, string? origin)
+    private (Procedure p, Transition? t)? ChooseStar(IEnumerable<RunwayEnd> rwys, string? origin, bool jet = true)
     {
         var list = rwys.ToList();
         var cands = Apt.Data.Arrivals.Where(a => list.Any(r => Serves(a, r))).ToList();
+        // Never a propeller-only arrival for a jet (the FAA routes say which), when anything else serves.
+        if (jet && Routes is not null && cands.Any(c => !Routes.PropsOnly(c.Name))) cands = cands.Where(c => !Routes.PropsOnly(c.Name)).ToList();
         if (cands.Count == 0) return null;
         // The FAA preferred route from this origin names the STAR (and the fix it's joined at) airlines file, by flow:
         // use it when that STAR is published here for a runway in use.
@@ -1498,7 +1500,9 @@ public sealed class TrafficWorld
         // weather and oceanic routings — so filed routes are the real answer.)
         foreach (var st in cands)
             foreach (var t in st.EnrouteTransitions.Count > 0 ? st.EnrouteTransitions.Select(t => (Transition?)t).ToList() : new List<Transition?> { null })
-                options.Add((st, t, Score(want, EntryFix(st, t)) + (NeighbourStars.Contains(AirportRules.Base(st.Name)) ? 60 : 0)));
+                options.Add((st, t, Score(want, EntryFix(st, t)) + (NeighbourStars.Contains(AirportRules.Base(st.Name)) ? 60 : 0)
+                    // The FAA routes show which STARs end here and which only at nearby airports (JAFAR3 → ORL, BITHO7 → MLB).
+                    + (Routes is null ? 0 : Routes.StarFamiliarity(st.Name, Apt.Icao) switch { 0 => 0, 1 => 30, _ => 90 })));
         return Best(options);
     }
 
@@ -1577,12 +1581,13 @@ public sealed class TrafficWorld
     /// from the west land the western runway, SNFLD and MUNGI from the east the eastern one). Only a much longer
     /// queue on that side moves an arrival to the other runway — the exception, not the rule.
     /// </summary>
-    public (RunwayEnd? rwy, (Procedure p, Transition? t)? star) PlanArrival(string? origin)
+    public (RunwayEnd? rwy, (Procedure p, Transition? t)? star) PlanArrival(string? origin, string? type = null)
     {
+        var jet = type is null || Perf.For(type).Family != "turboprop";
         if (ArrRwy is null) SelectRunways(true);
         var list = ArrRwys.Count > 0 ? ArrRwys : ArrRwy is null ? new() : new List<RunwayEnd> { ArrRwy };
         if (list.Count == 0) return (null, null);
-        var star = ChooseStar(list, origin);
+        var star = ChooseStar(list, origin, jet);
         if (list.Count == 1) return (list[0], star);
         var pos = Across(list, out var axis).Select(x => Math.Abs(x) < 0.3 ? x : Math.Sign(x)).ToList();
         var serving = Enumerable.Range(0, list.Count).Where(i => star is null || Serves(star.Value.p, list[i])).ToList();
@@ -1676,7 +1681,7 @@ public sealed class TrafficWorld
         (V2 pos, double altFt, double cruiseFt)? entry = null)
     {
         if (ArrRwy is null) SelectRunways(true);
-        var plan = planned ?? (leg is not null ? PlanArrival(leg.Dep) : (ArrRwy, null));
+        var plan = planned ?? (leg is not null ? PlanArrival(leg.Dep, leg.Type) : (ArrRwy, null));
         var rwy = plan.Item1;
         if (rwy is null) return null;
         AircraftIdentity id;
@@ -1875,7 +1880,7 @@ public sealed class TrafficWorld
     private Procedure? PickStar(Flight f, RunwayEnd rwy, out List<ProcedureLeg> legs)
     {
         legs = new List<ProcedureLeg>();
-        var choice = f.StarPick is { } sp && Serves(sp.p, rwy) ? sp : ChooseStar(new[] { rwy }, f.Other);
+        var choice = f.StarPick is { } sp && Serves(sp.p, rwy) ? sp : ChooseStar(new[] { rwy }, f.Other, f.P.Family != "turboprop");
         if (choice is null) return null;
         var (star, tr) = choice.Value;
         if (tr is not null) legs.AddRange(tr.Legs);

@@ -767,6 +767,8 @@ Console.WriteLine("== FAA preferred routes: the STAR and SID a flight would file
         "ACY,ACY LEEAH ATR TRPOD Q409 CRPLR EARZZ Q131 WAALT Y289 BAHAA HIBAC ALYNA4 MCO,MCO,,,,H,TO ISM.LEE.MCO.ORL.SFB,,JETS. TURBOPROPS:  RNAV 1-DME/DME/IRU OR GPS,WATER,2,ZDC,ZJX",
         "ACY,ACY LEEAH ATR TRPOD Q409 CRPLR Q85 LPERD GTOUT1 MCO,MCO,,,,H,,,JETS: RNAV 1  - DME/DME/IRU OR GPS REQUIRED,MCO LANDING SOUTH,3,ZDC,ZJX",
         "ATL,ATL SMLTZ3 WALET ZJAYX GRNCH5 MCO,MCO,,,,H,,,,,2,ZTL,ZJX",
+        "ATL,ATL SMLTZ3 WALET MJKAL JAFAR3 ORL,ORL,,,,H,,,,,1,ZTL,ZJX",
+        "TPA,TPA DADES PROPP1 MCO,MCO,,,,L,,,TURBOPROPS ONLY,,1,ZJX,ZJX",
     };
     var db = PreferredRoutes.Parse(csv);
     var stars = new HashSet<string> { "SNFLD", "GTOUT", "ALYNA", "GRNCH" };
@@ -781,6 +783,9 @@ Console.WriteLine("== FAA preferred routes: the STAR and SID a flight would file
     var sea = db.ArrivalFromDirection("KMCO", 305, 359, Where, IsStar);
     Console.WriteLine($"  from Seattle (not listed): {sea?.star} via {sea?.transition}");
     Check(sea?.star == "GRNCH5", "an origin not in the database gets the STAR used by listed origins in the same direction");
+    Check(db.StarFamiliarity("JAFAR3", "KMCO") == 2 && db.StarFamiliarity("GRNCH5", "KMCO") == 0 && db.StarFamiliarity("SLOAO1", "KMCO") == 1,
+        "the database tells an airport's own STARs (GRNCH → MCO) from a nearby airport's (JAFAR → ORL)");
+    Check(db.PropsOnly("PROPP1") && !db.PropsOnly("GRNCH5"), "a STAR only routed for turboprops is never given to a jet");
     Check(north?.star == "SNFLD3" && north?.transition == "LPERD" && south?.star == "GTOUT1" && atl?.star == "GRNCH5" && atl?.transition == "ZJAYX" && dep?.sid == "SMLTZ3" && dep?.transition == "WALET",
         "the right STAR for the flow (not the oceanic/weather ALYNA4 option), its entry fix, and the SID with its exit");
 }

@@ -12,7 +12,21 @@ public sealed class PreferredRoutes
     public sealed record Row(string Orig, string Dest, string[] Route, string Type, string Aircraft, string Direction);
 
     private readonly Dictionary<(string, string), List<Row>> _byPair = new();
+    /// <summary>Each STAR named in the database (by base name, e.g. JAFAR): the airports its routes end at, and the
+    /// aircraft its rows allow ("JETS", "TURBOPROPS"), to tell an airport's own STARs from a satellite's and
+    /// propeller-only arrivals from jet ones.</summary>
+    private readonly Dictionary<string, (HashSet<string> dests, bool jets, bool props, bool any)> _stars = new();
     public int Count { get; private set; }
+
+    /// <summary>0: the database has this STAR ending at this airport; 1: the database doesn't name it; 2: it only ends at other airports (a satellite's).</summary>
+    public int StarFamiliarity(string star, string dest)
+    {
+        if (!_stars.TryGetValue(AirportRules.Base(star), out var st)) return 1;
+        return st.dests.Contains(Faa(dest)) ? 0 : 2;
+    }
+
+    /// <summary>True when every database row with this STAR is for propeller aircraft only (no jet or unrestricted row).</summary>
+    public bool PropsOnly(string star) => _stars.TryGetValue(AirportRules.Base(star), out var st) && st.props && !st.jets && !st.any;
 
     /// <summary>"KMCO" → "MCO" (the FAA uses 3-letter idents for US airports); others stay as they are.</summary>
     public static string Faa(string icao) => icao.Length == 4 && icao[0] == 'K' ? icao[1..] : icao;
@@ -33,6 +47,16 @@ public sealed class PreferredRoutes
             var row = new Row(orig, dest, route, F("Type").ToUpperInvariant(), F("Aircraft").ToUpperInvariant(), F("Direction").ToUpperInvariant());
             if (!db._byPair.TryGetValue((orig, dest), out var l)) db._byPair[(orig, dest)] = l = new();
             l.Add(row);
+            // The token just before the destination is the STAR when it looks like one (letters and a number).
+            if (route.Length >= 2 && System.Text.RegularExpressions.Regex.IsMatch(route[^2], @"^[A-Z]{3,6}\d$"))
+            {
+                var b = AirportRules.Base(route[^2]);
+                if (!db._stars.TryGetValue(b, out var st)) st = (new HashSet<string>(), false, false, false);
+                st.dests.Add(dest);
+                var a = row.Aircraft;
+                bool jet = a.Contains("JET"), prop = a.Contains("PROP");
+                db._stars[b] = (st.dests, st.jets || jet, st.props || prop, st.any || (!jet && !prop));
+            }
             db.Count++;
         }
         return db;
