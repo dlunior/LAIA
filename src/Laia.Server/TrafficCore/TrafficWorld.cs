@@ -2067,9 +2067,24 @@ public sealed class TrafficWorld
             var starPts = star is null ? new List<AirPoint>() : Apt.LegsToPoints(starLegs, entry ?? V2.FromBearing(Rng.Next(360), 40 * Geo2.MPerNm), 11000, out _);
             // Handed over from the whole sky: direct to the STAR, joining it at the first fix that isn't further out
             // than the aircraft already is.
+            // The fix it's cleared direct to must be ahead: not behind it on the way in (heading away from the airport),
+            // and not one it would have to pass and then turn back from by more than 90° to follow the STAR. The whole sky
+            // flies the great circle, so an arrival can be beside its STAR's first fix (JBU228 from San Juan, east of
+            // MUNGI): it then goes direct to the next fix (HIJON) instead of flying back to MUNGI and looping round.
             if (entry is { } en0)
             {
-                var k0 = starPts.FindIndex(p => p.P.Length <= en0.Length + 5 * Geo2.MPerNm);
+                bool Ahead(int k)
+                {
+                    var p = starPts[k].P;
+                    if (p.Length > en0.Length + 5 * Geo2.MPerNm) return false;
+                    var to = p - en0;
+                    if (to.Length < 2 * Geo2.MPerNm) return k + 1 >= starPts.Count;             // practically there: the next one, if any
+                    if (Math.Abs(Geo2.Diff(to.Bearing, (-en0).Bearing)) > 90) return false;     // behind, away from the airport
+                    if (k + 1 >= starPts.Count) return true;
+                    var outb = starPts[k + 1].P - p;
+                    return outb.Length < 1 || Math.Abs(Geo2.Diff(to.Bearing, outb.Bearing)) <= 90;
+                }
+                var k0 = Enumerable.Range(0, starPts.Count).FirstOrDefault(Ahead, -1);
                 if (k0 > 0) starPts.RemoveRange(0, k0);
                 else if (k0 < 0) starPts.Clear();
             }

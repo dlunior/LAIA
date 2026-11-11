@@ -850,6 +850,28 @@ Console.WriteLine("== Take-off times are predicted (taxi, queue, arrivals on the
     Check(errs.Count == 0 || errs.Average() < 120, "predicted within about 2 minutes on average from 5 minutes out");
 }
 
+Console.WriteLine("== Taken over beside its STAR's first fix: direct to the next fix ahead, no flying back and looping round");
+{
+    var nm = Geo2.MPerNm;
+    var world = new TrafficWorld(new AirportModel(TestAirport.Build(false)), new TestSource(), seed: 8) { Automatic = false, Wind = new Wind(270, 10) };
+    world.SelectRunways(true);
+    // ARRVL1 runs FARRR (30, -30) → MIDDL (18, -12); the aircraft is east-northeast of FARRR, beside it.
+    var start = new V2(40 * nm, -15 * nm);
+    Laia.Common.Airports.ScheduleLeg L() => new() { Airline = "JBU", Operator = "JBU", Type = "A320", Reg = "N828JB", Flight = "228", Dep = "KXXX", Arr = "TEST" };
+    var f = world.SpawnArrival(0, false, L(), entry: (start, 10000, 10000))!;
+    var farrr = new V2(30 * nm, -30 * nm);
+    double nearest = double.MaxValue, turn = 0, prev = double.NaN;
+    for (var s2 = 0.0; s2 < Math.Min(f.Path!.Length, 20 * nm); s2 += 200)
+    {
+        var (pp, dir, _) = f.Path.At(s2);
+        nearest = Math.Min(nearest, (pp - farrr).Length / nm);
+        if (!double.IsNaN(prev)) turn += Math.Abs(Geo2.Diff(dir, prev));
+        prev = dir;
+    }
+    Console.WriteLine($"  {f.Route}; closest to FARRR {nearest:0.0} nm, turning {turn:0}° in the first 20 nm");
+    Check(nearest > 5 && turn < 150, "it goes direct to MIDDL rather than back to FARRR and round");
+}
+
 Console.WriteLine("== Neighbouring fields: runway traffic only, on the main airport's clock; satellite STARs are a last resort");
 {
     var nm = Geo2.MPerNm;
