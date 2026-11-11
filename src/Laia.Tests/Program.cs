@@ -776,6 +776,11 @@ Console.WriteLine("== FAA preferred routes: the STAR and SID a flight would file
     var atl = db.Arrival("KATL", "KMCO", 359, true, IsStar);
     var dep = db.Departure("KATL", "KMCO", 90, true, t => AirportRules.Base(t) == "SMLTZ");
     Console.WriteLine($"  ACY→MCO north flow {north?.star} via {north?.transition}; south flow {south?.star}; ATL→MCO {atl?.star} via {atl?.transition}; ATL departs {dep?.sid}.{dep?.transition}");
+    // An origin the database doesn't list (Seattle): the STAR the routes from airports in that direction use.
+    (double, double)? Where(string id) => id switch { "ATL" => (315.0, 350.0), "ACY" => (20.0, 790.0), _ => null };
+    var sea = db.ArrivalFromDirection("KMCO", 305, 359, Where, IsStar);
+    Console.WriteLine($"  from Seattle (not listed): {sea?.star} via {sea?.transition}");
+    Check(sea?.star == "GRNCH5", "an origin not in the database gets the STAR used by listed origins in the same direction");
     Check(north?.star == "SNFLD3" && north?.transition == "LPERD" && south?.star == "GTOUT1" && atl?.star == "GRNCH5" && atl?.transition == "ZJAYX" && dep?.sid == "SMLTZ3" && dep?.transition == "WALET",
         "the right STAR for the flow (not the oceanic/weather ALYNA4 option), its entry fix, and the SID with its exit");
 }

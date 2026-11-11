@@ -1443,6 +1443,16 @@ public sealed class TrafficWorld
             var tr = sid.EnrouteTransitions.FirstOrDefault(t => t.Name.Equals(pr.transition, StringComparison.OrdinalIgnoreCase));
             if (tr is not null || sid.EnrouteTransitions.Count == 0) { RoutesUsed++; return (sid, tr); }
         }
+        if (Routes is not null && BearingTo(dest) is { } db && list.Count > 0 &&
+            Routes.DepartureToDirection(Apt.Icao, db, ArrRwy?.Heading ?? list[0].Heading, FaaWhere, tok => cands.Any(c => AirportRules.Base(c.Name) == AirportRules.Base(tok))) is { } pd)
+        {
+            var sid = cands.First(c => AirportRules.Base(c.Name) == AirportRules.Base(pd.sid));
+            var tr = sid.EnrouteTransitions.FirstOrDefault(t => t.Name.Equals(pd.transition, StringComparison.OrdinalIgnoreCase));
+            if (tr is null && sid.EnrouteTransitions.Count > 0)
+                tr = sid.EnrouteTransitions.OrderBy(t => Score(db, ExitFix(sid, t))).First();
+            RoutesUsed++;
+            return (sid, tr);
+        }
         var want = BearingTo(dest);
         var options = new List<(Procedure p, Transition? t, double score)>();
         foreach (var sid in cands)
@@ -1468,6 +1478,19 @@ public sealed class TrafficWorld
             if (tr is not null || star.EnrouteTransitions.Count == 0 || star.Legs.Any(l => l.Fix.Equals(pr.transition, StringComparison.OrdinalIgnoreCase)))
             { RoutesUsed++; return (star, tr); }
         }
+        // Origin not in the database (international, or a pair it doesn't list): the STAR the database's routes from
+        // airports in the same direction use, for this flow.
+        if (Routes is not null && BearingTo(origin) is { } wb && list.Count > 0 &&
+            Routes.ArrivalFromDirection(Apt.Icao, wb, list[0].Heading, FaaWhere, tok => cands.Any(c => AirportRules.Base(c.Name) == AirportRules.Base(tok))) is { } pd)
+        {
+            var star = cands.First(c => AirportRules.Base(c.Name) == AirportRules.Base(pd.star));
+            var tr = star.EnrouteTransitions.FirstOrDefault(t => t.Name.Equals(pd.transition, StringComparison.OrdinalIgnoreCase))
+                ?? star.EnrouteTransitions.FirstOrDefault(t => t.Legs.Any(l => l.Fix.Equals(pd.transition, StringComparison.OrdinalIgnoreCase)));
+            if (tr is null && star.EnrouteTransitions.Count > 0)
+                tr = star.EnrouteTransitions.OrderBy(t => Score(wb, EntryFix(star, t))).First();
+            RoutesUsed++;
+            return (star, tr);
+        }
         var want = BearingTo(origin);
         var options = new List<(Procedure p, Transition? t, double score)>();
         // Stopgap until real filed routes: a STAR also published at a neighbouring field counts as 60° worse, so it's
@@ -1490,6 +1513,15 @@ public sealed class TrafficWorld
         legs.AddRange(pick.Legs);
         if (tr is not null) legs.AddRange(tr.Legs);
         return pick;
+    }
+
+    /// <summary>Where an airport named the FAA way ("BNA", or a full ICAO code) lies from here: bearing and distance.</summary>
+    private (double bearing, double nm)? FaaWhere(string id)
+    {
+        if (Locate is null) return null;
+        var p = (id.Length == 3 ? Locate("K" + id) : null) ?? Locate(id);
+        if (p is not { } q) return null;
+        return (Geo2.BearingDeg(Apt.Data.Lat, Apt.Data.Lon, q.lat, q.lon), Geo2.DistanceNm(Apt.Data.Lat, Apt.Data.Lon, q.lat, q.lon));
     }
 
     /// <summary>Bearing from this airport to another (null if unknown or too close to matter).</summary>

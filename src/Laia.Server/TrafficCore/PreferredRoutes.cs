@@ -80,6 +80,67 @@ public sealed class PreferredRoutes
     }
 
     /// <summary>
+    /// For an origin that isn't in the database (most international ones): the STAR most used by the database's
+    /// routes from airports in about the same direction (within 25°), for this flow — what airlines from that part of
+    /// the world file. Closer directions count more.
+    /// </summary>
+    public (string star, string? transition)? ArrivalFromDirection(string dest, double bearing, double landingHeading,
+        Func<string, (double bearing, double nm)?> where, Func<string, bool> isStar)
+    {
+        var tally = new Dictionary<string, (double score, string? tr, double best)>();
+        foreach (var ((o, d), rows) in _byPair)
+        {
+            if (d != Faa(dest)) continue;
+            if (where(o) is not { } w || w.nm < 50) continue;
+            var diff = Math.Abs(Geo2.Diff(w.bearing, bearing));
+            if (diff > 25) continue;
+            foreach (var r in rows.Where(r => FlowFit(r, landingHeading) == 0))
+            {
+                var toks = r.Route;
+                for (var i = toks.Length - 1; i >= 1; i--)
+                {
+                    if (!isStar(toks[i])) continue;
+                    var key = toks[i];
+                    var cur = tally.GetValueOrDefault(key, (0, null, 99));
+                    tally[key] = (cur.score + (25 - diff), diff < cur.best ? toks[i - 1] : cur.tr, Math.Min(cur.best, diff));
+                    break;
+                }
+            }
+        }
+        if (tally.Count == 0) return null;
+        var top = tally.OrderByDescending(kv => kv.Value.score).First();
+        return (top.Key, top.Value.tr);
+    }
+
+    /// <summary>The same for departures to a destination not in the database: the SID most used towards that direction.</summary>
+    public (string sid, string? transition)? DepartureToDirection(string orig, double bearing, double landingHeading,
+        Func<string, (double bearing, double nm)?> where, Func<string, bool> isSid)
+    {
+        var tally = new Dictionary<string, (double score, string? tr, double best)>();
+        foreach (var ((o, d), rows) in _byPair)
+        {
+            if (o != Faa(orig)) continue;
+            if (where(d) is not { } w || w.nm < 50) continue;
+            var diff = Math.Abs(Geo2.Diff(w.bearing, bearing));
+            if (diff > 25) continue;
+            foreach (var r in rows.Where(r => FlowFit(r, landingHeading) == 0))
+            {
+                var toks = r.Route;
+                for (var i = 0; i < toks.Length - 1; i++)
+                {
+                    if (!isSid(toks[i])) continue;
+                    var cur = tally.GetValueOrDefault(toks[i], (0, null, 99));
+                    tally[toks[i]] = (cur.score + (25 - diff), diff < cur.best ? toks[i + 1] : cur.tr, Math.Min(cur.best, diff));
+                    break;
+                }
+            }
+        }
+        if (tally.Count == 0) return null;
+        var top = tally.OrderByDescending(kv => kv.Value.score).First();
+        return (top.Key, top.Value.tr);
+    }
+
+    /// <summary>
     /// The arrival a flight from this origin would file: the STAR (its name as in the route, e.g. SNFLD3) and the fix
     /// before it (its entry transition, e.g. LPERD). Null when the pair isn't in the database or no STAR is named.
     /// </summary>
