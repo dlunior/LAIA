@@ -653,6 +653,18 @@ Console.WriteLine("== Airport rules read from the FAA's AAUP text (any airport, 
     Check(rules.Rules.Count == 2 && east is not null && string.Join(" ", east.Runways) == "35L 35R 17L 17R" && west is not null && string.Join(" ", west.Runways) == "36L 36R 18L 18R"
         && rules.ForSid("CITR1") is null && rules.ForStar("GRNCH5") is null,
         "Orlando: JEEMY/FATHE/DDANY/MZULO → the east runways, RDSOX/OSPRY/FSHUN → the west (read from the AAUP text)");
+    Check(east is not null && east.Hours == (7 * 60, 23 * 60) && rules.ForSid("JEEMY4", 12 * 60) is not null && rules.ForSid("JEEMY4", 0) is null,
+        "the rules apply 0700-2300 local only (at midnight the general logic and ATIS decide)");
+    // The same page with the text out of reading order (as PDF readers often give it): headings after the rules.
+    var jumbled = string.Join("\n", new[]
+    {
+        "DDANY, MZULO, JEEMY, FATHE - Expect to Depart Runway 35L", "RDSOX, OSPRY, FSHUN - Expect to Depart Runway 36R",
+        "5. SPECIFIC INFORMATION: 0700-2300 local runway 36L/R, 35L/R RNAV simultaneous", "Departing Runways 35L/R 17L/R", "Departing Runways 36L/R 18L/R",
+    });
+    var r2 = AirportRules.Parse(jumbled, sids, stars, "RNAV DEPARTURE AAUP");
+    Console.WriteLine("  out of order: " + r2.Describe());
+    Check(r2.ForSid("FATHE4") is { } fe && string.Join(" ", fe.Runways) == "35L 35R 17L 17R" && fe.Hours is not null && r2.ForSid("OSPRY1") is { } ow && string.Join(" ", ow.Runways) == "36L 36R 18L 18R",
+        "out of reading order it still finds each rule's runway group (both flows) and the hours");
     Check(AaupReader_Cycle(new DateTime(2026, 11, 10)) == "2611" && AaupReader_Cycle(new DateTime(2026, 11, 26)) == "2612" && AaupReader_Cycle(new DateTime(2027, 1, 5)) == "2613" && AaupReader_Cycle(new DateTime(2027, 1, 25)) == "2701",
         "the FAA chart cycle is worked out from the date (29 OCT 2026 = 2611)");
     static string AaupReader_Cycle(DateTime d)

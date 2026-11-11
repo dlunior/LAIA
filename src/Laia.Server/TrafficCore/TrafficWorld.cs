@@ -444,6 +444,24 @@ public sealed class TrafficWorld
     private bool _schedStarted;
 
     /// <summary>Signed minutes from now until a time of the week (-5040..5040).</summary>
+    /// <summary>For tests: the airport's local time (minutes of the day) to use for rules with hours.</summary>
+    public int? LocalMinuteOverride { get; set; }
+    /// <summary>The airport's local time now (minutes of the day), for AAUP rules with hours ("0700-2300 local").
+    /// Real time, like the ATIS: US time zones by longitude, with daylight saving.</summary>
+    public int? LocalMinuteNow
+    {
+        get
+        {
+            if (LocalMinuteOverride is { } o) return o;
+            var lon = Apt.Data.Lon;
+            var id = lon > -87.6 ? "America/New_York" : lon > -101 ? "America/Chicago" : lon > -114.5 ? "America/Denver" : lon > -130 ? "America/Los_Angeles" : lon > -150 ? "America/Anchorage" : "Pacific/Honolulu";
+            DateTime local;
+            try { local = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, TimeZoneInfo.FindSystemTimeZoneById(id)); }
+            catch { local = DateTime.UtcNow.AddHours(Math.Round(lon / 15)); }
+            return local.Hour * 60 + local.Minute;
+        }
+    }
+
     /// <summary>How far out arrivals are taken over from the whole sky (nm).</summary>
     public double HandoverNm { get; set; } = 200;
 
@@ -1713,7 +1731,7 @@ public sealed class TrafficWorld
         var serving = Enumerable.Range(0, list.Count).Where(i => star is null || Serves(star.Value.p, list[i])).ToList();
         if (serving.Count == 0) serving = Enumerable.Range(0, list.Count).ToList();
         // The airport's published rule for this STAR (its AAUP), when it names runways that are in use.
-        if (star is { } srr && Rules?.ForStar(srr.p.Name) is { } rule)
+        if (star is { } srr && Rules?.ForStar(srr.p.Name, LocalMinuteNow) is { } rule)
         {
             var ruled = serving.Where(i => rule.Runways.Contains(list[i].Ident)).ToList();
             if (ruled.Count > 0) serving = ruled;
@@ -1745,11 +1763,16 @@ public sealed class TrafficWorld
         var serving = Enumerable.Range(0, list.Count).Where(i => sid is null || Serves(sid.Value.p, list[i])).ToList();
         if (serving.Count == 0) serving = Enumerable.Range(0, list.Count).ToList();
         // The airport's own rule for this SID (its AAUP), when it names runways that are in use.
-        var rule = sid is { } sr ? Rules?.ForSid(sr.p.Name) : null;
+        // Order: the flow (ATIS, or the wind without one) decides the runways in use; the AAUP rule then narrows the
+        // choice among them — if its runway isn't in use, or it's outside its hours, the ATIS wins.
+        var ruleNote = "";
+        var rule = sid is { } sr ? Rules?.ForSid(sr.p.Name, LocalMinuteNow) : null;
+        if (rule is null && sid is { } sr0 && Rules?.ForSid(sr0.p.Name) is { } off) ruleNote = $"its AAUP rule applies only{off.HoursText}";
         if (rule is not null)
         {
             var ruled = serving.Where(i => rule.Runways.Contains(list[i].Ident)).ToList();
-            if (ruled.Count > 0) serving = ruled; else rule = null;
+            if (ruled.Count > 0) serving = ruled;
+            else { ruleNote = $"its AAUP runway ({string.Join("/", rule.Runways)}) isn't in use, so the ATIS wins"; rule = null; }
         }
         var side = sid is { } sd ? SideOf(axis, ExitFix(sd.p, sd.t)) : BearingTo(f.Other) is { } b ? V2.Cross(axis, V2.FromBearing(b)) : 0;
         // A stand beyond the outermost runway on one side: that side's runway (no crossing the airport to depart).
@@ -1770,7 +1793,8 @@ public sealed class TrafficWorld
         // For the log: why this runway, in compass terms (the side of the field the SID heads for).
         string Side(double v) => Math.Abs(v) < 0.25 ? "straight out" : "to the " + Compass(Geo2.Norm(axis.Bearing + (v > 0 ? -90 : 90)));
         var why = new List<string>();
-        if (rule is not null) why.Add(rule.Source);
+        if (rule is not null) why.Add(rule.Source + rule.HoursText);
+        else if (ruleNote.Length > 0) why.Add(ruleNote);
         if (sid is { } sd2) why.Add($"{sd2.p.Name}{(sd2.t is { } tt ? "." + tt.Name : "")} towards {f.Other} exits {Side(side)}");
         else why.Add($"no SID; {f.Other} lies {Side(side)}");
         if (straight && ramp == 0 && Math.Abs(gatePos) > 0.2) why.Add($"its stand is on the {Compass(Geo2.Norm(axis.Bearing + (gatePos > 0 ? -90 : 90)))} side of the field");

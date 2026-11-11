@@ -94,6 +94,10 @@ public sealed class AaupReader(ILogger log)
                 await File.WriteAllTextAsync(file, charts + "\n" + text);
             }
             log.LogInformation("{icao} AAUP (d-TPP {cycle}): {what}", icao, cycle, charts.Length == 0 ? "none published" : charts);
+            // The lines that matter for runway rules, as the PDF reader gave them (to see why a rule was or wasn't read).
+            var keep = text.Split('\n').Select(l => System.Text.RegularExpressions.Regex.Replace(l, @"\s+", " ").Trim())
+                .Where(l => l.Length > 0 && System.Text.RegularExpressions.Regex.IsMatch(l, @"RUNWAY|RWY|LOCAL|\d{4}\s*[-–]\s*\d{4}", System.Text.RegularExpressions.RegexOptions.IgnoreCase)).Take(40).ToList();
+            if (keep.Count > 0) log.LogInformation("{icao} AAUP text (runway lines): {lines}", icao, string.Join(" | ", keep));
         }
         catch (Exception ex) { log.LogInformation("{icao} AAUP not available: {msg}", icao, ex.Message); }
         lock (_cache) { _cache[icao] = (DateTime.UtcNow, text, charts); _busy.Remove(icao); }
