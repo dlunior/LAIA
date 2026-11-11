@@ -811,6 +811,30 @@ Console.WriteLine("== Arrival manager: two arrivals bunched far out are spaced w
         "both land, properly spaced, with no hold and no go-around");
 }
 
+Console.WriteLine("== Published altitude restrictions on the STAR are met at their fixes");
+{
+    var nm = Geo2.MPerNm;
+    foreach (var (desc, alt, label) in new[] { (2, 6000.0, "at or above 6,000"), (3, 4000.0, "at or below 4,000") })
+    {
+        var data = TestAirport.Build(false);
+        var star = data.Arrivals.First(a => a.Name == "ARRVL1");
+        star.Legs[1].AltDesc = desc; star.Legs[1].Alt1Ft = alt;
+        var world = new TrafficWorld(new AirportModel(data), new TestSource(), seed: 5) { Automatic = false, Wind = new Wind(270, 10) };
+        world.SelectRunways(true);
+        Laia.Common.Airports.ScheduleLeg L() => new() { Airline = "DAL", Operator = "DAL", Type = "A321", Reg = "N77", Flight = "77", Dep = "KXXX", Arr = "TEST" };
+        var f = world.SpawnArrival(40, false, L())!;
+        var fix = f.AltLimits.FirstOrDefault(c => (desc == 2 ? c.Min : c.Max) == alt);
+        double crossed = double.NaN;
+        for (var t = 0.0; t < 1800 && double.IsNaN(crossed); t += 0.5)
+        {
+            world.Step(0.5);
+            if (f.S >= fix.S) crossed = f.AltFt;
+        }
+        Console.WriteLine($"  {label} at MIDDL: crossed at {crossed:0} ft ({f.Route})");
+        Check(fix.S > 0 && (desc == 2 ? crossed >= alt - 100 : crossed <= alt + 100), $"the arrival crosses MIDDL {label}");
+    }
+}
+
 Console.WriteLine("== After a go-around, the aircraft comes back around and lands normally");
 {
     var apt = new AirportModel(TestAirport.Build(false));

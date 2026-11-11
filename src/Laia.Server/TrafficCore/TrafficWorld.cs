@@ -74,6 +74,8 @@ public sealed class Flight
     private char? _wake;
     /// <summary>Published speed limits along the path: distance along the path of the fix, and the limit (kt).</summary>
     public List<(double S, double Kt)> SpeedLimits = new();
+    /// <summary>The procedure's altitude restrictions on the path: at the fix at S, at or above Min and at or below Max (0 = none).</summary>
+    public List<(double S, double Min, double Max)> AltLimits = new();
     /// <summary>The planned departure route (planned when lining up, so the spacing can look at where it goes).</summary>
     public List<AirPoint>? DepPlan;
     public string DepRoute = "";
@@ -860,6 +862,25 @@ public sealed class TrafficWorld
 
     private PushbackPlanner? _pushPlanner;
 
+    /// <summary>
+    /// The planned altitude bent to the procedure's restrictions ahead: never above an "at or below" (or "at") one,
+    /// starting down in time to meet it at about 300 ft per nm; never below an "at or above" (or "at") one until its fix.
+    /// </summary>
+    private static double Restricted(Flight f, double plan)
+    {
+        double hi = double.MaxValue, lo = double.MinValue;
+        foreach (var c in f.AltLimits)
+        {
+            var ahead = (c.S - f.S) / Geo2.MPerNm;
+            if (ahead < -0.3) continue;
+            if (c.Max > 0) hi = Math.Min(hi, c.Max + Math.Max(0, ahead) * 300);
+            if (c.Min > 0) lo = Math.Max(lo, c.Min);
+        }
+        var t = Math.Min(plan, hi);
+        if (t < lo) t = Math.Min(lo, hi);
+        return t;
+    }
+
     private readonly List<double> _err30 = new(), _err10 = new(), _err5 = new();
 
     /// <summary>For the log at touchdown: how far off the landing time predicted 30, 10 and 5 minutes out was.</summary>
@@ -1393,9 +1414,13 @@ public sealed class TrafficWorld
     private static void SetSpeedLimits(Flight f, List<AirPoint> pts)
     {
         f.SpeedLimits.Clear();
+        f.AltLimits.Clear();
         if (f.Path is null) return;
         for (var i = 0; i < pts.Count && i < f.Path.PointS.Length; i++)
+        {
             if (pts[i].SpeedKt >= 100 && pts[i].SpeedKt < 400) f.SpeedLimits.Add((f.Path.PointS[i], pts[i].SpeedKt));
+            if (pts[i].AltMinFt > 0 || pts[i].AltMaxFt > 0) f.AltLimits.Add((f.Path.PointS[i], pts[i].AltMinFt, pts[i].AltMaxFt));
+        }
     }
 
     /// <summary>
@@ -1799,6 +1824,7 @@ public sealed class TrafficWorld
     /// <summary>The arrival route: STAR, then the approach (or vectors to final), then the runway.</summary>
     private void BuildArrivalPath(Flight f, V2? from, V2? entry = null)
     {
+        var altFixes = new List<AirPoint>();
         var rwy = f.Rwy!;
         var route = new List<V2>();
         var speeds = new List<double>();
@@ -1844,6 +1870,7 @@ public sealed class TrafficWorld
                 var s0 = V2.FromBearing(bearing, 45 * Geo2.MPerNm);
                 starPts.Add(new AirPoint(s0, ""));
             }
+            altFixes.AddRange(starPts.Concat(appPts).Where(p => p.AltMinFt > 0 || p.AltMaxFt > 0));
             route.AddRange(starPts.Select(p => p.P));
             speeds.AddRange(starPts.Select(p => p.SpeedKt));
             if (appPts.Count > 0) { route.AddRange(appPts.Select(p => p.P)); speeds.AddRange(appPts.Select(p => p.SpeedKt)); }
@@ -1871,6 +1898,13 @@ public sealed class TrafficWorld
         f.SpeedLimits.Clear();
         for (var i = 0; i < speeds.Count && i < f.Path.PointS.Length; i++)
             if (speeds[i] >= 100 && speeds[i] < 400) f.SpeedLimits.Add((f.Path.PointS[i], speeds[i]));
+        // The STAR's and approach's altitude restrictions, at the fixes still on the route (vectors may have cut some).
+        f.AltLimits.Clear();
+        foreach (var c in altFixes)
+        {
+            var i = route.FindIndex(q => (q - c.P).Length < 1);
+            if (i >= 0 && i < thrIndex) f.AltLimits.Add((f.Path.PointS[i], c.AltMinFt, c.AltMaxFt));
+        }
     }
 
     /// <summary>
@@ -2764,6 +2798,9 @@ public sealed class TrafficWorld
         targetIas = Math.Max(f.P.V2 + 10, Math.Min(targetIas, ProcedureLimit(f, true)));
         f.Ias += Math.Clamp(targetIas - f.Ias, -1.0 * dt, 1.6 * dt);
         var targetVs = agl < 1500 ? f.P.ClimbFpm : f.P.ClimbFpm * (f.Ias < targetIas - 5 ? 0.7 : 0.9);
+        // The SID's "at or below" restrictions ahead: level off at them until the fix is passed.
+        var cap = f.AltLimits.Where(c => c.Max > 0 && c.S > f.S - 0.2 * Geo2.MPerNm).Select(c => c.Max).DefaultIfEmpty(double.MaxValue).Min();
+        if (cap < double.MaxValue) targetVs = Math.Min(targetVs, Math.Max(0, (cap - f.AltFt) * 3));
         f.Vs += Math.Clamp(targetVs - f.Vs, -500 * dt, 600 * dt);
         f.AltFt += f.Vs / 60 * dt;
         MoveAir(f, dt);
@@ -2852,7 +2889,7 @@ public sealed class TrafficWorld
             if (dth < 6.5 || agl < 2200) f.Gear = true;
 
             double vsTarget;
-            var glideVs = -(f.Gs * 101.27 * Math.Tan(3 * Math.PI / 180));
+            double glideVs = -(f.Gs * 101.27 * Math.Tan(3 * Math.PI / 180));
             if (f.Phase == "flare" || (agl < 30 && dth < 0.4))
             {
                 if (f.Phase != "flare") f.SetPhase("flare", Time);
@@ -2861,7 +2898,10 @@ public sealed class TrafficWorld
             }
             else
             {
-                var err = f.AltFt - (f.CruiseFt > 0 ? Math.Min(Profile(rwy, dth), f.CruiseFt) : Profile(rwy, dth));
+                var plan = f.CruiseFt > 0 ? Math.Min(Profile(rwy, dth), f.CruiseFt) : Profile(rwy, dth);
+                var want = Restricted(f, plan);
+                if (want > plan + 50) glideVs = 0;   // held up by an "at or above" restriction ahead: stay level
+                var err = f.AltFt - want;
                 // Below the descent path (after a go-around, or vectored in low): level off until the path comes down
                 // to meet the aircraft, as pilots do, rather than carry on descending.
                 vsTarget = Math.Clamp(glideVs - Math.Clamp(err * 1.5, -6000, 1500), -3000, 0);
