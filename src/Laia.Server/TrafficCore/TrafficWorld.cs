@@ -1762,7 +1762,8 @@ public sealed class TrafficWorld
                     "taxi" => f.Path is null ? 0 : Math.Max(0, f.Path.Length - f.S) / taxiMs,
                     _ => 0,
                 };
-                f.ReadyAt = Time + toGo;
+                // Learned correction: how late this airport's departures have really been against the prediction.
+                f.ReadyAt = Time + toGo + (f.Phase is "boarding" or "pushback" or "engine start" or "taxi" ? _depBias : 0);
             }
             var arrs = Flights.Where(a => a.Kind == "arrival" && !a.OnGround && !a.Done && a.Rwy?.Runway == g.Key && !double.IsNaN(a.EtaSec))
                 .Select(a => Time + a.EtaSec - (Time - a.EtaAt)).OrderBy(x => x).ToList();
@@ -1787,11 +1788,13 @@ public sealed class TrafficWorld
     {
         var parts = new List<string>();
         if (!double.IsNaN(f.TakeoffPred10)) { var e = Time - f.TakeoffPred10; _errDep10.Add(e); if (_errDep10.Count > 100) _errDep10.RemoveAt(0); parts.Add($"10 min out {e:+0;-0} s"); }
-        if (!double.IsNaN(f.TakeoffPred5)) { var e = Time - f.TakeoffPred5; _errDep5.Add(e); if (_errDep5.Count > 100) _errDep5.RemoveAt(0); parts.Add($"5 min out {e:+0;-0} s"); }
+        if (!double.IsNaN(f.TakeoffPred5)) { var e = Time - f.TakeoffPred5; _errDep5.Add(e); if (_errDep5.Count > 100) _errDep5.RemoveAt(0); parts.Add($"5 min out {e:+0;-0} s"); _depBias = Math.Clamp(_depBias + 0.3 * e, -300, 300); }
         return parts.Count == 0 ? "" : $" (take-off time as predicted {string.Join(", ", parts)})";
     }
 
     private double _lastDepPredict = -999;
+    /// <summary>Seconds added to departures' ready times, learned from how late (or early) take-offs have been.</summary>
+    private double _depBias;
 
     /// <summary>For the log: the flight's own result ("restrictions 6 of 6 met" or the misses).</summary>
     private static string ChecksReport(Flight f)
@@ -2127,7 +2130,10 @@ public sealed class TrafficWorld
             var (ep, edir, _) = f.Path!.At(0);
             f.Pos = ep; f.Heading = edir;
             f.CruiseFt = Math.Max(en.cruiseFt, en.altFt);
-            f.AltFt = en.altFt;
+            // Never start above what the procedure ahead allows: at the start of a session flights appear wherever the
+            // schedule has them, some already on the STAR (SWA2236 29 nm out at 11,270 ft, 5 nm before "at 7,000" at
+            // BUNIE) — they'd have been brought down to it already.
+            f.AltFt = Math.Min(en.altFt, Restricted(f, en.altFt));
             var dth0 = f.ThrS / Geo2.MPerNm;
             f.Ias = ArrivalSpeed(f, dth0);
             f.Gs = Wind.Tas(f.Ias, f.AltFt);
