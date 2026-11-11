@@ -1629,7 +1629,7 @@ public sealed class TrafficWorld
         var side = star is { } st ? SideOf(axis, EntryFix(st.p, st.t)) : BearingTo(origin) is { } b ? V2.Cross(axis, V2.FromBearing(b)) : 0;
         int Queue(RunwayEnd e) => Flights.Count(o => !o.Done && o.Kind == "arrival" && !o.OnGround && o.Rwy?.Runway == e.Runway);
         var minQ = serving.Min(i => Queue(list[i]));
-        var best = serving.OrderByDescending(i => pos[i] * side * 2 - 0.25 * (Queue(list[i]) - minQ)).ThenByDescending(i => list[i].LengthM).First();
+        var best = serving.OrderByDescending(i => pos[i] * side * 2 - 0.25 * (Queue(list[i]) - minQ) - 0.5 * Math.Max(0, Queue(list[i]) - minQ - 3)).ThenByDescending(i => list[i].LengthM).First();
         return (list[best], star);
     }
 
@@ -1664,7 +1664,11 @@ public sealed class TrafficWorld
         var gate = f.Spot?.P ?? f.Pos;
         var lats = list.Select(e => V2.Cross(axis, (e.Threshold + e.FarEnd) * 0.5)).ToList();
         var g = V2.Cross(axis, gate);
-        var ramp = g < lats.Min() - 150 ? -1.0 : g > lats.Max() + 150 ? 1.0 : 0.0;
+        // "Outside" means beyond every parallel runway the airport has, not just the ones in use: a terminal between
+        // the two runway complexes (MCO with only the west pair in use) is not a ramp, and may use either runway.
+        var allLats = Apt.Ends.Where(e => Math.Abs(Geo2.Diff(e.Heading, axis.Bearing)) < 20 || Math.Abs(Geo2.Diff(e.Heading, axis.Bearing)) > 160)
+            .Select(e => V2.Cross(axis, (e.Threshold + e.FarEnd) * 0.5)).Concat(lats).ToList();
+        var ramp = g < allLats.Min() - 150 ? -1.0 : g > allLats.Max() + 150 ? 1.0 : 0.0;
         // Where the stand sits across the field (-1 … +1 between the outermost runways): for a departure going
         // straight out, the runway on the terminal's side (no crossing the field to depart).
         var mid = (lats.Max() + lats.Min()) / 2; var half = Math.Max(1, (lats.Max() - lats.Min()) / 2);
@@ -1673,7 +1677,7 @@ public sealed class TrafficWorld
         int Queue(RunwayEnd e) => Flights.Count(o => !o.Done && o.Kind == "departure" && o.OnGround && o.Rwy?.Runway == e.Runway);
         var minQ = serving.Min(i => Queue(list[i]));
         var best = serving.OrderByDescending(i => pos[i] * side * 2 + pos[i] * ramp * 4 + (straight ? pos[i] * gatePos * 1.5 : 0)
-                - (ArrRwys.Any(a => a.Runway == list[i].Runway) ? 1.0 : 0) - 0.25 * (Queue(list[i]) - minQ))
+                - (ArrRwys.Any(a => a.Runway == list[i].Runway) ? 1.0 : 0) - 0.25 * (Queue(list[i]) - minQ) - 0.5 * Math.Max(0, Queue(list[i]) - minQ - 3))
             .ThenByDescending(i => list[i].LengthM).First();
         // For the log: why this runway, in compass terms (the side of the field the SID heads for).
         string Side(double v) => Math.Abs(v) < 0.25 ? "straight out" : "to the " + Compass(Geo2.Norm(axis.Bearing + (v > 0 ? -90 : 90)));
