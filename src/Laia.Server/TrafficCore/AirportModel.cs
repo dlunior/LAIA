@@ -325,14 +325,16 @@ public sealed class AirportModel
     private double TrueCourse(ProcedureLeg l) => l.TrueCourse ? l.Course : Geo2.Norm(l.Course + MagVar);
 
     /// <summary>Converts procedure legs to points on the map. Vector legs end the list (ATC would vector from there).</summary>
-    public List<AirPoint> LegsToPoints(IEnumerable<ProcedureLeg> legs, V2 start, double startAltFt, out bool endedInVectors)
+    public List<AirPoint> LegsToPoints(IEnumerable<ProcedureLeg> legs, V2 start, double startAltFt, out bool endedInVectors, bool hybrid = false)
     {
         var pts = new List<AirPoint>();
         var cur = start;
         var alt = startAltFt;
         endedInVectors = false;
-        foreach (var l in legs)
+        var list = legs.ToList();
+        for (var li = 0; li < list.Count; li++)
         {
+            var l = list[li];
             double minA = 0, maxA = 0;
             switch (l.AltDesc)
             {
@@ -354,10 +356,24 @@ public sealed class AirportModel
                     break;
                 }
                 case 11 or 22: // FM, VM: heading until vectored
+                {
+                    // A hybrid procedure (MCO's RNAV SIDs: runway → KAAPE, then "expect radar vectors" to UKAYY, then
+                    // RNAV again): ATC vectors off the heading after a few miles and clears it direct to the next fix,
+                    // where pilot navigation resumes. Only when no fix follows does the route end in vectors.
+                    var next = !hybrid ? null : list.Skip(li + 1).FirstOrDefault(n => Math.Abs(n.Lat) > 0.0001 || Math.Abs(n.Lon) > 0.0001);
+                    if (next is not null)
+                    {
+                        var to = Map.ToXY(next.Lat, next.Lon);
+                        var nm = Math.Clamp((to - cur).Length / Geo2.MPerNm * 0.4, 2, 6);
+                        cur += V2.FromBearing(TrueCourse(l), nm * Geo2.MPerNm);
+                        pts.Add(new AirPoint(cur, "", minA, maxA, l.SpeedKt));
+                        break;
+                    }
                     cur += V2.FromBearing(TrueCourse(l), 5 * Geo2.MPerNm);
                     pts.Add(new AirPoint(cur, "", minA, maxA, l.SpeedKt));
                     endedInVectors = true;
                     return pts;
+                }
                 case 5 or 21 or 3 or 10 or 20 or 6 or 23: // CI/VI/CD/FD/VD/CR/VR: short course leg
                     if (hasFix) goto default;
                     cur += V2.FromBearing(TrueCourse(l), 3 * Geo2.MPerNm);

@@ -742,6 +742,66 @@ Console.WriteLine("== Hand-over of a short flight: one departing a field inside 
     Check(f is not null && firstAlt >= 9000, "taken over at 10,000 ft or more, not on the other field's runway");
 }
 
+Console.WriteLine("== Hybrid SIDs: RNAV to a fix, radar vectors, then RNAV again (MCO's runway → KAAPE → vectors → UKAYY)");
+{
+    var nm = Geo2.MPerNm;
+    var data = TestAirport.Build(false);
+    var apt = new AirportModel(data);
+    var map = new LocalMap(data.Lat, data.Lon);
+    Laia.Common.Airports.ProcedureLeg L(string fix, double x, double y, int type)
+    {
+        var (lat, lon) = map.ToLatLon(new V2(x * nm, y * nm));
+        return new() { Type = type, Fix = fix, Lat = lat, Lon = lon };
+    }
+    var legs = new List<Laia.Common.Airports.ProcedureLeg>
+    {
+        L("KAAPE", -4, 1, 7), new() { Type = 11, Fix = "KAAPE", Course = 270, TrueCourse = true }, L("UKAYY", -14, 10, 7), L("DDANY", -20, 25, 18),
+    };
+    var hy = apt.LegsToPoints(legs, new V2(-1500, 0), 400, out var vec1, hybrid: true);
+    var old = apt.LegsToPoints(legs, new V2(-1500, 0), 400, out var vec2);
+    Console.WriteLine($"  flown: {string.Join(" → ", hy.Select(p => p.Fix.Length > 0 ? p.Fix : "(heading)"))}");
+    Check(hy.Any(p => p.Fix == "UKAYY") && hy.Any(p => p.Fix == "DDANY") && !vec1, "after the vectors it rejoins at UKAYY and flies on to DDANY");
+    var h = hy.FindIndex(p => p.Fix.Length == 0);
+    Check(h > 0 && Math.Abs(Geo2.Diff((hy[h].P - hy[h - 1].P).Bearing, 270)) < 1, "the vector leg is flown on its published heading first");
+    Check(vec2 && !old.Any(p => p.Fix == "UKAYY"), "(an arrival or approach still ends at a vector leg)");
+}
+
+Console.WriteLine("== Hand-over spacing: two arrivals the whole sky has on top of each other close in are sequenced, not held");
+{
+    var nm = Geo2.MPerNm;
+    var data = TestAirport.Build(false);
+    var map = new LocalMap(data.Lat, data.Lon);
+    var origin = map.ToLatLon(new V2(250 * nm, -100 * nm));
+    var world = new TrafficWorld(new AirportModel(data), new TestSource(), seed: 3)
+    {
+        Automatic = false, Wind = new Wind(270, 10), WeekMinute = 2000, Locate = c => c == "KFAR" ? origin : null,
+    };
+    var log = new List<string>(); world.Log = s2 => log.Add(s2);
+    world.SelectRunways(true);
+    Laia.Common.Airports.ScheduleLeg Leg(int dep, string fl, string reg) => new() { Airline = "DAL", Operator = "DAL", Type = "B738", Reg = reg, Flight = fl, Dep = "KFAR", Arr = "TEST", DepMin = dep, ArrMin = dep + 60 };
+    NetPos? np = null; int depMin = 0;
+    for (var dep = 2000 - 70; dep <= 2000; dep++)
+    {
+        var p = world.NetworkPosition(Leg(dep, "1", "N1"));
+        if (p is not null && Geo2.DistanceNm(data.Lat, data.Lon, p.Lat, p.Lon) is > 28 and < 40) { np = p; depMin = dep; break; }
+    }
+    Check(np is not null, "the whole sky has an arrival about 30 nm out");
+    var a = world.SpawnFromNetwork(Leg(depMin, "1", "N1"), np!)!;
+    var b = world.SpawnFromNetwork(Leg(depMin, "2", "N2"), np!)!;
+    var gap = (b.ThrS - b.S - (a.ThrS - a.S)) / nm;
+    Console.WriteLine($"  first {(a.ThrS - a.S) / nm:0.0} track nm out, second {(b.ThrS - b.S) / nm:0.0} ({gap:0.0} nm behind)");
+    Console.WriteLine("  " + log.LastOrDefault());
+    Check(gap >= 4.9, "the second starts at least 5 nm behind the first");
+    var holds = 0; var landed = 0;
+    for (var t = 0.0; t < 2400 && landed < 2; t += 0.5)
+    {
+        world.Step(0.5);
+        landed = new[] { a, b }.Count(f => f.OnGround);
+    }
+    holds = log.Count(x => x.Contains("holding for spacing") || x.Contains("going around") || x.Contains("making a 360"));
+    Check(landed == 2 && holds == 0, $"both land with no hold, 360 or go-around ({holds})");
+}
+
 Console.WriteLine("== Neighbouring fields: runway traffic only, on the main airport's clock; satellite STARs are a last resort");
 {
     var nm = Geo2.MPerNm;
@@ -845,20 +905,23 @@ Console.WriteLine("== Published altitude restrictions on the STAR are met at the
     {
         var data = TestAirport.Build(false);
         var star = data.Arrivals.First(a => a.Name == "ARRVL1");
-        star.Legs[1].AltDesc = desc; star.Legs[1].Alt1Ft = alt;
+        star.Legs[1].AltDesc = desc; star.Legs[1].Alt1Ft = alt; star.Legs[1].SpeedKt = 230;
         var world = new TrafficWorld(new AirportModel(data), new TestSource(), seed: 5) { Automatic = false, Wind = new Wind(270, 10) };
         world.SelectRunways(true);
         Laia.Common.Airports.ScheduleLeg L() => new() { Airline = "DAL", Operator = "DAL", Type = "A321", Reg = "N77", Flight = "77", Dep = "KXXX", Arr = "TEST" };
         var f = world.SpawnArrival(40, false, L())!;
         var fix = f.AltLimits.FirstOrDefault(c => (desc == 2 ? c.Min : c.Max) == alt);
-        double crossed = double.NaN;
+        double crossed = double.NaN, crossedKt = double.NaN;
         for (var t = 0.0; t < 1800 && double.IsNaN(crossed); t += 0.5)
         {
             world.Step(0.5);
-            if (f.S >= fix.S) crossed = f.AltFt;
+            if (f.S >= fix.S) { crossed = f.AltFt; crossedKt = f.Ias; }
         }
-        Console.WriteLine($"  {label} at MIDDL: crossed at {crossed:0} ft ({f.Route})");
+        world.Step(0.5);
+        Console.WriteLine($"  {label}, max 230 kt at MIDDL: crossed at {crossed:0} ft, {crossedKt:0} kt ({f.Route}); checked: {world.RestrictionSummary}");
         Check(fix.S > 0 && (desc == 2 ? crossed >= alt - 100 : crossed <= alt + 100), $"the arrival crosses MIDDL {label}");
+        Check(crossedKt <= 240, "and at or below its 230 kt speed limit");
+        Check(f.ChecksMet >= 1 && f.ChecksMissed.Count == 0, "the crossing is checked and counted as met");
     }
 }
 

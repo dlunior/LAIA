@@ -273,6 +273,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 landing = w is null ? null : string.Join(", ", w.ArrRwys.Select(e => e.Ident).DefaultIfEmpty(w.ArrRwy?.Ident ?? "")),
                 approach = w?.ApproachInUse,
                 prediction = w?.PredictionSummary,
+                restrictions = w?.RestrictionSummary,
                 routes = $"{routesDb.Status}{(w is null ? "" : $"; {w.RoutesUsed} SIDs/STARs from them so far")}",
                 rules = w?.Rules is { Charts.Length: > 0 } ru ? ru.Describe() : null,
                 atis = w?.Atis.CodeArr is { } code ? $"real ATIS info {code}" : w is null ? null : "no ATIS: runways from the wind",

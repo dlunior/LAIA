@@ -76,6 +76,10 @@ public sealed class Flight
     public List<(double S, double Kt)> SpeedLimits = new();
     /// <summary>The procedure's altitude restrictions on the path: at the fix at S, at or above Min and at or below Max (0 = none).</summary>
     public List<(double S, double Min, double Max)> AltLimits = new();
+    /// <summary>The procedure restrictions still to be crossed (fix, altitude window, speed limit), to check they are met.</summary>
+    public List<(double S, string Fix, double Min, double Max, double Kt)> Checks = new();
+    public int ChecksMet;
+    public List<string> ChecksMissed = new();
     /// <summary>The planned departure route (planned when lining up, so the spacing can look at where it goes).</summary>
     public List<AirPoint>? DepPlan;
     public string DepRoute = "";
@@ -362,7 +366,7 @@ public sealed class TrafficWorld
         foreach (var f in Flights.ToList())
         {
             if (f.Done) continue;
-            try { Advance(f, dt); RecordTrail(f); }
+            try { Advance(f, dt); RecordTrail(f); if (!f.OnGround && f.Checks.Count > 0) CheckRestrictions(f); }
             catch (Exception ex) { Log($"{f.Callsign}: {ex.Message}; removed"); f.Done = true; }
         }
         foreach (var f in Flights.Where(f => f.Done && f.Spot is not null)) f.Spot = null;
@@ -468,6 +472,25 @@ public sealed class TrafficWorld
     {
         var plan = PlanArrival(l.Dep, l.Type);
         var f = SpawnArrival(0, false, l, plan, entry: (Apt.Map.ToXY(np.Lat, np.Lon), np.AltFt, np.CruiseFt));
+        // The whole sky flies every leg on its own, so two arrivals can be almost on top of each other when they're
+        // taken over (most at the start, when everything within 200 nm appears at once). Far out the arrival manager
+        // spaces them with speed; close in it can't, so a clashing one starts on its arrival route one slot further
+        // back (5 nm behind the one it clashed with), as if it had been sequenced before it got here.
+        if (f is not null && f.ThrS / Geo2.MPerNm < 60 && plan.rwy is not null)
+        {
+            var mine = f.ThrS / Geo2.MPerNm;
+            var clash = Flights.Any(o => o != f && !o.Done && o.Kind == "arrival" && !o.OnGround && o.Rwy?.Runway == plan.rwy.Runway
+                && Math.Abs((o.Phase == "go-around" ? 12.0 : (o.ThrS - o.S) / Geo2.MPerNm) - mine) < 5);
+            if (clash)
+            {
+                Flights.Remove(f);
+                var d = ArrivalSlot(mine, plan.rwy, 60);
+                if (d < 0) return null;
+                f = SpawnArrival(d, false, l, plan);
+                if (f is not null) Log($"{f.Callsign}: taken over from the whole sky, sequenced: starts {d:0} track nm out (it was {mine:0}, too close to the traffic ahead), {f.Route} for runway {f.Rwy?.Ident}");
+                return f;
+            }
+        }
         if (f is not null) Log($"{f.Callsign}: taken over from the whole sky {Geo2.DistanceNm(Apt.Data.Lat, Apt.Data.Lon, np.Lat, np.Lon):0} nm out at {np.AltFt:0} ft ({np.Phase}), {f.Route} for runway {f.Rwy?.Ident}");
         return f;
     }
@@ -548,7 +571,9 @@ public sealed class TrafficWorld
     /// Where a new arrival can start: the wanted distance from the runway (nm), moved further out until it's at least
     /// 5 nm from every arrival already flying to the landing runway. -1 if that would be more than 50 nm out.
     /// </summary>
-    private double ArrivalSlot(double wantNm, RunwayEnd? rwy)
+    private readonly Dictionary<string, double> _retryAt = new();
+
+    private double ArrivalSlot(double wantNm, RunwayEnd? rwy, double maxNm = 50)
     {
         if (ArrRwy is null) SelectRunways(true);
         rwy ??= ArrRwy;
@@ -558,7 +583,7 @@ public sealed class TrafficWorld
         for (var tries = 0; tries < 20; tries++)
         {
             var clash = taken.FirstOrDefault(o => Math.Abs(o - d) < 5, double.NaN);
-            if (double.IsNaN(clash)) return d <= 50 ? d : -1;
+            if (double.IsNaN(clash)) return d <= maxNm ? d : -1;
             d = clash + 5;
         }
         return -1;
@@ -730,8 +755,9 @@ public sealed class TrafficWorld
                 if (dist > 25 && np.Phase == "climbing" && np.AltFt < Math.Min(10000, np.CruiseFt) - 200) continue;
                 if (dist > 25)
                 {
-                    _done.Add(Key(l, 'A'));
-                    if (SpawnFromNetwork(l, np) is not null) Movements++;
+                    if (_retryAt.TryGetValue(Key(l, 'A'), out var ra) && Time < ra) continue;
+                    if (SpawnFromNetwork(l, np) is not null) { _done.Add(Key(l, 'A')); Movements++; }
+                    else _retryAt[Key(l, 'A')] = Time + 20;     // no slot yet: try again shortly
                     continue;
                 }
             }
@@ -1367,7 +1393,7 @@ public sealed class TrafficWorld
         var sid = PickSid(f, rwy, out var sidLegs);
         if (sid is not null && sidLegs.Count > 0)
         {
-            var sp = Apt.LegsToPoints(sidLegs, rwy.FarEnd, rwy.ElevationFt + 400, out _);
+            var sp = Apt.LegsToPoints(sidLegs, rwy.FarEnd, rwy.ElevationFt + 400, out _, hybrid: true);
             // Ignore points behind the runway end (some SIDs begin with the runway fix).
             sp = sp.Where(p => rwy.Along(p.P) > rwy.LengthM + Geo2.MPerNm + 300 || (p.P - rwy.FarEnd).Length > 4000).ToList();
             if (sp.Count > 0) { pts.AddRange(sp); f.DepRoute = sid.Name; }
@@ -1424,6 +1450,68 @@ public sealed class TrafficWorld
             if (pts[i].SpeedKt >= 100 && pts[i].SpeedKt < 400) f.SpeedLimits.Add((f.Path.PointS[i], pts[i].SpeedKt));
             if (pts[i].AltMinFt > 0 || pts[i].AltMaxFt > 0) f.AltLimits.Add((f.Path.PointS[i], pts[i].AltMinFt, pts[i].AltMaxFt));
         }
+        SetChecks(f, pts.Take(f.Path.PointS.Length).Select((p, i) => (p, i)).Where(x => x.p.Fix.Length > 0).Select(x => (f.Path.PointS[x.i], x.p)));
+    }
+
+    /// <summary>The restricted fixes to check at crossing (altitude window and/or speed limit).</summary>
+    private static void SetChecks(Flight f, IEnumerable<(double S, AirPoint p)> fixes)
+    {
+        f.Checks.Clear(); f.ChecksMet = 0; f.ChecksMissed.Clear();
+        foreach (var (s, p) in fixes)
+        {
+            var kt = p.SpeedKt is >= 100 and < 400 ? p.SpeedKt : 0;
+            if (p.AltMinFt > 0 || p.AltMaxFt > 0 || kt > 0) f.Checks.Add((s, p.Fix, p.AltMinFt, p.AltMaxFt, kt));
+        }
+        f.Checks.Sort((a, b) => a.S.CompareTo(b.S));
+    }
+
+    /// <summary>After the route is rebuilt with extra distance before the rest (a hold or 360 inserted at S), the
+    /// restrictions still ahead move with it: they now lie at newStart + (old S - S).</summary>
+    private static void ShiftRestrictions(Flight f, double oldS, double newStart)
+    {
+        f.AltLimits = f.AltLimits.Where(c => c.S > oldS).Select(c => (newStart + c.S - oldS, c.Min, c.Max)).ToList();
+        f.Checks = f.Checks.Where(c => c.S > oldS).Select(c => (newStart + c.S - oldS, c.Fix, c.Min, c.Max, c.Kt)).ToList();
+    }
+
+    /// <summary>Fixes just crossed: the published altitude (±300 ft) and speed (+10 kt) met or not.</summary>
+    private void CheckRestrictions(Flight f)
+    {
+        while (f.Checks.Count > 0 && f.S >= f.Checks[0].S)
+        {
+            var c = f.Checks[0]; f.Checks.RemoveAt(0);
+            bool altOk = (c.Min <= 0 || f.AltFt >= c.Min - 300) && (c.Max <= 0 || f.AltFt <= c.Max + 300);
+            bool spdOk = c.Kt <= 0 || f.Ias <= c.Kt + 10;
+            _checksTotal++;
+            if (altOk && spdOk) { f.ChecksMet++; _checksMet++; continue; }
+            string Want()
+            {
+                var w = new List<string>();
+                if (c.Min > 0 && c.Max > 0) w.Add(c.Min == c.Max ? $"at {c.Min:N0}" : $"between {c.Min:N0} and {c.Max:N0}");
+                else if (c.Min > 0) w.Add($"at or above {c.Min:N0}");
+                else if (c.Max > 0) w.Add($"at or below {c.Max:N0}");
+                if (c.Kt > 0) w.Add($"max {c.Kt:0} kt");
+                return string.Join(", ", w);
+            }
+            var miss = $"{c.Fix} at {f.AltFt:N0} ft {f.Ias:0} kt (published {Want()})";
+            f.ChecksMissed.Add(miss);
+            _recentMisses.Add($"{f.Callsign} {miss}");
+            if (_recentMisses.Count > 5) _recentMisses.RemoveAt(0);
+        }
+    }
+
+    private int _checksTotal, _checksMet;
+    private readonly List<string> _recentMisses = new();
+
+    /// <summary>For the control page: how many published restrictions were met at their fixes, and the latest misses.</summary>
+    public string? RestrictionSummary => _checksTotal == 0 ? null :
+        $"{_checksMet} of {_checksTotal} met ({100.0 * _checksMet / _checksTotal:0}%)" + (_recentMisses.Count > 0 ? "; latest misses: " + string.Join("; ", _recentMisses) : "");
+
+    /// <summary>For the log: the flight's own result ("restrictions 6 of 6 met" or the misses).</summary>
+    private static string ChecksReport(Flight f)
+    {
+        var n = f.ChecksMet + f.ChecksMissed.Count;
+        if (n == 0) return "";
+        return f.ChecksMissed.Count == 0 ? $"; restrictions {n} of {n} met" : $"; restrictions {f.ChecksMet} of {n} met, missed {string.Join("; ", f.ChecksMissed)}";
     }
 
     /// <summary>
@@ -1856,7 +1944,7 @@ public sealed class TrafficWorld
             if (near >= 0) starPts.RemoveRange(near, starPts.Count - near);
             if (star is not null && starPts.Count > 0) names.Add(star.Name);
             // The STAR's restrictions, kept before the approach join trims the STAR (the joining fix keeps its restriction).
-            altFixes.AddRange(starPts.Where(p => p.AltMinFt > 0 || p.AltMaxFt > 0));
+            altFixes.AddRange(starPts.Where(p => p.AltMinFt > 0 || p.AltMaxFt > 0 || p.SpeedKt is >= 100 and < 400));
             var (appName, appPts) = ApproachPoints(rwy, starPts);
             if (appName.Length > 0) names.Add(appName);
             if (entry is { } en1)
@@ -1875,7 +1963,7 @@ public sealed class TrafficWorld
                 var s0 = V2.FromBearing(bearing, 45 * Geo2.MPerNm);
                 starPts.Add(new AirPoint(s0, ""));
             }
-            altFixes.AddRange(appPts.Where(p => p.AltMinFt > 0 || p.AltMaxFt > 0));
+            altFixes.AddRange(appPts.Where(p => p.AltMinFt > 0 || p.AltMaxFt > 0 || p.SpeedKt is >= 100 and < 400));
             route.AddRange(starPts.Select(p => p.P));
             speeds.AddRange(starPts.Select(p => p.SpeedKt));
             if (appPts.Count > 0) { route.AddRange(appPts.Select(p => p.P)); speeds.AddRange(appPts.Select(p => p.SpeedKt)); }
@@ -1905,11 +1993,15 @@ public sealed class TrafficWorld
             if (speeds[i] >= 100 && speeds[i] < 400) f.SpeedLimits.Add((f.Path.PointS[i], speeds[i]));
         // The STAR's and approach's altitude restrictions, at the fixes still on the route (vectors may have cut some).
         f.AltLimits.Clear();
+        var onRoute = new List<(double, AirPoint)>();
         foreach (var c in altFixes)
         {
             var i = route.FindIndex(q => (q - c.P).Length < 1);
-            if (i >= 0 && i < thrIndex) f.AltLimits.Add((f.Path.PointS[i], c.AltMinFt, c.AltMaxFt));
+            if (i < 0 || i >= thrIndex) continue;
+            if (c.AltMinFt > 0 || c.AltMaxFt > 0) f.AltLimits.Add((f.Path.PointS[i], c.AltMinFt, c.AltMaxFt));
+            if (c.Fix.Length > 0 && !onRoute.Any(x => x.Item2.Fix == c.Fix)) onRoute.Add((f.Path.PointS[i], c));
         }
+        SetChecks(f, onRoute);
     }
 
     /// <summary>
@@ -2297,6 +2389,7 @@ public sealed class TrafficWorld
         f.ThrS = f.Path.PointS[thrIndex];
         f.S = 0;
         f.SpeedLimits.Clear();
+        f.AltLimits.Clear(); f.Checks.Clear();   // vectored: ATC's altitudes now
         f.LandingChecked = false;
         f.StableChecked = false;
         if (f.Phase == "final") f.SetPhase("approach", Time);
@@ -2321,6 +2414,9 @@ public sealed class TrafficWorld
         f.LandingChecked = false;
         f.StableChecked = false;
         f.SpeedLimits.Clear(); // radar vectors back around: no procedure limits
+        var pre = f.Path.PointS.Length > 1 ? f.Path.PointS[1] : 0;
+        f.AltLimits = f.AltLimits.Select(c => (c.S + pre, c.Min, c.Max)).ToList();
+        f.Checks.Clear();
     }
 
     /// <summary>A full circle from the current position, then the rest of the route.</summary>
@@ -2351,6 +2447,7 @@ public sealed class TrafficWorld
         f.ThrS = f.Path.PointS[thrIndex];
         var added = f.Path.PointS[Math.Min(8, f.Path.PointS.Length - 1)];
         f.SpeedLimits = oldLimits.Select(l => (added + l.off, l.Kt)).ToList();
+        ShiftRestrictions(f, f.S, added);
         f.S = 0;
     }
 
@@ -2398,6 +2495,7 @@ public sealed class TrafficWorld
         var added = f.Path.PointS[holdCount - 1];
         f.SpeedLimits = oldLimits.Select(l => (added + l.off, l.Kt)).ToList();
         f.SpeedLimits.Add((f.Path.PointS[1], holdKt));
+        ShiftRestrictions(f, f.S, added);
         f.S = 0;
     }
 
@@ -2812,7 +2910,11 @@ public sealed class TrafficWorld
         var fpa = Math.Atan2(f.Vs, Math.Max(60, f.Gs) * 101.27) * 180 / Math.PI;
         var alpha = Math.Clamp(2.5 + (250 - f.Ias) / 30, 2.5, 6.5);
         f.Pitch += Math.Clamp(fpa + alpha - f.Pitch, -2 * dt, 2 * dt);
-        if (f.Pos.Length > 28 * Geo2.MPerNm || f.AltFt > 14000) f.Done = true;
+        if (f.Pos.Length > 28 * Geo2.MPerNm || f.AltFt > 14000)
+        {
+            f.Done = true;
+            if (f.ChecksMissed.Count > 0) Log($"{f.Callsign}: climbed out on {f.Route}{ChecksReport(f)}");
+        }
     }
 
     private void Arrive(Flight f, double dt)
@@ -2960,7 +3062,7 @@ public sealed class TrafficWorld
                 f.MaxKt = 30;
                 MoveAir(f, dt);
                 StartRollout(f);
-                Log($"{f.Callsign}: landed runway {rwy.Ident}{(f.Spot is not null ? ", taxiing to " + f.Spot.Label : "")}{PredictionReport(f)}");
+                Log($"{f.Callsign}: landed runway {rwy.Ident}{(f.Spot is not null ? ", taxiing to " + f.Spot.Label : "")}{PredictionReport(f)}{ChecksReport(f)}");
                 return;
             }
         }
