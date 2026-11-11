@@ -725,6 +725,9 @@ public sealed class TrafficWorld
                 if (np is null) continue;                                   // not airborne yet, or can't be placed: later
                 var dist = Geo2.DistanceNm(Apt.Data.Lat, Apt.Data.Lon, np.Lat, np.Lon);
                 if (dist > HandoverNm) continue;                             // still in the whole sky
+                // A short flight from a field inside the hand-over ring is still climbing out there: wait until it
+                // has reached 10,000 ft (or its cruise level, if lower) — ATC here doesn't own its take-off.
+                if (dist > 25 && np.Phase == "climbing" && np.AltFt < Math.Min(10000, np.CruiseFt) - 200) continue;
                 if (dist > 25)
                 {
                     _done.Add(Key(l, 'A'));

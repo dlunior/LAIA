@@ -715,6 +715,33 @@ Console.WriteLine("== Hand-over: a scheduled arrival taken over from the whole s
         "the landing time is predicted within 45 s from 10 minutes out and 30 s from 5 minutes out (no other traffic)");
 }
 
+Console.WriteLine("== Hand-over of a short flight: one departing a field inside the 200 nm ring is taken over once climbed, not at take-off");
+{
+    var nm = Geo2.MPerNm;
+    var data = TestAirport.Build(false);
+    var map = new LocalMap(data.Lat, data.Lon);
+    var near = map.ToLatLon(new V2(160 * nm, 40 * nm));   // ~165 nm away
+    var sched = new Laia.Common.Airports.ScheduleData { Airport = "TEST", Source = "AIG" };
+    sched.Legs.Add(new() { Airline = "AAL", Operator = "AAL", Type = "A321", Reg = "N2072A", Flight = "2072", Dep = "KNEA", Arr = "TEST", DepMin = 2001, ArrMin = 2041 });
+    var clock = 2000.0;
+    var w = new TrafficWorld(new AirportModel(data), new TestSource(), seed: 4)
+    {
+        Level = TrafficLevel.Busy, Wind = new Wind(270, 10), WeekMinute = 2000, ClockFrom = () => clock,
+        Locate = c => c == "KNEA" ? near : null, Schedule = sched,
+    };
+    w.SelectRunways(true);
+    Laia.Server.TrafficCore.Flight? f = null; double firstAlt = 0;
+    for (var t = 0.0; t < 1800 && f is null; t += 0.5)
+    {
+        clock = 2000 + t / 60; w.WeekMinute = clock;
+        w.Step(0.5);
+        f = w.Flights.FirstOrDefault(x => x.Callsign == "AAL2072");
+        if (f is not null) firstAlt = f.AltFt;
+    }
+    Console.WriteLine($"  taken over at {firstAlt:0} ft");
+    Check(f is not null && firstAlt >= 9000, "taken over at 10,000 ft or more, not on the other field's runway");
+}
+
 Console.WriteLine("== Neighbouring fields: runway traffic only, on the main airport's clock; satellite STARs are a last resort");
 {
     var nm = Geo2.MPerNm;
