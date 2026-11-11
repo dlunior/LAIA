@@ -922,7 +922,7 @@ Console.WriteLine("== The whole sky flies the filed route string (airways), then
         "FAR,FAR WAYPA J7 FARRR ARRVL1 TEST,TEST,,,,H,,,,,1,ZXX,ZYY" });
     var world = new TrafficWorld(new AirportModel(data), new TestSource(), seed: 6)
     {
-        Automatic = false, Wind = new Wind(270, 10), WeekMinute = 2000, Locate = c => c is "KFAR" or "FAR" ? origin : null, Routes = routes, Nav = nav,
+        Automatic = false, Wind = new Wind(270, 10), WeekMinute = 2000, Locate = c => c is "KFAR" or "FAR" ? origin : null, Routes = routes, NavData = nav,
     };
     world.SelectRunways(true);
     Laia.Common.Airports.ScheduleLeg Leg(int dep) => new() { Airline = "DAL", Operator = "DAL", Type = "B738", Reg = "N66", Flight = "66", Dep = "KFAR", Arr = "TEST", DepMin = dep, ArrMin = dep + 60 };

@@ -158,7 +158,7 @@ public sealed class TrafficWorld
     /// <summary>The FAA preferred routes (which STAR and SID a flight files, by airport pair and flow), when loaded.</summary>
     public PreferredRoutes? Routes { get; set; }
     /// <summary>US fixes, navaids and airways (FAA NASR), to fly whole filed routes in the whole sky.</summary>
-    public NavDb? Nav { get; set; }
+    public NavDb? NavData { get; set; }
     /// <summary>How many SIDs/STARs came from the preferred routes (vs. picked by direction).</summary>
     public int RoutesUsed { get; private set; }
     /// <summary>The airport's own published runway rules (read from its FAA AAUPs), when it has any.</summary>
@@ -607,7 +607,7 @@ public sealed class TrafficWorld
     private List<(double lat, double lon)> EnrouteFor(NetLeg l, bool arr, string type, (Procedure p, Transition? t)? star, List<V2> proc)
     {
         var none = new List<(double lat, double lon)>();
-        if (Nav is null || Routes is null) return none;
+        if (NavData is null || Routes is null) return none;
         var jet = Perf.For(type).Family != "turboprop";
         var hdg = ArrRwy?.Heading ?? 0;
         string[] toks;
@@ -631,7 +631,7 @@ public sealed class TrafficWorld
             toks = r.Value.row.Route[(k + 1)..];
         }
         var start = arr ? (l.DepLat, l.DepLon) : proc.Count > 0 ? Apt.Map.ToLatLon(proc[^1]) : (Apt.Data.Lat, Apt.Data.Lon);
-        var pts = Nav.Expand(toks, start.Item1, start.Item2).Select(x => (x.lat, x.lon)).ToList();
+        var pts = NavData.Expand(toks, start.Item1, start.Item2).Select(x => (x.lat, x.lon)).ToList();
         // Not the airports themselves, nothing already in the procedure part, and only points between the two ends.
         var procLl = proc.Select(q => Apt.Map.ToLatLon(q)).ToList();
         pts = pts.Where(p => Geo2.DistanceNm(p.lat, p.lon, Apt.Data.Lat, Apt.Data.Lon) > 15
