@@ -83,6 +83,8 @@ public sealed class Flight
     /// <summary>The named fixes still ahead on the arrival (distance along the path), their predicted crossing times
     /// (world time, updated every 5 s), and the time predicted for each about 10 minutes before it (to measure it).</summary>
     public List<(double S, string Fix)> Fixes = new();
+    /// <summary>The taxi nodes of the current ground route (to see which taxiway segments it will use, and which way).</summary>
+    public List<int>? TaxiRoute;
     public List<(string Fix, double At)> FixEtas = new();
     public Dictionary<string, double> FixPred10 = new();
     /// <summary>A departure's predicted take-off time (world time, NaN until predicted), and what was predicted 10 and 5 minutes before.</summary>
@@ -1189,6 +1191,26 @@ public sealed class TrafficWorld
         Log($"{f.Callsign}: pushing back from {s.Label} ({plan.Describe()})");
     }
 
+    /// <summary>
+    /// Ground control's one-way rule, as segment reservations: every taxiway segment another aircraft will still use
+    /// (taxiing out, taxiing in), with its direction. A route that would use one of them the other way costs a lot more,
+    /// so out- and inbound traffic take parallel taxiways instead of meeting head-on (the user's map: SWA438 out and
+    /// AAL1660 in on the same line at MCO). Used when planning every taxi route.
+    /// </summary>
+    private Func<int, int, double, double> OpposingTraffic(Flight self)
+    {
+        var used = new HashSet<(int, int)>();
+        foreach (var o in Flights)
+        {
+            if (o == self || o.Done || !o.OnGround || o.TaxiRoute is not { Count: > 1 } r || o.Phase is not ("taxi" or "taxi in" or "landing roll" or "engine start" or "pushback")) continue;
+            // From the node it's nearest now onwards (the part still to be used).
+            var k = 0; var best = double.MaxValue;
+            for (var i = 0; i < r.Count; i++) { var d = (Apt.Nodes[r[i]] - o.Pos).Length; if (d < best) { best = d; k = i; } }
+            for (var i = Math.Max(0, k - 1); i + 1 < r.Count; i++) used.Add((r[i], r[i + 1]));
+        }
+        return (u, v, len) => used.Contains((v, u)) ? 250 + len * 5 : 0;
+    }
+
     /// <summary>A new taxi route from where the aircraft is, avoiding the area around another aircraft.</summary>
     private bool Reroute(Flight f, Flight other) => Reroute(f, other.Pos, other.Callsign);
 
@@ -1201,15 +1223,30 @@ public sealed class TrafficWorld
         if (dest < 0) return false;
         var avoid = new HashSet<int>();
         for (var i = 0; i < Apt.TaxiPointCount; i++) if ((Apt.Nodes[i] - otherPos).Length < 70) avoid.Add(i);
+        // Leave by the taxiways: from the next junction ahead on its own route (not across the grass to the nearest
+        // point of another taxiway — the user's map: SWA1138 cutting off the pavement round SWA438).
         var from = -1; var best = double.MaxValue;
-        for (var i = 0; i < Apt.TaxiPointCount; i++)
+        if (f.TaxiRoute is { Count: > 0 } own)
         {
-            if (avoid.Contains(i) || Apt.Adj[i].Count == 0 || Apt.NodeRunway[i] >= 0) continue;
-            var d = (Apt.Nodes[i] - f.Pos).Length;
-            if (d < best) { best = d; from = i; }
+            var fwd0 = V2.FromBearing(f.Heading);
+            foreach (var n in own)
+            {
+                if (avoid.Contains(n) || Apt.NodeRunway[n] >= 0) continue;
+                var v = Apt.Nodes[n] - f.Pos;
+                if (V2.Dot(v, fwd0) < -5 && v.Length > 15) continue;               // behind it
+                if (v.Length < best && v.Length < 300) { best = v.Length; from = n; }
+            }
         }
-        if (from < 0 || best > 150) return false;
-        var route = Apt.Route(from, dest, ActiveRunways(), avoid);
+        var onOwn = from >= 0;
+        if (from < 0)
+            for (var i = 0; i < Apt.TaxiPointCount; i++)
+            {
+                if (avoid.Contains(i) || Apt.Adj[i].Count == 0 || Apt.NodeRunway[i] >= 0) continue;
+                var d = (Apt.Nodes[i] - f.Pos).Length;
+                if (d < best) { best = d; from = i; }
+            }
+        if (from < 0 || best > (onOwn ? 300 : 40)) return false;
+        var route = Apt.Route(from, dest, ActiveRunways(), avoid, OpposingTraffic(f));
         if (route is null) return false;
         var pts = new List<V2> { f.Pos };
         var fwd = V2.FromBearing(f.Heading);
@@ -1348,7 +1385,8 @@ public sealed class TrafficWorld
         // …and from the first taxi point, don't double straight back along the line the aircraft is on.
         foreach (var e in Apt.Adj[from])
             if (e.B != f.HoldNode && V2.Dot((Apt.Nodes[e.B] - Apt.Nodes[from]).Unit, nose) < -0.5) behind.Add(e.B);
-        var route = Apt.Route(from, f.HoldNode, ActiveRunways(), behind) ?? Apt.Route(from, f.HoldNode, ActiveRunways());
+        var opp = OpposingTraffic(f);
+        var route = Apt.Route(from, f.HoldNode, ActiveRunways(), behind, opp) ?? Apt.Route(from, f.HoldNode, ActiveRunways(), null, opp);
         if (route is null) { Log($"{f.Callsign}: no taxi route to runway {f.Rwy!.Ident}"); return false; }
         // Stop at the painted hold-short line, not at the edge of the runway.
         var holdIndex = HoldShortIndex(route, route.Count - 1, f.Rwy!);
@@ -1409,6 +1447,7 @@ public sealed class TrafficWorld
         f.Path = new PathGeom(pts, _ => turnR, 1.0, ease: true);
         f.S = 0;
         f.Stops.Clear();
+        f.TaxiRoute = route is null ? null : new List<int>(route);
         if (route is null) return;
         for (var i = 0; i + 1 < route.Count; i++)
         {
@@ -2896,7 +2935,7 @@ public sealed class TrafficWorld
             {
                 exit ??= c;
                 if (gate is null) break;
-                taxi = Apt.Route(c.off, gate.Access, ActiveRunways());
+                taxi = Apt.Route(c.off, gate.Access, ActiveRunways(), null, OpposingTraffic(f));
                 if (taxi is not null) { exit = c; break; }
             }
             if (taxi is null) gate = null;
