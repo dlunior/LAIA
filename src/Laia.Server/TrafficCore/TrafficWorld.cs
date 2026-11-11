@@ -1215,7 +1215,7 @@ public sealed class TrafficWorld
         var fwd = V2.FromBearing(f.Heading);
         var toFirst = Apt.Nodes[route[0]] - f.Pos;
         if (V2.Dot(toFirst, fwd) < 0)
-            pts.Add(f.Pos + fwd * 25 + fwd.Perp * 30); // turn around in a teardrop rather than on the spot
+        { pts.Add(f.Pos + fwd * 20); pts.Add(f.Pos + fwd * 50 + fwd.Perp * 40); }   // turn around in a wide teardrop, never on the spot
         else if (toFirst.Length > 1 && V2.Dot(toFirst.Unit, fwd) < 0.85)
             pts.Add(f.Pos + fwd * 20);                  // roll ahead a little and turn in an arc, not on the spot
         var offset = pts.Count;
@@ -3356,10 +3356,12 @@ public sealed class TrafficWorld
                 // always the 3° path: level where a restriction holds it ("at 7,000" at BANYA), 300 ft/nm towards an
                 // "at or below". Following the 3° slope while held at a level let it sink ~600 ft below "at" fixes.
                 {
-                    var plan2 = f.CruiseFt > 0 ? Math.Min(Profile(rwy, dth - 0.5), f.CruiseFt) : Profile(rwy, dth - 0.5);
-                    var want2 = Restricted(f, plan2, f.S + 0.5 * Geo2.MPerNm);
+                    // The slope over the last half mile (not the next): looking ahead made it start down before an
+                    // "at" fix and cross it low (offline FF27 "at 2,000" crossed at 1,780 ft).
+                    var plan2 = f.CruiseFt > 0 ? Math.Min(Profile(rwy, dth + 0.5), f.CruiseFt) : Profile(rwy, dth + 0.5);
+                    var want2 = Restricted(f, plan2, f.S - 0.5 * Geo2.MPerNm);
                     if (Math.Abs(want - plan) > 50 || Math.Abs(want2 - plan2) > 50)
-                        glideVs = Math.Min(0, (want2 - want) / 0.5 * Math.Max(60, f.Gs) / 60);
+                        glideVs = Math.Min(0, (want - want2) / 0.5 * Math.Max(60, f.Gs) / 60);
                 }
                 var err = f.AltFt - want;
                 // Below the descent path (after a go-around, or vectored in low): level off until the path comes down
