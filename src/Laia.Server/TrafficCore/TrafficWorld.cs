@@ -913,12 +913,13 @@ public sealed class TrafficWorld
     /// The planned altitude bent to the procedure's restrictions ahead: never above an "at or below" (or "at") one,
     /// starting down in time to meet it at about 300 ft per nm; never below an "at or above" (or "at") one until its fix.
     /// </summary>
-    private static double Restricted(Flight f, double plan)
+    private static double Restricted(Flight f, double plan, double atS = double.NaN)
     {
+        var s0 = double.IsNaN(atS) ? f.S : atS;
         double hi = double.MaxValue, lo = double.MinValue;
         foreach (var c in f.AltLimits)
         {
-            var ahead = (c.S - f.S) / Geo2.MPerNm;
+            var ahead = (c.S - s0) / Geo2.MPerNm;
             if (ahead < -0.3) continue;
             // With a speed limit at the same fix, get down a few miles early so there's level flight to slow in
             // (a jet can't slow and descend at once): about 1 nm per 10 kt below 250, plus a mile.
@@ -1495,13 +1496,13 @@ public sealed class TrafficWorld
         f.Checks = f.Checks.Where(c => c.S > oldS).Select(c => (newStart + c.S - oldS, c.Fix, c.Min, c.Max, c.Kt)).ToList();
     }
 
-    /// <summary>Fixes just crossed: the published altitude (±300 ft) and speed (+10 kt) met or not.</summary>
+    /// <summary>Fixes just crossed: the published altitude (±150 ft) and speed (+10 kt) met or not.</summary>
     private void CheckRestrictions(Flight f)
     {
         while (f.Checks.Count > 0 && f.S >= f.Checks[0].S)
         {
             var c = f.Checks[0]; f.Checks.RemoveAt(0);
-            bool altOk = (c.Min <= 0 || f.AltFt >= c.Min - 300) && (c.Max <= 0 || f.AltFt <= c.Max + 300);
+            bool altOk = (c.Min <= 0 || f.AltFt >= c.Min - 150) && (c.Max <= 0 || f.AltFt <= c.Max + 150);   // ±150 ft (pilots hold assigned levels well within this)
             bool spdOk = c.Kt <= 0 || f.Ias <= c.Kt + 10;
             _checksTotal++;
             if (altOk && spdOk) { f.ChecksMet++; _checksMet++; continue; }
@@ -3043,7 +3044,15 @@ public sealed class TrafficWorld
             {
                 var plan = f.CruiseFt > 0 ? Math.Min(Profile(rwy, dth), f.CruiseFt) : Profile(rwy, dth);
                 var want = Restricted(f, plan);
-                if (want > plan + 50) glideVs = 0;   // held up by an "at or above" restriction ahead: stay level
+                // Follow the slope of the wanted altitude itself (the descent path bent by the restrictions), not
+                // always the 3° path: level where a restriction holds it ("at 7,000" at BANYA), 300 ft/nm towards an
+                // "at or below". Following the 3° slope while held at a level let it sink ~600 ft below "at" fixes.
+                {
+                    var plan2 = f.CruiseFt > 0 ? Math.Min(Profile(rwy, dth - 0.5), f.CruiseFt) : Profile(rwy, dth - 0.5);
+                    var want2 = Restricted(f, plan2, f.S + 0.5 * Geo2.MPerNm);
+                    if (Math.Abs(want - plan) > 50 || Math.Abs(want2 - plan2) > 50)
+                        glideVs = Math.Min(0, (want2 - want) / 0.5 * Math.Max(60, f.Gs) / 60);
+                }
                 var err = f.AltFt - want;
                 // Below the descent path (after a go-around, or vectored in low): level off until the path comes down
                 // to meet the aircraft, as pilots do, rather than carry on descending.

@@ -931,7 +931,7 @@ Console.WriteLine("== Arrival manager: two arrivals bunched far out are spaced w
 Console.WriteLine("== Published altitude restrictions on the STAR are met at their fixes");
 {
     var nm = Geo2.MPerNm;
-    foreach (var (desc, alt, label) in new[] { (2, 6000.0, "at or above 6,000"), (3, 4000.0, "at or below 4,000") })
+    foreach (var (desc, alt, label) in new[] { (2, 6000.0, "at or above 6,000"), (3, 4000.0, "at or below 4,000"), (1, 6000.0, "at 6,000") })
     {
         var data = TestAirport.Build(false);
         var star = data.Arrivals.First(a => a.Name == "ARRVL1");
@@ -949,7 +949,7 @@ Console.WriteLine("== Published altitude restrictions on the STAR are met at the
         }
         world.Step(0.5);
         Console.WriteLine($"  {label}, max 230 kt at MIDDL: crossed at {crossed:0} ft, {crossedKt:0} kt ({f.Route}); checked: {world.RestrictionSummary}");
-        Check(fix.S > 0 && (desc == 2 ? crossed >= alt - 100 : crossed <= alt + 100), $"the arrival crosses MIDDL {label}");
+        Check(fix.S > 0 && (desc == 2 ? crossed >= alt - 100 : desc == 3 ? crossed <= alt + 100 : Math.Abs(crossed - alt) <= 150), $"the arrival crosses MIDDL {label}");
         Check(crossedKt <= 240, "and at or below its 230 kt speed limit");
         Check(f.ChecksMet >= 1 && f.ChecksMissed.Count == 0, "the crossing is checked and counted as met");
     }
