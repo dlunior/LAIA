@@ -1596,9 +1596,9 @@ public sealed class TrafficWorld
                 var hold = f.HoldNode >= 0 ? Apt.Nodes[f.HoldNode] : f.Rwy!.Threshold;
                 double toGo = f.Phase switch
                 {
-                    "boarding" => Math.Max(0, f.Timer) + 75 + 35 + (f.Pos - hold).Length * 1.4 / taxiMs,
-                    "pushback" => 50 + 35 + (f.Pos - hold).Length * 1.4 / taxiMs,
-                    "engine start" => Math.Max(0, f.Timer) + (f.Pos - hold).Length * 1.4 / taxiMs,
+                    "boarding" => Math.Max(0, f.Timer) + 30 + 35 + (f.Pos - hold).Length * 1.25 / taxiMs,   // (offline: was ~100 s pessimistic)
+                    "pushback" => 25 + 35 + (f.Pos - hold).Length * 1.25 / taxiMs,
+                    "engine start" => Math.Max(0, f.Timer) + (f.Pos - hold).Length * 1.25 / taxiMs,
                     "taxi" => f.Path is null ? 0 : Math.Max(0, f.Path.Length - f.S) / taxiMs,
                     _ => 0,
                 };
