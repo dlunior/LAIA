@@ -3360,8 +3360,8 @@ public sealed class TrafficWorld
                     // "at" fix and cross it low (offline FF27 "at 2,000" crossed at 1,780 ft).
                     var plan2 = f.CruiseFt > 0 ? Math.Min(Profile(rwy, dth + 0.5), f.CruiseFt) : Profile(rwy, dth + 0.5);
                     var want2 = Restricted(f, plan2, f.S - 0.5 * Geo2.MPerNm);
-                    if (Math.Abs(want - plan) > 50 || Math.Abs(want2 - plan2) > 50)
-                        glideVs = Math.Min(0, (want - want2) / 0.5 * Math.Max(60, f.Gs) / 60);
+                    // Always: the plan's own level pieces (slowing 250→210, 210→180, 180→170) are level too.
+                    glideVs = Math.Min(0, (want - want2) / 0.5 * Math.Max(60, f.Gs) / 60);
                 }
                 var err = f.AltFt - want;
                 // Below the descent path (after a go-around, or vectored in low): level off until the path comes down
