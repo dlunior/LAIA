@@ -1852,6 +1852,8 @@ public sealed class TrafficWorld
             var near = starPts.FindIndex(p => p.P.Length < 8 * Geo2.MPerNm);
             if (near >= 0) starPts.RemoveRange(near, starPts.Count - near);
             if (star is not null && starPts.Count > 0) names.Add(star.Name);
+            // The STAR's restrictions, kept before the approach join trims the STAR (the joining fix keeps its restriction).
+            altFixes.AddRange(starPts.Where(p => p.AltMinFt > 0 || p.AltMaxFt > 0));
             var (appName, appPts) = ApproachPoints(rwy, starPts);
             if (appName.Length > 0) names.Add(appName);
             if (entry is { } en1)
@@ -1870,7 +1872,7 @@ public sealed class TrafficWorld
                 var s0 = V2.FromBearing(bearing, 45 * Geo2.MPerNm);
                 starPts.Add(new AirPoint(s0, ""));
             }
-            altFixes.AddRange(starPts.Concat(appPts).Where(p => p.AltMinFt > 0 || p.AltMaxFt > 0));
+            altFixes.AddRange(appPts.Where(p => p.AltMinFt > 0 || p.AltMaxFt > 0));
             route.AddRange(starPts.Select(p => p.P));
             speeds.AddRange(starPts.Select(p => p.SpeedKt));
             if (appPts.Count > 0) { route.AddRange(appPts.Select(p => p.P)); speeds.AddRange(appPts.Select(p => p.SpeedKt)); }
