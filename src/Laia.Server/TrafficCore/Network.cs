@@ -94,6 +94,10 @@ public static class NetworkModel
             gs = v * (1 - 0.6 * y / d); phase = "descending";
         }
         s = Math.Clamp(s, 0, l.DistNm);
+        // Coming down, never above an airliner's 3:1 path to the destination (about 300 ft per nm still to go, plus a
+        // little to slow down): the timed descent alone slows near the end and left arrivals thousands of feet high
+        // when the airport took them over (WJA1272 at 26,490 ft 52 nm out).
+        if (phase == "descending") alt = Math.Min(alt, l.ArrElev + (l.DistNm - s) * 300 + 1500);
         var (lat, lon) = Intermediate(l.DepLat, l.DepLon, l.ArrLat, l.ArrLon, s / l.DistNm);
         var hdg = l.DistNm - s < 0.5 ? Geo2.BearingDeg(l.DepLat, l.DepLon, l.ArrLat, l.ArrLon) : Geo2.BearingDeg(lat, lon, l.ArrLat, l.ArrLon);
         return new NetPos(l, lat, lon, Math.Round(alt / 10) * 10, gs * 60, hdg, phase, cruise, s, t - tau + taxiIn);

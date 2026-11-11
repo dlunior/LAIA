@@ -679,6 +679,24 @@ Console.WriteLine("== Airport rules read from the FAA's AAUP text (any airport, 
     }
 }
 
+Console.WriteLine("== Whole sky: descending flights are never above a 3:1 path to their destination");
+{
+    var leg = new NetLeg { Airline = "WJA", Operator = "WJA", Type = "B738", Reg = "C-WJA", Flight = "1272", Dep = "CYYZ", Arr = "KMCO",
+        DepMin = 1000, ArrMin = 1000 + 170, DepLat = 43.68, DepLon = -79.63, ArrLat = 28.43, ArrLon = -81.31, ArrElev = 96, Located = true };
+    leg.DistNm = Geo2.DistanceNm(leg.DepLat, leg.DepLon, leg.ArrLat, leg.ArrLon);
+    double worst = double.MinValue, at52 = double.NaN;
+    for (var m = 1000.0; m < 1170; m += 0.25)
+    {
+        var p = NetworkModel.At(leg, m);
+        if (p is null || p.Phase != "descending") continue;
+        var rem = leg.DistNm - p.FlownNm;
+        worst = Math.Max(worst, p.AltFt - (leg.ArrElev + rem * 300 + 1500));
+        if (double.IsNaN(at52) && rem < 52) at52 = p.AltFt;
+    }
+    Console.WriteLine($"  Toronto–Orlando: at 52 nm to go {at52:0} ft");
+    Check(worst <= 20 && at52 < 18000, "at or below about 300 ft per nm to go (no more 26,000 ft at 52 nm)");
+}
+
 Console.WriteLine("== Hand-over: a scheduled arrival taken over from the whole sky ~200 nm out, descending from cruise to land");
 {
     var nm = Geo2.MPerNm;

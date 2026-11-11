@@ -3051,7 +3051,7 @@ public sealed class TrafficWorld
                 // Told to slow (or still too fast) outside the final approach: shallow the descent so it can slow
                 // ("descend OR slow down"); it catches up with the path afterwards.
                 // Not when an "at or below" restriction ahead is what's bringing it down: that has to be met too.
-                if (f.Ias - target > 5 && dth > 6.5 && !f.Gear && want >= plan - 50) vsTarget = Math.Max(vsTarget, -400);
+                if (f.Ias - target > 5 && dth > 6.5 && !f.Gear && want >= plan - 50 && err < 2000) vsTarget = Math.Max(vsTarget, -400);   // well above the path: get down first
                 // Not below 10,000 ft until slowed to 250 kt (14 CFR 91.117(a)): level off at 10,000 if need be.
                 if (f.Ias > 252 && f.AltFt > 9900 && f.AltFt < 12000) vsTarget = Math.Max(vsTarget, Math.Clamp((10000 - f.AltFt) * 1.5, -1500, 0));
                 f.Vs += Math.Clamp(vsTarget - f.Vs, -500 * dt, 500 * dt);
