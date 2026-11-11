@@ -97,7 +97,10 @@ public static class NetworkModel
         // Coming down, never above an airliner's 3:1 path to the destination (about 300 ft per nm still to go, plus a
         // little to slow down): the timed descent alone slows near the end and left arrivals thousands of feet high
         // when the airport took them over (WJA1272 at 26,490 ft 52 nm out).
-        if (phase == "descending") alt = Math.Min(alt, l.ArrElev + (l.DistNm - s) * 300 + 1500);
+        // The cruise ends where that path meets the cruise level, so the top of descent is where an airliner's would be.
+        var cap = l.ArrElev + (l.DistNm - s) * 300 + 1500;
+        if (tau >= c) { alt = Math.Min(cruise, cap); phase = alt < cruise - 50 ? "descending" : "cruising"; }
+        else alt = Math.Min(alt, cap);
         var (lat, lon) = Intermediate(l.DepLat, l.DepLon, l.ArrLat, l.ArrLon, s / l.DistNm);
         var hdg = l.DistNm - s < 0.5 ? Geo2.BearingDeg(l.DepLat, l.DepLon, l.ArrLat, l.ArrLon) : Geo2.BearingDeg(lat, lon, l.ArrLat, l.ArrLon);
         return new NetPos(l, lat, lon, Math.Round(alt / 10) * 10, gs * 60, hdg, phase, cruise, s, t - tau + taxiIn);
