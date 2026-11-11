@@ -3181,11 +3181,46 @@ public sealed class TrafficWorld
     }
 
     /// <summary>Another aircraft (or the user) ahead and close: wait. Breaks head-on standoffs after a while.</summary>
+    /// <summary>The taxi edge the aircraft is on or about to enter (from node u to node v) and how far it is to u.</summary>
+    private (int u, int v, double toU)? NextEdge(Flight f)
+    {
+        if (f.TaxiRoute is not { Count: > 1 } r) return null;
+        var fwd = V2.FromBearing(f.Heading);
+        for (var i = 0; i + 1 < r.Count; i++)
+        {
+            var a = Apt.Nodes[r[i]]; var b = Apt.Nodes[r[i + 1]];
+            var ab = b - a; var len = ab.Length;
+            if (len < 1) continue;
+            var t = V2.Dot(f.Pos - a, ab) / (len * len);
+            var off = (f.Pos - (a + ab * Math.Clamp(t, 0, 1))).Length;
+            if (off < 30 && t is >= -0.2 and < 1) return t < 0 ? (r[i], r[i + 1], (a - f.Pos).Length) : (r[i], r[i + 1], 0);
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// A taxiway with no parallel: an aircraft about to enter a segment that another is already on, coming the other
+    /// way, waits at the junction until it's through, rather than meeting it nose to nose (user, MCO).
+    /// </summary>
+    private Flight? SingleLaneTraffic(Flight f)
+    {
+        if (f.Phase is not ("taxi" or "taxi in") || NextEdge(f) is not { } me || me.toU <= 0 || me.toU > 90) return null;
+        foreach (var o in Flights)
+        {
+            if (o == f || o.Done || !o.OnGround || o.Phase is not ("taxi" or "taxi in")) continue;
+            if (NextEdge(o) is not { } it) continue;
+            // It's on (or entering first) the same segment the other way round.
+            if (it.u == me.v && it.v == me.u && it.toU < me.toU) return o;
+        }
+        return null;
+    }
+
     private bool Blocked(Flight f, double v)
     {
         var mdir = V2.FromBearing(f.Reverse ? Geo2.Norm(f.Heading + 180) : f.Heading);
         Flight? by = null;
         var userBlock = false;
+        if (SingleLaneTraffic(f) is { } lane) { f.BlockedBy = lane; f.BlockedFor += 0.25; return true; }
         foreach (var o in Flights)
         {
             if (o == f || !o.OnGround || o.Done || o.Phase is "parked" or "boarding" or "takeoff roll") continue;

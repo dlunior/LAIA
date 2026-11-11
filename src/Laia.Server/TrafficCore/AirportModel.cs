@@ -249,6 +249,7 @@ public sealed class AirportModel
         if (from < 0 || to < 0 || from >= Nodes.Length || to >= Nodes.Length) return null;
         var dist = new Dictionary<int, double> { [from] = 0 };
         var prev = new Dictionary<int, int>();
+        var came = new Dictionary<int, string>();   // the taxiway each node was reached by
         var open = new PriorityQueue<int, double>();
         open.Enqueue(from, 0);
         var closed = new HashSet<int>();
@@ -265,12 +266,17 @@ public sealed class AirportModel
                 // Prefer named taxiways; apron alleys and lead-ins only to reach a gate.
                 // Named taxiways (A, B, AA, D5…) are preferred; numbered or unnamed lines are usually apron lanes.
                 cost *= e.Type switch { 2 => 8, 3 => 4, _ => IsTaxiway(e.Name) ? 1.0 : 2.5 };
+                // Fewest taxiways: each change of named taxiway costs as much as 200 m of taxiing, so a route stays on
+                // one parallel instead of hopping across to the other one and back (user, MCO) — the shortest route
+                // that a controller would give ("taxi via A, B"), not the geometric shortest.
+                if (came.TryGetValue(u, out var inName) && inName.Length > 0 && e.Name.Length > 0 && !e.Name.Equals(inName, StringComparison.OrdinalIgnoreCase)) cost += 200;
                 if (NodeRunway[v] >= 0 && avoidRunways is not null && avoidRunways.Contains(NodeRunway[v])) cost += 400; // crossing an active runway
                 if (extra is not null) cost += extra(u, v, e.Len);
                 var nd = dist[u] + cost;
                 if (dist.TryGetValue(v, out var old) && old <= nd) continue;
                 dist[v] = nd;
                 prev[v] = u;
+                came[v] = e.Name;
                 open.Enqueue(v, nd + (Nodes[v] - Nodes[to]).Length);
             }
         }
