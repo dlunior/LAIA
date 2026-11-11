@@ -157,6 +157,8 @@ public sealed class TrafficWorld
     public List<RunwayEnd> DepRwys { get; private set; } = new();
     /// <summary>The FAA preferred routes (which STAR and SID a flight files, by airport pair and flow), when loaded.</summary>
     public PreferredRoutes? Routes { get; set; }
+    /// <summary>US fixes, navaids and airways (FAA NASR), to fly whole filed routes in the whole sky.</summary>
+    public NavDb? Nav { get; set; }
     /// <summary>How many SIDs/STARs came from the preferred routes (vs. picked by direction).</summary>
     public int RoutesUsed { get; private set; }
     /// <summary>The airport's own published runway rules (read from its FAA AAUPs), when it has any.</summary>
@@ -569,10 +571,14 @@ public sealed class TrafficWorld
                 while (proc.Count >= 2 && (proc[^2] - otherXY).Length < (proc[^1] - otherXY).Length) proc.RemoveAt(proc.Count - 1);
             }
         }
+        // The rest of the filed route (FAA preferred route string, airways and fixes from the FAA's NASR data),
+        // between the other airport and the STAR (or after the SID); the great circle when there's none.
+        var enroute = EnrouteFor(l, arr, type, plan?.star, proc);
         var pts = new List<(double lat, double lon)>();
         if (arr)
         {
             pts.Add(other);
+            pts.AddRange(enroute);
             pts.AddRange(proc.Select(q => Apt.Map.ToLatLon(q)));
             pts.Add((Apt.Data.Lat, Apt.Data.Lon));
         }
@@ -580,6 +586,7 @@ public sealed class TrafficWorld
         {
             pts.Add((Apt.Data.Lat, Apt.Data.Lon));
             pts.AddRange(proc.Select(q => Apt.Map.ToLatLon(q)));
+            pts.AddRange(enroute);
             pts.Add(other);
         }
         var cum = new double[pts.Count];
@@ -587,6 +594,57 @@ public sealed class TrafficWorld
         var r = new NetRoute(pts, cum, cum[^1], plan, rw, Time);
         _netRoutes[key] = r;
         return r;
+    }
+
+    /// <summary>Routes flown on their filed route string (airways and fixes), for the control page.</summary>
+    public int FiledRoutesFlown { get; private set; }
+
+    /// <summary>
+    /// The en-route part of a whole-sky flight's filed route: the FAA preferred route between the two airports (the
+    /// row that names this STAR, or SID), its fixes and airways placed with the NASR data. Empty when there's no row
+    /// or it can't be placed sensibly (then the great circle is flown).
+    /// </summary>
+    private List<(double lat, double lon)> EnrouteFor(NetLeg l, bool arr, string type, (Procedure p, Transition? t)? star, List<V2> proc)
+    {
+        var none = new List<(double lat, double lon)>();
+        if (Nav is null || Routes is null) return none;
+        var jet = Perf.For(type).Family != "turboprop";
+        var hdg = ArrRwy?.Heading ?? 0;
+        string[] toks;
+        if (arr)
+        {
+            if (star is not { } st) return none;
+            var r = Routes.Arrival(l.Dep, Apt.Icao, hdg, jet, tok => AirportRules.Base(tok) == AirportRules.Base(st.p.Name));
+            if (r is null) return none;
+            var k = Array.FindIndex(r.Value.row.Route, t => AirportRules.Base(t) == AirportRules.Base(st.p.Name));
+            if (k < 0) return none;
+            toks = r.Value.row.Route[..k];
+        }
+        else
+        {
+            var deps = DepRwys.Count > 0 ? DepRwys : DepRwy is null ? new() : new List<RunwayEnd> { DepRwy };
+            var sid = deps.Count == 0 ? null : ChooseSid(deps, l.Arr);
+            var r = Routes.Departure(Apt.Icao, l.Arr, hdg, jet, tok => sid is { } sd ? AirportRules.Base(tok) == AirportRules.Base(sd.p.Name) : false);
+            if (r is null) return none;
+            var k = Array.FindIndex(r.Value.row.Route, t => sid is { } sd && AirportRules.Base(t) == AirportRules.Base(sd.p.Name));
+            if (k < 0) return none;
+            toks = r.Value.row.Route[(k + 1)..];
+        }
+        var start = arr ? (l.DepLat, l.DepLon) : proc.Count > 0 ? Apt.Map.ToLatLon(proc[^1]) : (Apt.Data.Lat, Apt.Data.Lon);
+        var pts = Nav.Expand(toks, start.Item1, start.Item2).Select(x => (x.lat, x.lon)).ToList();
+        // Not the airports themselves, nothing already in the procedure part, and only points between the two ends.
+        var procLl = proc.Select(q => Apt.Map.ToLatLon(q)).ToList();
+        pts = pts.Where(p => Geo2.DistanceNm(p.lat, p.lon, Apt.Data.Lat, Apt.Data.Lon) > 15
+                          && Geo2.DistanceNm(p.lat, p.lon, arr ? l.DepLat : l.ArrLat, arr ? l.DepLon : l.ArrLon) > 15
+                          && !procLl.Any(q => Geo2.DistanceNm(p.lat, p.lon, q.lat, q.lon) < 1)).ToList();
+        if (pts.Count == 0) return none;
+        // Sanity: a route more than half as long again as the great circle is a mismatch (a name placed in the wrong
+        // part of the country): fly the great circle instead.
+        double len = 0; var prev = arr ? (l.DepLat, l.DepLon) : start;
+        foreach (var p in pts) { len += Geo2.DistanceNm(prev.Item1, prev.Item2, p.lat, p.lon); prev = p; }
+        if (len > 1.5 * l.DistNm + 50) return none;
+        FiledRoutesFlown++;
+        return pts;
     }
 
     /// <summary>The arrival plan (runway, STAR) a whole-sky flight's route was made with, so the hand-over keeps it.</summary>

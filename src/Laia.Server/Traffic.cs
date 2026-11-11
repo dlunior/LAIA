@@ -9,7 +9,7 @@ namespace Laia.Server;
 /// Without a layout (or for the test buttons at an airport not read yet) a simple runway-only world is used.
 /// </summary>
 public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportStore airports, FlightSource source, SettingsStore settings,
-    SimBriefService simbrief, ServerState state, ScheduleStore schedules, NetworkStore network, WorldAirports worldAirports, RoutesDb routesDb, ILogger<TrafficEngine> log) : BackgroundService
+    SimBriefService simbrief, ServerState state, ScheduleStore schedules, NetworkStore network, WorldAirports worldAirports, RoutesDb routesDb, NasrDb nasrDb, ILogger<TrafficEngine> log) : BackgroundService
 {
     private readonly object _gate = new();
     private readonly List<TrafficWorld> _neighbours = new();
@@ -283,7 +283,8 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 approach = w?.ApproachInUse,
                 prediction = w?.PredictionSummary,
                 restrictions = w?.RestrictionSummary,
-                routes = $"{routesDb.Status}{(w is null ? "" : $"; {w.RoutesUsed} SIDs/STARs from them so far")}",
+                navdata = nasrDb.Status,
+                routes = $"{routesDb.Status}{(w is null ? "" : $"; {w.RoutesUsed} SIDs/STARs from them so far; {w.FiledRoutesFlown} whole-sky flights on their filed airways")}",
                 rules = w?.Rules is { Charts.Length: > 0 } ru ? ru.Describe() : null,
                 atis = w?.Atis.CodeArr is { } code ? $"real ATIS info {code}" : w is null ? null : "no ATIS: runways from the wind",
                 departing = w is null ? null : string.Join(", ", w.DepRwys.Select(e => e.Ident).DefaultIfEmpty(w.DepRwy?.Ident ?? "")),
@@ -485,6 +486,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                                 if (aaup.charts.Length > 0) log.LogInformation("{icao}: {rules}", w.Apt.Icao, w.Rules.Describe());
                             }
                             w.Routes = routesDb.Routes;
+                            w.Nav = nasrDb.Nav;
                             w.Locate ??= code => worldAirports.Find(code) is { } p ? (p.lat, p.lon) : null;
                         }
                         w.WeekMinute = live && sim!.ZuluWeekMinute >= 0 ? sim.ZuluWeekMinute : WeekMinuteNow();

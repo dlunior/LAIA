@@ -33,6 +33,8 @@ builder.Services.AddSingleton<NetworkStore>();
 builder.Services.AddHostedService<NetworkUpdater>();
 builder.Services.AddSingleton<RoutesDb>();
 builder.Services.AddHostedService<RoutesUpdater>();
+builder.Services.AddSingleton<NasrDb>();
+builder.Services.AddHostedService<NasrUpdater>();
 builder.Services.AddSingleton<FlightSource>();
 builder.Services.AddSingleton<TrafficEngine>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<TrafficEngine>());

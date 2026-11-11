@@ -881,6 +881,67 @@ Console.WriteLine("== Filed routes in the whole sky: an arrival is already flyin
     Check(turn < 40, "the hand-over just carries on along the route (no turn to join)");
 }
 
+Console.WriteLine("== FAA NASR navigation data: fixes, navaids and airways, and route strings expanded point by point");
+{
+    var nav = new NavDb();
+    nav.AddPoints(new[] {
+        new[] { "EFF_DATE", "FIX_ID", "ICAO_REGION_CODE", "STATE_CODE", "LAT_DECIMAL", "LONG_DECIMAL" },
+        new[] { "2026/10/29", "AAAAA", "K7", "FL", "30.0", "-82.0" },
+        new[] { "2026/10/29", "BBBBB", "K7", "FL", "29.5", "-81.8" },
+        new[] { "2026/10/29", "CCCCC", "K7", "FL", "29.0", "-81.6" },
+        new[] { "2026/10/29", "DUPLI", "K7", "FL", "29.2", "-81.7" },
+        new[] { "2026/10/29", "DUPLI", "K2", "WA", "47.0", "-122.0" },
+    }, false, "FIX_BASE.csv");
+    nav.AddPoints(new[] { new[] { "NAV_ID", "NAV_TYPE", "LAT_DECIMAL", "LONG_DECIMAL" }, new[] { "ODF", "VORTAC", "34.69", "-83.29" } }, true, "NAV_BASE.csv");
+    nav.AddAirways(new[] { new[] { "EFF_DATE", "REGULATORY", "AWY_ID", "AWY_LOCATION", "AIRWAY_STRING" }, new[] { "2026/10/29", "Y", "J99", "C", "ODF AAAAA BBBBB CCCCC" } }, "AWY_BASE.csv");
+    var pts = nav.Expand(new[] { "ATL", "DIRTY3", "ODF", "J99", "CCCCC", "DUPLI", "SNFLD3", "MCO" }, 33.6, -84.4);
+    Console.WriteLine($"  {nav.Fixes} fixes, {nav.Navaids} navaids, {nav.Airways} airways; ODF J99 CCCCC DUPLI → {string.Join(" ", pts.Select(p => p.name))}; {string.Join(" | ", nav.Notes)}");
+    Check(string.Join(" ", pts.Select(p => p.name)) == "ODF AAAAA BBBBB CCCCC DUPLI" && Math.Abs(pts[^1].lat - 29.2) < 0.01,
+        "the airway is expanded between its fixes, a repeated name resolves to the nearest one, SID/STAR names are skipped");
+    var segs = new NavDb();
+    segs.AddAirways(new[] { new[] { "AWY_ID", "POINT_SEQ", "FROM_POINT" }, new[] { "Q1", "20", "BBBBB" }, new[] { "Q1", "10", "AAAAA" }, new[] { "Q1", "30", "CCCCC" } }, "AWY_SEG.csv");
+    Check(string.Join(" ", segs.AirwayBetween("Q1", "CCCCC", "AAAAA") ?? new()) == "CCCCC BBBBB AAAAA", "airways given point by point work too, flown either way");
+}
+
+Console.WriteLine("== The whole sky flies the filed route string (airways), then the STAR");
+{
+    var nm = Geo2.MPerNm;
+    var data = TestAirport.Build(false);
+    var map = new LocalMap(data.Lat, data.Lon);
+    var origin = map.ToLatLon(new V2(300 * nm, 0));
+    var w1 = map.ToLatLon(new V2(220 * nm, -90 * nm));        // well south of the great circle
+    var w2 = map.ToLatLon(new V2(120 * nm, -80 * nm));
+    var farrr = map.ToLatLon(new V2(30 * nm, -30 * nm));
+    var nav = new NavDb();
+    nav.AddPoints(new[] { new[] { "FIX_ID", "LAT_DECIMAL", "LONG_DECIMAL" },
+        new[] { "WAYPA", w1.lat.ToString(System.Globalization.CultureInfo.InvariantCulture), w1.lon.ToString(System.Globalization.CultureInfo.InvariantCulture) },
+        new[] { "WAYPB", w2.lat.ToString(System.Globalization.CultureInfo.InvariantCulture), w2.lon.ToString(System.Globalization.CultureInfo.InvariantCulture) },
+        new[] { "FARRR", farrr.lat.ToString(System.Globalization.CultureInfo.InvariantCulture), farrr.lon.ToString(System.Globalization.CultureInfo.InvariantCulture) } }, false, "FIX_BASE.csv");
+    nav.AddAirways(new[] { new[] { "AWY_ID", "AIRWAY_STRING" }, new[] { "J7", "WAYPA WAYPB FARRR" } }, "AWY_BASE.csv");
+    var routes = PreferredRoutes.Parse(new[] { "Orig,Route String,Dest,Hours1,Hours2,Hours3,Type,Area,Altitude,Aircraft,Direction,Seq,DCNTR,ACNTR",
+        "FAR,FAR WAYPA J7 FARRR ARRVL1 TEST,TEST,,,,H,,,,,1,ZXX,ZYY" });
+    var world = new TrafficWorld(new AirportModel(data), new TestSource(), seed: 6)
+    {
+        Automatic = false, Wind = new Wind(270, 10), WeekMinute = 2000, Locate = c => c is "KFAR" or "FAR" ? origin : null, Routes = routes, Nav = nav,
+    };
+    world.SelectRunways(true);
+    Laia.Common.Airports.ScheduleLeg Leg(int dep) => new() { Airline = "DAL", Operator = "DAL", Type = "B738", Reg = "N66", Flight = "66", Dep = "KFAR", Arr = "TEST", DepMin = dep, ArrMin = dep + 60 };
+    // Halfway: the great circle would be due east of the field; the filed route is far to the south, near WAYPB.
+    NetPos? np = null;
+    for (var dep = 2000 - 60; dep <= 2000; dep++)
+    {
+        var p = world.NetworkPosition(Leg(dep));
+        if (p is not null && p.FlownNm / p.Leg.DistNm is > 0.45 and < 0.6) { np = p; break; }
+    }
+    Check(np is not null, "the whole sky has the flight about halfway");
+    var pos = map.ToXY(np!.Lat, np.Lon);
+    double SegDist(V2 p, V2 a, V2 b) { var ab = b - a; var t = Math.Clamp(V2.Dot(p - a, ab) / Math.Max(1, ab.Length * ab.Length), 0, 1); return (p - (a + ab * t)).Length; }
+    var A = new V2(300 * nm, 0); var B = new V2(220 * nm, -90 * nm); var C = new V2(120 * nm, -80 * nm); var D = new V2(30 * nm, -30 * nm);
+    var off = new[] { SegDist(pos, A, B), SegDist(pos, B, C), SegDist(pos, C, D) }.Min() / nm;
+    Console.WriteLine($"  halfway at ({pos.X / nm:0}, {pos.Y / nm:0}) nm, {off:0.0} nm off the filed route; {world.FiledRoutesFlown} filed route(s)");
+    Check(off < 3 && pos.Y < -40 * nm, "it is on the airway route (well south of the great circle)");
+}
+
 Console.WriteLine("== Taken over beside its STAR's first fix: direct to the next fix ahead, no flying back and looping round");
 {
     var nm = Geo2.MPerNm;
