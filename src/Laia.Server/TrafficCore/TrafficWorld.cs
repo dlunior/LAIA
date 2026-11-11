@@ -902,7 +902,11 @@ public sealed class TrafficWorld
         {
             var ahead = (c.S - f.S) / Geo2.MPerNm;
             if (ahead < -0.3) continue;
-            if (c.Max > 0) hi = Math.Min(hi, c.Max + Math.Max(0, ahead) * 300);
+            // With a speed limit at the same fix, get down a few miles early so there's level flight to slow in
+            // (a jet can't slow and descend at once): about 1 nm per 10 kt below 250, plus a mile.
+            var kt = f.SpeedLimits.Where(sl => Math.Abs(sl.S - c.S) < 100).Select(sl => sl.Kt).DefaultIfEmpty(0).Min();
+            var slowNm = kt > 0 && kt < 250 ? (250 - kt) / 10 + 1 : 0;
+            if (c.Max > 0) hi = Math.Min(hi, c.Max + Math.Max(0, ahead - slowNm) * 300);
             if (c.Min > 0) lo = Math.Max(lo, c.Min);
         }
         var t = Math.Min(plan, hi);
