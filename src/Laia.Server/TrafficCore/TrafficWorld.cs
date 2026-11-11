@@ -1848,7 +1848,9 @@ public sealed class TrafficWorld
         f.Pos = p;
         f.Heading = dir;
         var dth = (f.ThrS - f.S) / Geo2.MPerNm;
-        f.AltFt = Math.Min(rwy.ElevationFt + 11000, Profile(rwy, dth));
+        f.AltFt = Restricted(f, Math.Min(rwy.ElevationFt + 11000, Profile(rwy, dth)));
+        // Restrictions already behind where it starts aren't its to meet.
+        f.Checks.RemoveAll(c => c.S <= f.S + 50);
         f.Ias = ArrivalSpeed(f, dth);
         f.Gs = f.Ias;
         f.Gear = dth < 6.5;
@@ -1988,6 +1990,12 @@ public sealed class TrafficWorld
         CheckLoops(f, "arrival route");
         f.LandingChecked = false;
         f.StableChecked = false;
+        // A STAR fix's speed limit stays when the approach joins there (the approach's own copy of the fix often has none).
+        foreach (var c in altFixes.Where(c => c.SpeedKt is >= 100 and < 400))
+        {
+            var i = route.FindIndex(q => (q - c.P).Length < 1);
+            if (i >= 0 && i < speeds.Count && speeds[i] < 100) speeds[i] = c.SpeedKt;
+        }
         f.SpeedLimits.Clear();
         for (var i = 0; i < speeds.Count && i < f.Path.PointS.Length; i++)
             if (speeds[i] >= 100 && speeds[i] < 400) f.SpeedLimits.Add((f.Path.PointS[i], speeds[i]));
