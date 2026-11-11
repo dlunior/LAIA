@@ -80,6 +80,14 @@ public sealed class Flight
     public List<(double S, string Fix, double Min, double Max, double Kt)> Checks = new();
     public int ChecksMet;
     public List<string> ChecksMissed = new();
+    /// <summary>The named fixes still ahead on the arrival (distance along the path), their predicted crossing times
+    /// (world time, updated every 5 s), and the time predicted for each about 10 minutes before it (to measure it).</summary>
+    public List<(double S, string Fix)> Fixes = new();
+    public List<(string Fix, double At)> FixEtas = new();
+    public Dictionary<string, double> FixPred10 = new();
+    /// <summary>A departure's predicted take-off time (world time, NaN until predicted), and what was predicted 10 and 5 minutes before.</summary>
+    public string DepReport = "";
+    public double TakeoffAt = double.NaN, TakeoffPred10 = double.NaN, TakeoffPred5 = double.NaN, ReadyAt = double.NaN;
     /// <summary>The planned departure route (planned when lining up, so the spacing can look at where it goes).</summary>
     public List<AirPoint>? DepPlan;
     public string DepRoute = "";
@@ -366,10 +374,11 @@ public sealed class TrafficWorld
         foreach (var f in Flights.ToList())
         {
             if (f.Done) continue;
-            try { Advance(f, dt); RecordTrail(f); if (!f.OnGround && f.Checks.Count > 0) CheckRestrictions(f); }
+            try { Advance(f, dt); RecordTrail(f); if (!f.OnGround && f.Checks.Count > 0) CheckRestrictions(f); if (!f.OnGround && f.Fixes.Count > 0) CheckFixes(f); }
             catch (Exception ex) { Log($"{f.Callsign}: {ex.Message}; removed"); f.Done = true; }
         }
         foreach (var f in Flights.Where(f => f.Done && f.Spot is not null)) f.Spot = null;
+        if (Time - _lastDepPredict >= 5) { _lastDepPredict = Time; try { PredictDepartures(); } catch { } }
         // Landing order on each runway, by predicted time, and the arrival manager: each arrival's slot is the later of
         // its own unhindered time and the slot ahead plus the gap needed; the difference is the delay it should lose
         // far out with speed (cruise and descent slower), so it reaches the approach already spaced instead of holding.
@@ -961,7 +970,13 @@ public sealed class TrafficWorld
         {
             string One(List<double> e, string label) => e.Count == 0 ? "" : $"{label} ±{e.Average(Math.Abs):0} s (n={e.Count})";
             var s = string.Join(", ", new[] { One(_err30, "30 min out"), One(_err10, "10 min out"), One(_err5, "5 min out") }.Where(x => x.Length > 0));
-            return s.Length == 0 ? null : s;
+            var fx = One(_errFix, "10 min out");
+            var dp = string.Join(", ", new[] { One(_errDep10, "10 min out"), One(_errDep5, "5 min out") }.Where(x => x.Length > 0));
+            var all = new List<string>();
+            if (s.Length > 0) all.Add("landings " + s);
+            if (fx.Length > 0) all.Add("times at the STAR/approach fixes " + fx);
+            if (dp.Length > 0) all.Add("take-offs " + dp);
+            return all.Count == 0 ? null : string.Join("; ", all);
         }
     }
 
@@ -1460,6 +1475,7 @@ public sealed class TrafficWorld
         f.Ias = 0;
         f.Gs = 0;
         f.SetPhase("takeoff roll", Time);
+        f.DepReport = TakeoffReport(f);
     }
 
     /// <summary>The published speed limits of the procedure points on the path (index i of pts is point i of the path).</summary>
@@ -1494,6 +1510,7 @@ public sealed class TrafficWorld
     {
         f.AltLimits = f.AltLimits.Where(c => c.S > oldS).Select(c => (newStart + c.S - oldS, c.Min, c.Max)).ToList();
         f.Checks = f.Checks.Where(c => c.S > oldS).Select(c => (newStart + c.S - oldS, c.Fix, c.Min, c.Max, c.Kt)).ToList();
+        f.Fixes = f.Fixes.Where(c => c.S > oldS).Select(c => (newStart + c.S - oldS, c.Fix)).ToList();
     }
 
     /// <summary>Fixes just crossed: the published altitude (±150 ft) and speed (+10 kt) met or not.</summary>
@@ -1528,6 +1545,93 @@ public sealed class TrafficWorld
     /// <summary>For the control page: how many published restrictions were met at their fixes, and the latest misses.</summary>
     public string? RestrictionSummary => _checksTotal == 0 ? null :
         $"{_checksMet} of {_checksTotal} met ({100.0 * _checksMet / _checksTotal:0}%)" + (_recentMisses.Count > 0 ? "; latest misses: " + string.Join("; ", _recentMisses) : "");
+
+    /// <summary>Predicted crossing times at the named fixes still ahead (one pass along the path), and the prediction
+    /// made about 10 minutes before each, kept to measure it.</summary>
+    private void PredictFixes(Flight f, double dth)
+    {
+        f.FixEtas.Clear();
+        if (f.Fixes.Count == 0 || f.WentAround) return;
+        var ahead = f.Fixes.Where(x => x.S > f.S).ToList();
+        if (ahead.Count == 0) return;
+        var marks = ahead.Select(x => (f.ThrS - x.S) / Geo2.MPerNm).ToArray();     // largest first (fixes are in path order)
+        var at = new double[marks.Length];
+        EtaToThreshold(f, dth, marks: marks, at: at);
+        for (var k = 0; k < ahead.Count; k++)
+        {
+            var when = Time + at[k];
+            f.FixEtas.Add((ahead[k].Fix, when));
+            if (at[k] is <= 600 and > 480 && !f.FixPred10.ContainsKey(ahead[k].Fix)) f.FixPred10[ahead[k].Fix] = when;
+        }
+    }
+
+    /// <summary>Fixes just crossed: how far off the time predicted 10 minutes before was.</summary>
+    private void CheckFixes(Flight f)
+    {
+        while (f.Fixes.Count > 0 && f.S >= f.Fixes[0].S)
+        {
+            var fx = f.Fixes[0].Fix; f.Fixes.RemoveAt(0);
+            if (f.FixPred10.TryGetValue(fx, out var pred))
+            {
+                _errFix.Add(Time - pred);
+                if (_errFix.Count > 200) _errFix.RemoveAt(0);
+            }
+        }
+    }
+
+    private readonly List<double> _errFix = new(), _errDep10 = new(), _errDep5 = new();
+
+    /// <summary>
+    /// Every departure's take-off time, predicted every 5 seconds per runway: when it will be ready at the runway
+    /// (boarding, pushback, engine start and taxi still to go), then in queue order, a gap behind the departure
+    /// ahead (more behind a heavy) and, on a runway also used for landing, not into the window of an arrival.
+    /// </summary>
+    private void PredictDepartures()
+    {
+        const double taxiMs = 7.5;   // about 15 kt average with the turns and stops
+        foreach (var g in Flights.Where(f => f.Kind == "departure" && !f.Done && f.Rwy is not null && f.OnGround && f.Phase != "takeoff roll").GroupBy(f => f.Rwy!.Runway))
+        {
+            foreach (var f in g)
+            {
+                var hold = f.HoldNode >= 0 ? Apt.Nodes[f.HoldNode] : f.Rwy!.Threshold;
+                double toGo = f.Phase switch
+                {
+                    "boarding" => Math.Max(0, f.Timer) + 75 + 35 + (f.Pos - hold).Length * 1.4 / taxiMs,
+                    "pushback" => 50 + 35 + (f.Pos - hold).Length * 1.4 / taxiMs,
+                    "engine start" => Math.Max(0, f.Timer) + (f.Pos - hold).Length * 1.4 / taxiMs,
+                    "taxi" => f.Path is null ? 0 : Math.Max(0, f.Path.Length - f.S) / taxiMs,
+                    _ => 0,
+                };
+                f.ReadyAt = Time + toGo;
+            }
+            var arrs = Flights.Where(a => a.Kind == "arrival" && !a.OnGround && !a.Done && a.Rwy?.Runway == g.Key && !double.IsNaN(a.EtaSec))
+                .Select(a => Time + a.EtaSec - (Time - a.EtaAt)).OrderBy(x => x).ToList();
+            var occ = _rotSeen.TryGetValue(g.First().Rwy!, out var seen) ? seen : 55;
+            double prev = double.NegativeInfinity; Flight? prevF = null;
+            foreach (var f in g.OrderBy(x => x.Phase is "lined up" or "lining up" ? 0 : x.Phase == "holding short" ? 1 : 2).ThenBy(x => x.ReadyAt))
+            {
+                var gap = prevF is null ? 0 : prevF.P.Heavy ? 120 : 75;
+                var t = Math.Max(f.ReadyAt + (f.Phase is "lined up" ? 5 : 35), prev + gap);   // lining up and rolling: ~35 s
+                // Not into an arrival's window: it must be rolling ~45 s before the arrival and can't go while it's on the runway.
+                foreach (var a in arrs) if (t > a - 45 && t < a + occ) t = a + occ;
+                f.TakeoffAt = t;
+                if (double.IsNaN(f.TakeoffPred10) && t - Time is <= 600 and > 480) f.TakeoffPred10 = t;
+                if (double.IsNaN(f.TakeoffPred5) && t - Time is <= 300 and > 240) f.TakeoffPred5 = t;
+                prev = t; prevF = f;
+            }
+        }
+    }
+
+    /// <summary>For the log at take-off: how far off the predicted take-off time was.</summary>
+    private string TakeoffReport(Flight f)
+    {
+        var parts = new List<string>();
+        if (!double.IsNaN(f.TakeoffPred10)) { var e = Time - f.TakeoffPred10; _errDep10.Add(e); if (_errDep10.Count > 100) _errDep10.RemoveAt(0); parts.Add($"10 min out {e:+0;-0} s"); }
+        if (!double.IsNaN(f.TakeoffPred5)) { var e = Time - f.TakeoffPred5; _errDep5.Add(e); if (_errDep5.Count > 100) _errDep5.RemoveAt(0); parts.Add($"5 min out {e:+0;-0} s"); }
+        return parts.Count == 0 ? "" : $" (take-off time as predicted {string.Join(", ", parts)})";
+    }
+
+    private double _lastDepPredict = -999;
 
     /// <summary>For the log: the flight's own result ("restrictions 6 of 6 met" or the misses).</summary>
     private static string ChecksReport(Flight f)
@@ -1947,6 +2051,7 @@ public sealed class TrafficWorld
     private void BuildArrivalPath(Flight f, V2? from, V2? entry = null)
     {
         var altFixes = new List<AirPoint>();
+        var named = new List<AirPoint>();
         var rwy = f.Rwy!;
         var route = new List<V2>();
         var speeds = new List<double>();
@@ -1976,6 +2081,7 @@ public sealed class TrafficWorld
             if (star is not null && starPts.Count > 0) names.Add(star.Name);
             // The STAR's restrictions, kept before the approach join trims the STAR (the joining fix keeps its restriction).
             altFixes.AddRange(starPts.Where(p => p.AltMinFt > 0 || p.AltMaxFt > 0 || p.SpeedKt is >= 100 and < 400));
+            named.AddRange(starPts.Where(p => p.Fix.Length > 0));
             var (appName, appPts) = ApproachPoints(rwy, starPts);
             if (appName.Length > 0) names.Add(appName);
             if (entry is { } en1)
@@ -1995,6 +2101,7 @@ public sealed class TrafficWorld
                 starPts.Add(new AirPoint(s0, ""));
             }
             altFixes.AddRange(appPts.Where(p => p.AltMinFt > 0 || p.AltMaxFt > 0 || p.SpeedKt is >= 100 and < 400));
+            named.AddRange(appPts.Where(p => p.Fix.Length > 0));
             route.AddRange(starPts.Select(p => p.P));
             speeds.AddRange(starPts.Select(p => p.SpeedKt));
             if (appPts.Count > 0) { route.AddRange(appPts.Select(p => p.P)); speeds.AddRange(appPts.Select(p => p.SpeedKt)); }
@@ -2039,6 +2146,14 @@ public sealed class TrafficWorld
             if (c.Fix.Length > 0 && !onRoute.Any(x => x.Item2.Fix == c.Fix)) onRoute.Add((f.Path.PointS[i], c));
         }
         SetChecks(f, onRoute);
+        // Every named fix still on the route (for the predicted times at the fixes).
+        f.Fixes.Clear(); f.FixEtas.Clear(); f.FixPred10.Clear();
+        foreach (var c in named)
+        {
+            var i = route.FindIndex(q => (q - c.P).Length < 1);
+            if (i >= 0 && i < thrIndex && !f.Fixes.Any(x => x.Fix == c.Fix)) f.Fixes.Add((f.Path.PointS[i], c.Fix));
+        }
+        f.Fixes.Sort((a, b) => a.S.CompareTo(b.S));
     }
 
     /// <summary>
@@ -2365,14 +2480,17 @@ public sealed class TrafficWorld
     }
 
     /// <summary>Predicted seconds until this arrival crosses the threshold, flying its planned speeds (and the wind on final).</summary>
-    private double EtaToThreshold(Flight f, double dth, bool nominal = false)
+    private double EtaToThreshold(Flight f, double dth, bool nominal = false, double[]? marks = null, double[]? at = null)
     {
         if (dth <= 0) return 0;
         var hw = f.Rwy is null ? 0 : Wind.Headwind(f.Rwy.Heading);
         double t = 0;
         const double step = 0.25;
+        var mk = 0;
         for (var d = dth; d > 0; d -= step)
         {
+            // Times at points on the way (marks: distances to the threshold, largest first).
+            while (marks is not null && mk < marks.Length && marks[mk] >= d - 1e-9) { at![mk] = t; mk++; }
             var v = PlannedSpeed(f, d, nominal);
             if (d > dth - 1.5 && !nominal) v = Math.Min(v, Math.Max(f.Ias, f.P.Vapp));      // it can't be faster than it is now right away
             if (f.WentAround) v = Math.Min(v, 200);
@@ -2381,6 +2499,7 @@ public sealed class TrafficWorld
             var gs = Wind.Tas(v, alt) - (d < 15 ? hw : hw * 0.5);
             t += Math.Min(step, d) / Math.Max(60, gs) * 3600;
         }
+        while (marks is not null && mk < marks.Length) { at![mk] = t; mk++; }
         return t;
     }
 
@@ -2397,8 +2516,11 @@ public sealed class TrafficWorld
         var deps = DepRwys.Count > 0 ? DepRwys : DepRwy is null ? new List<RunwayEnd>() : new() { DepRwy };
         var mixed = deps.Count == 0 || deps.Any(d => d.Runway == f.Rwy.Runway);
         var crossing = deps.Any(d => Crossing(f.Rwy, d) is not null);
-        var room = mixed ? 70 : crossing ? 30 : 0;
-        return Math.Max(wake, occupancy) + 10 + (forDepartures && DeparturesWaiting ? room : 0);
+        // Room for a departure between arrivals only when one is waiting for, or due at, this runway (or one that
+        // crosses it) — not because some other runway has a queue.
+        var mine = forDepartures && mixed && DeparturesFor(r => r == f.Rwy.Runway);
+        var cross = forDepartures && !mine && crossing && DeparturesFor(r => deps.Any(d => d.Runway == r && Crossing(f.Rwy, d) is not null));
+        return Math.Max(wake, occupancy) + 10 + (mine ? 70 : cross ? 30 : 0);
     }
 
     /// <summary>
@@ -2426,7 +2548,7 @@ public sealed class TrafficWorld
         f.ThrS = f.Path.PointS[thrIndex];
         f.S = 0;
         f.SpeedLimits.Clear();
-        f.AltLimits.Clear(); f.Checks.Clear();   // vectored: ATC's altitudes now
+        f.AltLimits.Clear(); f.Checks.Clear(); f.Fixes.Clear(); f.FixEtas.Clear();   // vectored: ATC's altitudes now
         f.LandingChecked = false;
         f.StableChecked = false;
         if (f.Phase == "final") f.SetPhase("approach", Time);
@@ -2453,7 +2575,7 @@ public sealed class TrafficWorld
         f.SpeedLimits.Clear(); // radar vectors back around: no procedure limits
         var pre = f.Path.PointS.Length > 1 ? f.Path.PointS[1] : 0;
         f.AltLimits = f.AltLimits.Select(c => (c.S + pre, c.Min, c.Max)).ToList();
-        f.Checks.Clear();
+        f.Checks.Clear(); f.Fixes.Clear(); f.FixEtas.Clear();
     }
 
     /// <summary>A full circle from the current position, then the rest of the route.</summary>
@@ -2537,7 +2659,11 @@ public sealed class TrafficWorld
     }
 
     /// <summary>Departures waiting to go: at the hold line for a while, or lined up and kept waiting.</summary>
-    private bool DeparturesWaiting => Flights.Any(o => (o.Phase == "holding short" && Time - o.PhaseTime > 40) || (o.Phase is "lined up" or "lining up" && Time - o.PhaseTime > 20));
+    /// <summary>Departures waiting at, or predicted ready within 3 minutes for, a runway that matches.</summary>
+    private bool DeparturesFor(Func<int, bool> runway) => Flights.Any(o => o.Kind == "departure" && !o.Done && o.OnGround && o.Rwy is not null && runway(o.Rwy.Runway)
+        && ((o.Phase == "holding short" && Time - o.PhaseTime > 40) || (o.Phase is "lined up" or "lining up" && Time - o.PhaseTime > 20)
+            || (o.Phase == "taxi" && !double.IsNaN(o.ReadyAt) && o.ReadyAt - Time < 180)));
+
 
     private bool RunwayBusy(int runway, Flight self) =>
         Flights.Any(o => o != self && !o.Done && (o.Reserve == runway || (o.OnRunway == runway && !(o.Kind == "departure" && !o.OnGround))));
@@ -2921,7 +3047,7 @@ public sealed class TrafficWorld
             f.Reserve = -1;
             f.Vs = 600;
             f.SetPhase("climbing", Time);
-            Log($"{f.Callsign}: airborne from runway {f.Rwy!.Ident}{(f.Route.Length > 0 ? " on the " + f.Route + " departure" : "")}");
+            Log($"{f.Callsign}: airborne from runway {f.Rwy!.Ident}{(f.Route.Length > 0 ? " on the " + f.Route + " departure" : "")}{f.DepReport}");
         }
     }
 
@@ -2977,6 +3103,7 @@ public sealed class TrafficWorld
                 f.EtaAt = Time;
                 f.EtaSec = EtaToThreshold(f, dth);
                 f.EtaNominal = Time + (f.Slowed ? EtaToThreshold(f, dth, nominal: true) : f.EtaSec);
+                PredictFixes(f, dth);
                 var land = Time + f.EtaSec;
                 if (!f.WentAround)
                 {

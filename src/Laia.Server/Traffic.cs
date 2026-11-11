@@ -152,6 +152,9 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                         eta = f.Kind == "arrival" && !f.OnGround && !double.IsNaN(f.EtaSec) ? Math.Round(Math.Max(0, f.EtaSec - (wd.Time - f.EtaAt))) : (double?)null,
                         seq = f.Kind == "arrival" && !f.OnGround ? f.Seq : 0,
                         dth = f.Kind == "arrival" && !f.OnGround ? Math.Round((f.ThrS - f.S) / Geo2.MPerNm, 1) : (double?)null,
+                        fixes = f.Kind == "arrival" && !f.OnGround && f.FixEtas.Count > 0
+                            ? f.FixEtas.Take(4).Select(x => new { fix = x.Fix, eta = Math.Round(Math.Max(0, x.At - wd.Time)) }).ToList() : null,
+                        etd = f.Kind == "departure" && f.OnGround && !double.IsNaN(f.TakeoffAt) && f.Phase != "takeoff roll" ? Math.Round(Math.Max(0, f.TakeoffAt - wd.Time)) : (double?)null,
                     });
                 }
             object? runways = null;
@@ -288,7 +291,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                     alt = Math.Round(f.AltFt), gs = Math.Round(f.Gs), gate = f.Spot?.Label, ground = f.OnGround,
                 })).Where(f => f.Kind != "parked").ToList(),
                 parked = Worlds().Sum(x => x.Flights.Count(f => f.Kind == "parked")),
-                neighbours = _neighbours.Count == 0 ? null : string.Join(", ", _neighbours.Select(n => $"{n.Apt.Icao} ({n.Flights.Count} flying)")),
+                neighbours = _neighbours.Count == 0 ? null : string.Join(", ", _neighbours.Select(n => $"{n.Apt.Icao} ({n.Flights.Count} flying{(n.PredictionSummary is { } ps ? "; predictions: " + ps : "")})")),
                 sky = network.Count == 0 ? network.Status : $"{network.AirborneNow(w?.ScheduleClock ?? WeekMinuteNow()):N0} flights in the air worldwide · {network.Status}",
             };
         }

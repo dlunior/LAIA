@@ -743,6 +743,8 @@ Console.WriteLine("== Hand-over: a scheduled arrival taken over from the whole s
     Console.WriteLine($"  landing time predicted 10 min out: {landAt - f.Pred10:+0;-0} s off; 5 min out: {landAt - f.Pred5:+0;-0} s off; first prediction {(double.IsNaN(f.Pred30) ? "after 30 min out" : $"30 min out: {landAt - f.Pred30:+0;-0} s off")}");
     Check(!double.IsNaN(f.Pred10) && Math.Abs(landAt - f.Pred10) < 45 && !double.IsNaN(f.Pred5) && Math.Abs(landAt - f.Pred5) < 30,
         "the landing time is predicted within 45 s from 10 minutes out and 30 s from 5 minutes out (no other traffic)");
+    Console.WriteLine($"  predictions: {world.PredictionSummary}");
+    Check(world.PredictionSummary?.Contains("STAR/approach fixes") == true, "times at the STAR and approach fixes are predicted and measured");
 }
 
 Console.WriteLine("== Hand-over of a short flight: one departing a field inside the 200 nm ring is taken over once climbed, not at take-off");
@@ -830,6 +832,22 @@ Console.WriteLine("== Hand-over spacing: two arrivals the whole sky has on top o
     }
     holds = log.Count(x => x.Contains("holding for spacing") || x.Contains("going around") || x.Contains("making a 360"));
     Check(landed == 2 && holds == 0, $"both land with no hold, 360 or go-around ({holds})");
+}
+
+Console.WriteLine("== Take-off times are predicted (taxi, queue, arrivals on the same runway) and measured");
+{
+    var apt = new AirportModel(TestAirport.Build(false));
+    var world = new TrafficWorld(apt, new TestSource(), seed: 21) { Automatic = true, Level = TrafficLevel.Busy, Wind = new Wind(270, 10) };
+    var log = new List<string>(); world.Log = s2 => log.Add(s2);
+    world.SelectRunways(true);
+    for (var t = 0.0; t < 5400; t += 0.5) world.Step(0.5);
+    var offs = log.Where(x => x.Contains("take-off time as predicted")).ToList();
+    Console.WriteLine($"  {offs.Count} take-offs with a prediction; {world.PredictionSummary}");
+    foreach (var x in offs.Take(3)) Console.WriteLine("  " + x);
+    Check(offs.Count >= 3, "departures get a predicted take-off time");
+    var errs = offs.SelectMany(x => System.Text.RegularExpressions.Regex.Matches(x, @"5 min out ([+-]\d+) s").Select(m => Math.Abs(double.Parse(m.Groups[1].Value)))).ToList();
+    Console.WriteLine($"  5 min out: average miss {(errs.Count > 0 ? errs.Average() : double.NaN):0} s over {errs.Count}");
+    Check(errs.Count == 0 || errs.Average() < 120, "predicted within about 2 minutes on average from 5 minutes out");
 }
 
 Console.WriteLine("== Neighbouring fields: runway traffic only, on the main airport's clock; satellite STARs are a last resort");
