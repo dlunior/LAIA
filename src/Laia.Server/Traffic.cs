@@ -201,13 +201,19 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         // Flights the detailed traffic is flying (handed over, or at and around the airport) aren't shown twice.
         var exclude = new HashSet<string>(Worlds().SelectMany(x => x.Flights).Select(f => f.Reg).Where(r => r.Length > 0), StringComparer.OrdinalIgnoreCase);
         var clock = w?.ScheduleClock ?? WeekMinuteNow();
-        foreach (var p in network.Around(clock, clat, clon, NetRadiusNm, exclude))
+        var worlds = Worlds().ToList();
+        foreach (var p0 in network.Around(clock, clat, clon, NetRadiusNm, exclude))
+        {
+            // Flights to or from the airports run here fly their filed STAR or SID (the same route the hand-over uses).
+            var p = p0;
+            foreach (var wd in worlds) p = wd.OnRoute(p);
             list.Add(new
             {
                 id = p.Leg.Id, cs = p.Leg.Callsign, type = p.Leg.Type, airline = p.Leg.Airline, dep = p.Leg.Dep, arr = p.Leg.Arr,
                 lat = Math.Round(p.Lat, 4), lon = Math.Round(p.Lon, 4), alt = Math.Round(p.AltFt / 100) * 100, gs = Math.Round(p.GsKt),
                 hdg = Math.Round(p.Heading), phase = p.Phase, cruise = p.CruiseFt, eta = Math.Round(p.EtaMin), reg = p.Leg.Reg, title = p.Leg.Title,
             });
+        }
         return list;
     }
 

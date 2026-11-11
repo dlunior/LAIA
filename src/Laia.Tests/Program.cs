@@ -850,6 +850,37 @@ Console.WriteLine("== Take-off times are predicted (taxi, queue, arrivals on the
     Check(errs.Count == 0 || errs.Average() < 120, "predicted within about 2 minutes on average from 5 minutes out");
 }
 
+Console.WriteLine("== Filed routes in the whole sky: an arrival is already flying to its STAR when it's taken over");
+{
+    var nm = Geo2.MPerNm;
+    var data = TestAirport.Build(false);
+    var map = new LocalMap(data.Lat, data.Lon);
+    var origin = map.ToLatLon(new V2(300 * nm, 40 * nm));     // east: the great circle would come straight in from the east
+    var world = new TrafficWorld(new AirportModel(data), new TestSource(), seed: 6)
+    {
+        Automatic = false, Wind = new Wind(270, 10), WeekMinute = 2000, Locate = c => c == "KFAR" ? origin : null,
+    };
+    world.SelectRunways(true);
+    Laia.Common.Airports.ScheduleLeg Leg(int dep) => new() { Airline = "DAL", Operator = "DAL", Type = "B738", Reg = "N55", Flight = "55", Dep = "KFAR", Arr = "TEST", DepMin = dep, ArrMin = dep + 55 };
+    NetPos? np = null; Laia.Common.Airports.ScheduleLeg? leg = null;
+    for (var dep = 2000 - 55; dep <= 2000; dep++)
+    {
+        var l = Leg(dep); var p = world.NetworkPosition(l);
+        if (p is not null && Geo2.DistanceNm(data.Lat, data.Lon, p.Lat, p.Lon) is > 60 and < 80) { np = p; leg = l; break; }
+    }
+    Check(np is not null, "the whole sky has the arrival 60–80 nm out");
+    var pos = map.ToXY(np!.Lat, np.Lon);
+    var farrr = new V2(30 * nm, -30 * nm);
+    var toFix = Math.Abs(Geo2.Diff((farrr - pos).Bearing, np.Heading));
+    Console.WriteLine($"  at {pos.Length / nm:0} nm, {np.AltFt:0} ft, heading {np.Heading:000}; FARRR bears {(farrr - pos).Bearing:000}");
+    Check(toFix < 10, "it is heading for its STAR's first fix (FARRR), not straight at the airport");
+    var f = world.SpawnFromNetwork(leg!, np)!;
+    double turn = 0, prev = double.NaN;
+    for (var s2 = 0.0; s2 < 20 * nm; s2 += 200) { var d = f.Path!.At(s2).dir; if (!double.IsNaN(prev)) turn += Math.Abs(Geo2.Diff(d, prev)); prev = d; }
+    Console.WriteLine($"  taken over: {f.Route}, turning {turn:0}° in its first 20 nm");
+    Check(turn < 40, "the hand-over just carries on along the route (no turn to join)");
+}
+
 Console.WriteLine("== Taken over beside its STAR's first fix: direct to the next fix ahead, no flying back and looping round");
 {
     var nm = Geo2.MPerNm;

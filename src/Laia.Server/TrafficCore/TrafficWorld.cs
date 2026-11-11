@@ -488,8 +488,110 @@ public sealed class TrafficWorld
             ArrElev = Apt.ElevationFt, Located = true,
         };
         leg.DistNm = Geo2.DistanceNm(leg.DepLat, leg.DepLon, leg.ArrLat, leg.ArrLon);
-        return NetworkModel.At(leg, SchedNow);
+        var p = NetworkModel.At(leg, SchedNow);
+        return p is null ? null : OnRoute(p, l.Type, Key(l, 'A'));
     }
+
+    // ------------------------------------------------------------------ filed routes in the whole sky
+
+    /// <summary>A whole-sky flight's route near this airport (lat/lon points, origin first) and the plan it was made with.</summary>
+    private sealed record NetRoute(List<(double lat, double lon)> Pts, double[] Cum, double LengthNm, (RunwayEnd? rwy, (Procedure p, Transition? t)? star)? Plan, string Runways, double MadeAt);
+    private readonly Dictionary<string, NetRoute> _netRoutes = new();
+
+    /// <summary>
+    /// Moves a whole-sky flight to or from this airport onto its filed route: an arrival flies the great circle only
+    /// as far as its STAR (with the entry transition chosen for its origin, the same choice the hand-over makes), then
+    /// the STAR; a departure flies its SID and exit, then the great circle. The schedule's timing is kept (the same
+    /// fraction of the way along); the descent keeps to ~300 ft per nm of route still to go. So when the airport takes
+    /// an arrival over ~200 nm out it is already on its STAR or heading for it, as on a filed flight plan.
+    /// </summary>
+    public NetPos OnRoute(NetPos p, string? type = null, string? key = null)
+    {
+        var l = p.Leg;
+        var arr = l.Arr.Equals(Apt.Icao, StringComparison.OrdinalIgnoreCase);
+        var dep = !arr && l.Dep.Equals(Apt.Icao, StringComparison.OrdinalIgnoreCase);
+        if (!arr && !dep || l.DistNm < 30) return p;
+        try
+        {
+            var r = RouteFor(l, arr, type ?? l.Type, key ?? $"{(arr ? 'A' : 'D')}|{l.Reg}|{l.Flight}|{l.DepMin}");
+            if (r is null || r.LengthNm < 1) return p;
+            var frac = Math.Clamp(p.FlownNm / Math.Max(1, l.DistNm), 0, 1);
+            var at = frac * r.LengthNm;
+            var i = Array.FindIndex(r.Cum, c => c >= at);
+            if (i <= 0) i = 1;
+            var segLen = r.Cum[i] - r.Cum[i - 1];
+            var u = segLen < 1e-6 ? 0 : (at - r.Cum[i - 1]) / segLen;
+            var (a, b) = (r.Pts[i - 1], r.Pts[i]);
+            var (lat, lon) = NetworkModel.Intermediate(a.lat, a.lon, b.lat, b.lon, u);
+            var hdg = Geo2.BearingDeg(lat, lon, b.lat, b.lon);
+            var rem = r.LengthNm - at;
+            var alt = p.AltFt; var phase = p.Phase;
+            if (arr && phase != "climbing") { alt = Math.Min(p.CruiseFt, l.ArrElev + rem * 300 + 1500); phase = alt < p.CruiseFt - 50 ? "descending" : "cruising"; }
+            return p with { Lat = lat, Lon = lon, Heading = hdg, AltFt = Math.Round(alt / 10) * 10, Phase = phase };
+        }
+        catch { return p; }
+    }
+
+    private NetRoute? RouteFor(NetLeg l, bool arr, string type, string key)
+    {
+        var rw = string.Join(",", (arr ? ArrRwys : DepRwys).Select(e => e.Ident));
+        if (_netRoutes.TryGetValue(key, out var have) && have.Runways == rw && Time - have.MadeAt < 1800) return have;
+        if (_netRoutes.Count > 3000) _netRoutes.Clear();
+        var other = arr ? (l.DepLat, l.DepLon) : (l.ArrLat, l.ArrLon);
+        var otherXY = Apt.Map.ToXY(other.Item1, other.Item2);
+        var far = otherXY.Unit * (Math.Min(otherXY.Length, 250 * Geo2.MPerNm));
+        List<V2> proc = new();
+        (RunwayEnd? rwy, (Procedure p, Transition? t)? star)? plan = null;
+        if (arr)
+        {
+            plan = PlanArrival(arr ? l.Dep : l.Arr, type);
+            if (plan.Value.rwy is { } rwy)
+            {
+                var tmp = new Flight { Id = "", Callsign = "", Airline = "", Type = type, Kind = "arrival", P = Perf.For(type), Other = l.Dep, StarPick = plan.Value.star };
+                if (PickStar(tmp, rwy, out var legs) is not null)
+                    proc = Apt.LegsToPoints(legs, far, 11000, out _).Select(x => x.P).ToList();
+                // Join the STAR where the great circle meets it: skip fixes the next one is nearer the origin than.
+                while (proc.Count >= 2 && (proc[1] - otherXY).Length < (proc[0] - otherXY).Length) proc.RemoveAt(0);
+                proc.RemoveAll(q => q.Length < 3 * Geo2.MPerNm);
+            }
+        }
+        else
+        {
+            var deps = DepRwys.Count > 0 ? DepRwys : DepRwy is null ? new() : new List<RunwayEnd> { DepRwy };
+            var sid = deps.Count == 0 ? null : ChooseSid(deps, l.Arr);
+            var rwy = sid is null ? deps.FirstOrDefault() : deps.FirstOrDefault(e => Serves(sid.Value.p, e)) ?? deps.FirstOrDefault();
+            if (rwy is not null)
+            {
+                var tmp = new Flight { Id = "", Callsign = "", Airline = "", Type = type, Kind = "departure", P = Perf.For(type), Other = l.Arr, Rwy = rwy, SidPick = sid };
+                if (PickSid(tmp, rwy, out var legs) is not null && legs.Count > 0)
+                    proc = new List<V2> { rwy.FarEnd }.Concat(Apt.LegsToPoints(legs, rwy.FarEnd, rwy.ElevationFt + 400, out _, hybrid: true).Select(x => x.P)).ToList();
+                // Leave the SID where the great circle to the destination is the way on.
+                while (proc.Count >= 2 && (proc[^2] - otherXY).Length < (proc[^1] - otherXY).Length) proc.RemoveAt(proc.Count - 1);
+            }
+        }
+        var pts = new List<(double lat, double lon)>();
+        if (arr)
+        {
+            pts.Add(other);
+            pts.AddRange(proc.Select(q => Apt.Map.ToLatLon(q)));
+            pts.Add((Apt.Data.Lat, Apt.Data.Lon));
+        }
+        else
+        {
+            pts.Add((Apt.Data.Lat, Apt.Data.Lon));
+            pts.AddRange(proc.Select(q => Apt.Map.ToLatLon(q)));
+            pts.Add(other);
+        }
+        var cum = new double[pts.Count];
+        for (var k = 1; k < pts.Count; k++) cum[k] = cum[k - 1] + Geo2.DistanceNm(pts[k - 1].lat, pts[k - 1].lon, pts[k].lat, pts[k].lon);
+        var r = new NetRoute(pts, cum, cum[^1], plan, rw, Time);
+        _netRoutes[key] = r;
+        return r;
+    }
+
+    /// <summary>The arrival plan (runway, STAR) a whole-sky flight's route was made with, so the hand-over keeps it.</summary>
+    private (RunwayEnd? rwy, (Procedure p, Transition? t)? star)? RoutePlan(string key) =>
+        _netRoutes.TryGetValue(key, out var r) && r.Plan is { } pl && pl.rwy is not null && (ArrRwys.Contains(pl.rwy) || ArrRwy == pl.rwy) ? pl : null;
 
     /// <summary>
     /// Takes over a scheduled arrival from the whole sky where it is now (position, level): it flies direct to its
@@ -497,7 +599,7 @@ public sealed class TrafficWorld
     /// </summary>
     internal Flight? SpawnFromNetwork(ScheduleLeg l, NetPos np)
     {
-        var plan = PlanArrival(l.Dep, l.Type);
+        var plan = RoutePlan(Key(l, 'A')) ?? PlanArrival(l.Dep, l.Type);
         var f = SpawnArrival(0, false, l, plan, entry: (Apt.Map.ToXY(np.Lat, np.Lon), np.AltFt, np.CruiseFt));
         // The whole sky flies every leg on its own, so two arrivals can be almost on top of each other when they're
         // taken over (most at the start, when everything within 200 nm appears at once). Far out the arrival manager
