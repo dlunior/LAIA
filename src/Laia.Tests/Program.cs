@@ -975,6 +975,8 @@ Console.WriteLine("== Departures never climb into arrivals; freighters park on c
     Console.WriteLine($"  {world.SeparationSummary}");
     foreach (var x in los.Take(3)) Console.WriteLine("  " + x);
     Check(los.Count == 0, "no departure comes within 3 nm and 1,000 ft of other traffic");
+    var low = log.Where(x => x.Contains("climb stopped at")).Select(x => double.Parse(System.Text.RegularExpressions.Regex.Match(x, @"climb stopped at ([0-9,]+) ft").Groups[1].Value.Replace(",", ""))).ToList();
+    Check(low.All(v => v >= 2000), "a climb is never stopped below 2,000 ft above the field");
     Check(TrafficWorld.IsCargo("UPS") && TrafficWorld.IsCargo("FDX") && !TrafficWorld.IsCargo("SWA"), "UPS and FedEx are known as cargo airlines");
 }
 

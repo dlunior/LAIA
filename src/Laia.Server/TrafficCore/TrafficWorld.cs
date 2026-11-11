@@ -3336,7 +3336,10 @@ public sealed class TrafficWorld
         double stop = double.NaN; Flight? who = null;
         foreach (var a in Flights)
         {
-            if (a.Kind != "arrival" || a.OnGround || a.Done || a.Path is null || a.Phase is "flare" or "landing roll") continue;
+            // Arrivals on the approach or final are the runway's business (landing behind a departure is normal),
+            // not a reason to stop a climb.
+            if (a.Kind != "arrival" || a.OnGround || a.Done || a.Path is null || a.Phase is "flare" or "landing roll" or "final" or "approach" or "go-around") continue;
+            if ((a.ThrS - a.S) / Geo2.MPerNm < 12) continue;
             if ((a.Pos - d.Pos).Length > 20 * Geo2.MPerNm || a.AltFt < d.AltFt - 1500) continue;
             for (var t = 0.0; t <= 120; t += 15)
             {
@@ -3348,6 +3351,9 @@ public sealed class TrafficWorld
                 {
                     var lowest = Math.Min(a.AltFt, aAlt);
                     var level = Math.Floor((lowest - 1000) / 1000) * 1000;
+                    // Never stopped below 2,000 ft above the field (departure control's lowest level-off); below that
+                    // it's the arrival that must be kept clear.
+                    if (level < Apt.ElevationFt + 2000) break;
                     if (double.IsNaN(stop) || level < stop) { stop = level; who = a; }
                     break;
                 }
