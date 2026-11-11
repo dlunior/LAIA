@@ -964,6 +964,20 @@ Console.WriteLine("== Taken over beside its STAR's first fix: direct to the next
     Check(nearest > 5 && turn < 150, "it goes direct to MIDDL rather than back to FARRR and round");
 }
 
+Console.WriteLine("== Departures never climb into arrivals; freighters park on cargo ramps");
+{
+    var apt = new AirportModel(TestAirport.Build(false));
+    var world = new TrafficWorld(apt, new TestSource(), seed: 31) { Automatic = true, Level = TrafficLevel.Busy, Wind = new Wind(270, 10) };
+    var log = new List<string>(); world.Log = s2 => log.Add(s2);
+    world.SelectRunways(true);
+    for (var t = 0.0; t < 3600; t += 0.5) world.Step(0.5);
+    var los = log.Where(x => x.StartsWith("SEPARATION")).ToList();
+    Console.WriteLine($"  {world.SeparationSummary}");
+    foreach (var x in los.Take(3)) Console.WriteLine("  " + x);
+    Check(los.Count == 0, "no departure comes within 3 nm and 1,000 ft of other traffic");
+    Check(TrafficWorld.IsCargo("UPS") && TrafficWorld.IsCargo("FDX") && !TrafficWorld.IsCargo("SWA"), "UPS and FedEx are known as cargo airlines");
+}
+
 Console.WriteLine("== Neighbouring fields: runway traffic only, on the main airport's clock; satellite STARs are a last resort");
 {
     var nm = Geo2.MPerNm;

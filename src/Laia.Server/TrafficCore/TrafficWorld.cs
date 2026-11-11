@@ -89,6 +89,9 @@ public sealed class Flight
     public Dictionary<string, double> FixPred10 = new();
     /// <summary>A departure's predicted take-off time (world time, NaN until predicted), and what was predicted 10 and 5 minutes before.</summary>
     public string DepReport = "";
+    /// <summary>A departure's climb stopped below crossing traffic (NaN: none), and when that was last checked.</summary>
+    public double ClimbStop = double.NaN, ProbeAt = -99;
+    public string? StoppedFor;
     public double TakeoffAt = double.NaN, TakeoffPred10 = double.NaN, TakeoffPred5 = double.NaN, ReadyAt = double.NaN;
     /// <summary>The planned departure route (planned when lining up, so the spacing can look at where it goes).</summary>
     public List<AirPoint>? DepPlan;
@@ -383,6 +386,7 @@ public sealed class TrafficWorld
         }
         foreach (var f in Flights.Where(f => f.Done && f.Spot is not null)) f.Spot = null;
         if (Time - _lastDepPredict >= 5) { _lastDepPredict = Time; try { PredictDepartures(); } catch { } }
+        if (Time - _lastSepWatch >= 2) { _lastSepWatch = Time; try { WatchSeparation(); } catch { } }
         // Landing order on each runway, by predicted time, and the arrival manager: each arrival's slot is the later of
         // its own unhindered time and the slot ahead plus the gap needed; the difference is the delay it should lose
         // far out with speed (cruise and descent slower), so it reaches the approach already spaced instead of holding.
@@ -980,9 +984,26 @@ public sealed class TrafficWorld
         !Flights.Any(f => !f.Done && f.Spot is not null && (f.Spot == s || s.Overlaps.Contains(f.Spot))) &&
         !(UserPos is { } u && (u - s.P).Length < s.RadiusM + 25);
 
+    /// <summary>All-cargo airlines (by ICAO code): they park on cargo ramps, not at passenger gates.</summary>
+    private static readonly HashSet<string> CargoAirlines = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "FDX", "UPS", "GTI", "ABX", "ATN", "CKS", "KYE", "PAC", "CLX", "GEC", "BOX", "AJT", "MPH", "NCA", "LCO", "LTC", "CKK", "SQC",
+        "ICV", "CAO", "ABW", "QTR-C", "WGN", "SRR", "CWC", "MXY", "FTA", "AMF", "BCS", "DHK", "DHL", "DAE", "UCA", "SWQ", "TPA", "KFS", "RLB",
+    };
+    public static bool IsCargo(string? airline) => airline is { Length: > 0 } a && CargoAirlines.Contains(a);
+
     private AirportModel.ParkingSpot? FindGate(Perf p, string airline, string? alsoAirline = null, string? callsign = null)
     {
-        var free = UsableSpots().Where(s => SpotFree(s) && s.Size >= p.GateSize && (s.RadiusM <= 0 || s.RadiusM >= p.SpanM / 2 * 0.85)).ToList();
+        bool Fits(AirportModel.ParkingSpot s) => SpotFree(s) && s.Size >= p.GateSize && (s.RadiusM <= 0 || s.RadiusM >= p.SpanM / 2 * 0.85);
+        // Freighters: the scenery's cargo ramps first, then other ramp stands no airline uses (not GA tie-downs),
+        // then a passenger gate only if nothing else fits (the user saw a UPS 757 taxi to a passenger gate at MCO).
+        if (IsCargo(airline) || IsCargo(alsoAirline))
+        {
+            var cargo = Apt.Spots.Where(s => s.Type is 5 or 6 && Fits(s)).ToList();
+            if (cargo.Count == 0) cargo = Apt.Spots.Where(s => s.Type is 3 or 4 or 14 && s.RadiusM >= 17 && s.Airlines.Count == 0 && Fits(s)).ToList();
+            if (cargo.Count > 0) return cargo[Rng.Next(cargo.Count)];
+        }
+        var free = UsableSpots().Where(Fits).ToList();
         if (free.Count == 0) return null;
         var plan = Plan;
         // Today's real gate of this very flight.
@@ -3286,6 +3307,9 @@ public sealed class TrafficWorld
         var targetVs = agl < 1500 ? f.P.ClimbFpm : f.P.ClimbFpm * (f.Ias < targetIas - 5 ? 0.7 : 0.9);
         // The SID's "at or below" restrictions ahead: level off at them until the fix is passed.
         var cap = f.AltLimits.Where(c => c.Max > 0 && c.S > f.S - 0.2 * Geo2.MPerNm).Select(c => c.Max).DefaultIfEmpty(double.MaxValue).Min();
+        // Departure control: stop the climb below an arrival it would otherwise climb into (radar vectors or not).
+        if (Time - f.ProbeAt >= 2) { f.ProbeAt = Time; f.ClimbStop = ProbeArrivals(f, f.P.ClimbFpm * 0.8); }
+        if (!double.IsNaN(f.ClimbStop)) cap = Math.Min(cap, Math.Max(f.ClimbStop, Math.Min(f.AltFt, cap)));
         if (cap < double.MaxValue) targetVs = Math.Min(targetVs, Math.Max(0, (cap - f.AltFt) * 3));
         f.Vs += Math.Clamp(targetVs - f.Vs, -500 * dt, 600 * dt);
         f.AltFt += f.Vs / 60 * dt;
@@ -3299,6 +3323,75 @@ public sealed class TrafficWorld
             if (f.ChecksMissed.Count > 0) Log($"{f.Callsign}: climbed out on {f.Route}{ChecksReport(f)}");
         }
     }
+
+    /// <summary>
+    /// Where a climbing departure must stop so it never climbs into an arrival: both are projected along their routes
+    /// for the next 2 minutes (every 15 s); if they'd come within 3.5 nm and 1,000 ft, the departure is told to
+    /// maintain 1,000 ft below the lowest the arrival will be (in whole thousands), as departure control would —
+    /// whatever its SID, radar vectors included. NaN when nothing's in the way.
+    /// </summary>
+    private double ProbeArrivals(Flight d, double climbFpm)
+    {
+        if (d.Path is null) return double.NaN;
+        double stop = double.NaN; Flight? who = null;
+        foreach (var a in Flights)
+        {
+            if (a.Kind != "arrival" || a.OnGround || a.Done || a.Path is null || a.Phase is "flare" or "landing roll") continue;
+            if ((a.Pos - d.Pos).Length > 20 * Geo2.MPerNm || a.AltFt < d.AltFt - 1500) continue;
+            for (var t = 0.0; t <= 120; t += 15)
+            {
+                var dp = d.Path.At(Math.Min(d.Path.Length, d.S + d.Gs * 0.5144 * t)).p;
+                var ap = a.Path.At(Math.Min(a.Path.Length, a.S + a.Gs * 0.5144 * t)).p;
+                var dAlt = d.AltFt + climbFpm * t / 60;
+                var aAlt = Math.Max(a.AltFt + Math.Min(0, a.Vs) * t / 60, (a.Rwy?.ElevationFt ?? 0));
+                if ((dp - ap).Length < 3.5 * Geo2.MPerNm && Math.Abs(dAlt - aAlt) < 1000 && d.AltFt < aAlt)
+                {
+                    var lowest = Math.Min(a.AltFt, aAlt);
+                    var level = Math.Floor((lowest - 1000) / 1000) * 1000;
+                    if (double.IsNaN(stop) || level < stop) { stop = level; who = a; }
+                    break;
+                }
+            }
+        }
+        if (who is not null && d.StoppedFor != who.Callsign)
+        {
+            d.StoppedFor = who.Callsign;
+            _climbStops++;
+            Log($"{d.Callsign}: climb stopped at {Math.Max(stop, d.AltFt):N0} ft for {who.Callsign} ({who.AltFt:N0} ft, {(who.Pos - d.Pos).Length / Geo2.MPerNm:0.0} nm)");
+        }
+        if (who is null) d.StoppedFor = null;
+        return stop;
+    }
+
+    private int _climbStops, _losCount;
+    private readonly Dictionary<(string, string), double> _losSeen = new();
+
+    /// <summary>
+    /// Watches separation in the air between departures and everything else (3 nm / 1,000 ft, the terminal radar
+    /// minimum), logging each loss once — to show whether the rules above work. Arrivals following each other to the
+    /// same or parallel runways are the arrival manager's (and parallel approaches are legal), so not counted here.
+    /// </summary>
+    private void WatchSeparation()
+    {
+        var air = Flights.Where(x => !x.OnGround && !x.Done && x.Kind is "arrival" or "departure" && x.AltFt - Apt.ElevationFt > 800).ToList();
+        foreach (var d in air.Where(x => x.Kind == "departure"))
+            foreach (var o in air)
+            {
+                if (o == d || (o.Kind == "departure" && string.CompareOrdinal(o.Id, d.Id) < 0)) continue;
+                if ((o.Pos - d.Pos).Length >= 3 * Geo2.MPerNm || Math.Abs(o.AltFt - d.AltFt) >= 900) continue;
+                // A departure off one parallel while an arrival is on final to another, near the field, is legal.
+                if (o.Kind == "arrival" && o.Phase is "final" or "approach" && d.Pos.Length < 6 * Geo2.MPerNm) continue;
+                var key = (d.Callsign, o.Callsign);
+                if (_losSeen.TryGetValue(key, out var at) && Time - at < 120) continue;
+                _losSeen[key] = Time; _losCount++;
+                Log($"SEPARATION: {d.Callsign} ({d.AltFt:N0} ft) and {o.Callsign} ({o.AltFt:N0} ft) {(o.Pos - d.Pos).Length / Geo2.MPerNm:0.0} nm apart");
+            }
+    }
+
+    /// <summary>For the control page.</summary>
+    public string SeparationSummary => $"{_climbStops} departure climb{(_climbStops == 1 ? "" : "s")} stopped below arrivals; {_losCount} loss{(_losCount == 1 ? "" : "es")} of separation involving departures";
+
+    private double _lastSepWatch = -99;
 
     private void Arrive(Flight f, double dt)
     {

@@ -283,6 +283,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 approach = w?.ApproachInUse,
                 prediction = w?.PredictionSummary,
                 restrictions = w?.RestrictionSummary,
+                separation = w?.SeparationSummary,
                 navdata = nasrDb.Status,
                 routes = $"{routesDb.Status}{(w is null ? "" : $"; {w.RoutesUsed} SIDs/STARs from them so far; {w.FiledRoutesFlown} whole-sky flights on their filed airways")}",
                 rules = w?.Rules is { Charts.Length: > 0 } ru ? ru.Describe() : null,
