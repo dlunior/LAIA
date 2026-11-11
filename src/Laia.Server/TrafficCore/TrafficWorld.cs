@@ -2079,7 +2079,7 @@ public sealed class TrafficWorld
                     if (p.Length > en0.Length + 5 * Geo2.MPerNm) return false;
                     var to = p - en0;
                     if (to.Length < 2 * Geo2.MPerNm) return k + 1 >= starPts.Count;             // practically there: the next one, if any
-                    if (Math.Abs(Geo2.Diff(to.Bearing, (-en0).Bearing)) > 90) return false;     // behind, away from the airport
+                    if (Math.Abs(Geo2.Diff(to.Bearing, (new V2(0, 0) - en0).Bearing)) > 90) return false;     // behind, away from the airport
                     if (k + 1 >= starPts.Count) return true;
                     var outb = starPts[k + 1].P - p;
                     return outb.Length < 1 || Math.Abs(Geo2.Diff(to.Bearing, outb.Bearing)) <= 90;
