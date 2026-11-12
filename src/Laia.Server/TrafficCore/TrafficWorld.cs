@@ -2923,7 +2923,7 @@ public sealed partial class TrafficWorld
         var side = rwy.Offset(p) >= 0 ? 1.0 : -1.0;              // break off to the side it's already on
         var outPt = p + left * (side * 4 * nm) - rwy.Dir * (4 * nm);
         var heading = (outPt - p).Bearing;
-        _breakoffs++; f.Mgr = "vectored around";
+        _breakoffs++; f.Mgr = "vectored around"; f.Frozen = false;   // re-sequenced at its new time
         Log($"{f.Callsign}: breaking off the approach for spacing ({why}): turn {(V2.Cross(V2.FromBearing(dir), outPt - p) > 0 ? "left" : "right")} heading {heading:000}, vectors back around");
         f.LastOrbit = Time;
         var pts = new List<V2> { p, p + V2.FromBearing(dir, 700), outPt };
@@ -3038,7 +3038,7 @@ public sealed partial class TrafficWorld
         ShiftRestrictions(f, oldS, at);
         f.S = 0;
         f.LastVector = Time;
-        f.Mgr = "vectored";
+        f.Mgr = "vectored"; f.Frozen = false;
         _vectors++;
         var hdg = (mid - p).Bearing;
         var back = f.Fixes.FirstOrDefault(x => Math.Abs(x.S - at) < 300).Fix;
@@ -3124,7 +3124,7 @@ public sealed partial class TrafficWorld
     private void Orbit(Flight f, string why)
     {
         Log($"{f.Callsign}: making a 360 for spacing ({why})");
-        _orbits++; f.Mgr = "360";
+        _orbits++; f.Mgr = "360"; f.Frozen = false;
         f.LastOrbit = Time;
         var path = f.Path!;
         var (p, dir, _) = path.At(f.S);
@@ -3162,7 +3162,7 @@ public sealed partial class TrafficWorld
     {
         var path = f.Path!;
         var (p, dir, _) = path.At(f.S);
-        _holds++; f.Mgr = "holding";
+        _holds++; f.Mgr = "holding"; f.Frozen = false;
         Log($"{f.Callsign}: holding for spacing ({why}), {(f.Ias > 0 ? Math.Min(f.Ias, f.AltFt <= 6000 ? 200 : f.AltFt <= 14000 ? 230 : 265) : 200):0} kt, right turns");
         f.LastHold = Time;
         f.LastOrbit = Time;
