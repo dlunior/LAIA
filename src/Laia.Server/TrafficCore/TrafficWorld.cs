@@ -1408,11 +1408,11 @@ public sealed partial class TrafficWorld
         if (learned is not null)
         {
             var arrIds = arr.Select(r => r.Ident).ToHashSet(); var depIds = dep.Select(r => r.Ident).ToHashSet();
-            foreach (var t in learned.Taxi)
+            foreach (var tt in learned.Taxi)
             {
-                var isArr = t.Kind == "arrival";
-                if (!(isArr ? arrIds : depIds).Contains(t.Runway)) continue;
-                real.Add((isArr, t.Points.Where(q => q.Length >= 3).Select(q => (Apt.Map.ToXY(q[0], q[1]), q[2])).ToList()));
+                var isArr = tt.Kind == "arrival";
+                if (!(isArr ? arrIds : depIds).Contains(tt.Runway)) continue;
+                real.Add((isArr, tt.Points.Where(q => q.Length >= 3).Select(q => (Apt.Map.ToXY(q[0], q[1]), q[2])).ToList()));
             }
         }
         var src = learned is null ? "" : $"{learned.Source} {learned.Day}";

@@ -131,7 +131,7 @@ public sealed class TaxiFlow
         for (var r = 0; r < runs.Count; r++) obs[r] = (0, 0, 0, 0, new HashSet<int>());
         if (real is { Count: > 0 })
         {
-            RealTracks = real.Count;
+            f.RealTracks = real.Count;
             const double cell = 60;
             var grid = new Dictionary<(int, int), List<(int run, V2 a, V2 b)>>();
             (int, int) Cell(V2 p) => ((int)Math.Floor(p.X / cell), (int)Math.Floor(p.Y / cell));
