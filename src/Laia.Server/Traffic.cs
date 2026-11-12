@@ -503,12 +503,12 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                     {
                         if (live)
                         {
-                            // The sim's wind is the wind where the user is: the airport's own only when the user is there
-                            // (within 15 nm and below 5,000 ft above it); otherwise the airport's METAR, and failing
-                            // that the last wind it had (never the wind at the user's cruise level).
+                            // The airport's METAR is the source of truth for its wind (user rule). Only with no METAR is
+                            // the sim's wind used — and only while the user is at the airport (within 15 nm, below 5,000 ft
+                            // above it), since it's the wind where the user is; otherwise the last wind stays.
                             var dNm = Geo2.DistanceNm(sim!.Lat, sim.Lon, w.Apt.Data.Lat, w.Apt.Data.Lon);
-                            if (dNm < 15 && sim.AltitudeFt < w.Apt.ElevationFt + 5000) w.Wind = new Wind(sim.WindDirection, sim.WindSpeed);
-                            else if (metar.Wind(w.Apt.Icao) is { } mw) w.Wind = new Wind(mw.dir ?? w.Wind.FromDeg, mw.kt);
+                            if (metar.Wind(w.Apt.Icao) is { } mw) w.Wind = new Wind(mw.dir ?? w.Wind.FromDeg, mw.kt);
+                            else if (dNm < 15 && sim.AltitudeFt < w.Apt.ElevationFt + 5000) w.Wind = new Wind(sim.WindDirection, sim.WindSpeed);
                             w.UserPos = w.Apt.Map.ToXY(sim.Lat, sim.Lon);
                             w.UserOnGround = sim.OnGround;
                         }
