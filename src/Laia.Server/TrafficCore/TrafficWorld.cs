@@ -982,6 +982,8 @@ public sealed class TrafficWorld
 
     private bool SpotFree(AirportModel.ParkingSpot s) =>
         !Flights.Any(f => !f.Done && f.Spot is not null && (f.Spot == s || s.Overlaps.Contains(f.Spot))) &&
+        // Not next to an aircraft bigger than its own stand (a freighter on a ramp stand): its wings cover the neighbours.
+        !Flights.Any(f => !f.Done && f.Spot is { } o && o != s && o.RadiusM > 0 && f.P.SpanM / 2 > o.RadiusM + 2 && (o.P - s.P).Length < f.P.SpanM / 2 + Math.Max(s.RadiusM, 10)) &&
         !(UserPos is { } u && (u - s.P).Length < s.RadiusM + 25);
 
     /// <summary>All-cargo airlines (by ICAO code): they park on cargo ramps, not at passenger gates.</summary>
@@ -999,9 +1001,16 @@ public sealed class TrafficWorld
         // then a passenger gate only if nothing else fits (the user saw a UPS 757 taxi to a passenger gate at MCO).
         if (IsCargo(airline) || IsCargo(alsoAirline))
         {
-            var cargo = Apt.Spots.Where(s => s.Type is 5 or 6 && Fits(s)).ToList();
-            if (cargo.Count == 0) cargo = Apt.Spots.Where(s => s.Type is 3 or 4 or 14 && s.RadiusM >= 17 && s.Airlines.Count == 0 && Fits(s)).ToList();
-            if (cargo.Count > 0) return cargo[Rng.Next(cargo.Count)];
+            // Ramp stands are drawn small in most sceneries (MCO's cargo ramps 15–17 m, medium ramps 12–18 m, too small
+            // on paper for a 757): a freighter may use any cargo, large or medium ramp stand no airline uses, as long
+            // as no aircraft is parked within its half-span (user: "allow them to park at medium ramps for cargo").
+            bool Clear(AirportModel.ParkingSpot s) => SpotFree(s) && s.Airlines.Count == 0 &&
+                !Flights.Any(o => !o.Done && o.Spot is { } os && os != s && (os.P - s.P).Length < p.SpanM / 2 + Math.Max(os.RadiusM, o.P.SpanM / 2) - 4);
+            foreach (var types in new[] { new[] { 5, 6 }, new[] { 4, 14 }, new[] { 3 } })
+            {
+                var cargo = Apt.Spots.Where(s => types.Contains(s.Type) && Clear(s)).ToList();
+                if (cargo.Count > 0) return cargo[Rng.Next(cargo.Count)];
+            }
         }
         var free = UsableSpots().Where(Fits).ToList();
         if (free.Count == 0) return null;
