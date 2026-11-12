@@ -78,6 +78,7 @@
     <div style="margin-top:8px;display:flex;gap:6px"><button id="bAirport">Airport</button><button id="bMe">Me</button><button id="bList">Flights</button></div>
   </div>
   <div class="card" id="sel" hidden></div>
+  <div class="card" id="seqCard"><div class="tag" style="margin-bottom:4px">Arrival sequence</div><div id="seq"></div></div>
   <div class="card" id="listCard"><div class="tag" style="margin-bottom:4px">Flights <span id="count"></span></div><div id="list"></div></div>
 </div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
@@ -290,6 +291,19 @@ async function drawAllPaths() {
   for (const p of results) if (p) L.polyline(p.points, { color: COLORS.path, weight: 1.5, opacity: .45, dashArray: p.ground ? null : "6 6" }).addTo(layers.paths);
 }
 
+function renderSeq() {
+  const arr = (data?.flights || []).filter(f => f.kind === "arrival" && f.eta != null && f.seq);
+  const by = {};
+  for (const f of arr) (by[f.runway || "?"] ||= []).push(f);
+  const rw = Object.keys(by).sort();
+  $("seq").innerHTML = rw.length === 0 ? '<div class="ph">No arrivals yet</div>' : rw.map(r => `<div class="tag" style="margin:6px 0 2px">Runway ${r}</div>` +
+    by[r].sort((a, b) => a.seq - b.seq).slice(0, 12).map(f => `<div class="row${f.id === selected ? " on" : ""}" data-id="${f.id}">
+      <span class="cs">${f.seq}. ${f.cs}</span>
+      <span class="ph">${Math.round(f.eta / 60)} min${f.gapnm != null ? ` · ${f.gapnm} nm behind` : ""}${f.mgr ? ` · ${f.mgr}` : ""}</span>
+      <span class="num">${Math.round(f.alt / 100).toString().padStart(3, "0")}</span></div>`).join("")).join("");
+  for (const row of $("seq").querySelectorAll(".row")) row.onclick = () => { select(row.dataset.id); const f = data.flights.find(x => x.id === row.dataset.id); if (f) map.panTo([f.lat, f.lon]); };
+}
+
 function renderList() {
   const fl = (data?.flights || []).filter(f => !(f.kind === "parked" && f.phase === "parked"))
     .sort((a, b) => (b.drawn - a.drawn) || (a.kind > b.kind ? 1 : -1) || a.cs.localeCompare(b.cs));
@@ -309,6 +323,7 @@ function render() {
   updateUser(data.user);
   updateSky();
   renderList();
+  renderSeq();
   if (selected) { const f = findSel(selected); if (f) renderSel(f); else { selected = null; $("sel").hidden = true; layers.sel.clearLayers(); } }
 }
 

@@ -1076,6 +1076,47 @@ Console.WriteLine("== Arrival manager: two arrivals bunched far out are spaced w
         "both land, properly spaced, with no hold and no go-around");
 }
 
+Console.WriteLine("== Arrival manager: too close for speed alone, 25 nm out — vectors (path stretch), not a hold");
+{
+    var world = new TrafficWorld(new AirportModel(TestAirport.Build(false)), new TestSource(), seed: 12) { Automatic = false, Wind = new Wind(270, 10) };
+    var log = new List<string>(); world.Log = s2 => log.Add(s2);
+    world.SelectRunways(true);
+    Laia.Common.Airports.ScheduleLeg L(string reg, string fl) => new() { Airline = "DAL", Operator = "DAL", Type = "A321", Reg = reg, Flight = fl, Dep = "KXXX", Arr = "TEST" };
+    var a = world.SpawnArrival(24, false, L("N3", "33"))!;
+    var b = world.SpawnArrival(25.2, false, L("N4", "44"))!;   // 1.2 nm behind: far too close, too near for speed
+    double landA = -1, landB = -1;
+    for (var t = 0.0; t < 3600 && (landA < 0 || landB < 0); t += 0.5)
+    {
+        world.Step(0.5);
+        if (landA < 0 && a.OnGround) landA = world.Time;
+        if (landB < 0 && b.OnGround) landB = world.Time;
+    }
+    foreach (var x in log.Where(x => x.Contains("vectors for spacing") || x.Contains("holding") || x.Contains("360") || x.Contains("breaking off") || x.Contains("behind DAL"))) Console.WriteLine("  " + x);
+    Console.WriteLine($"  landed {Math.Abs(landB - landA):0} s apart; {world.ArrivalManagerSummary}");
+    Check(log.Any(x => x.Contains("vectors for spacing")) && !log.Any(x => x.Contains("holding for spacing")), "it's vectored off the route and back, not held");
+    Check(landA > 0 && landB > 0 && Math.Abs(landB - landA) >= 70 && !a.WentAround && !b.WentAround, "both land properly spaced, no go-around");
+}
+
+Console.WriteLine("== Runway change: arrivals far out and departures not yet lined up get the new runways");
+{
+    var world = new TrafficWorld(new AirportModel(TestAirport.Build(false)), new TestSource(), seed: 13) { Automatic = false, Wind = new Wind(270, 10) };
+    var log = new List<string>(); world.Log = s2 => log.Add(s2);
+    world.SelectRunways(true);
+    Laia.Common.Airports.ScheduleLeg L(string reg, string fl) => new() { Airline = "DAL", Operator = "DAL", Type = "A321", Reg = reg, Flight = fl, Dep = "KXXX", Arr = "TEST" };
+    var far = world.SpawnArrival(45, false, L("N5", "55"))!;
+    var near = world.SpawnArrival(15, false, L("N6", "66"))!;
+    var before = far.Rwy!.Ident;
+    for (var t = 0.0; t < 20; t += 0.5) world.Step(0.5);
+    world.Wind = new Wind(90, 15);
+    world.SelectRunways(true);
+    for (var t = 0.0; t < 5; t += 0.5) world.Step(0.5);
+    Console.WriteLine($"  {log.LastOrDefault(x => x.StartsWith("Runway change")) ?? "(no runway change logged)"}; far one {before} → {far.Rwy!.Ident}, near one {near.Rwy!.Ident}");
+    Check(far.Rwy!.Ident != before && near.Rwy!.Ident == before, "the far arrival is given the new runway; the one 15 nm out finishes on the old one");
+    double land = -1;
+    for (var t = 0.0; t < 2400 && land < 0; t += 0.5) { world.Step(0.5); if (far.OnGround) land = world.Time; }
+    Check(land > 0 && far.Rwy!.Ident != before, "and lands on the new runway");
+}
+
 Console.WriteLine("== Published altitude restrictions on the STAR are met at their fixes");
 {
     var nm = Geo2.MPerNm;

@@ -151,6 +151,8 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                         other = f.Other, reg = f.Reg, wake = f.Wake.ToString(), title = f.Title,
                         eta = f.Kind == "arrival" && !f.OnGround && !double.IsNaN(f.EtaSec) ? Math.Round(Math.Max(0, f.EtaSec - (wd.Time - f.EtaAt))) : (double?)null,
                         seq = f.Kind == "arrival" && !f.OnGround ? f.Seq : 0,
+                        mgr = f.Kind == "arrival" && !f.OnGround && f.Mgr.Length > 0 ? f.Mgr : null,
+                        gapnm = f.Kind == "arrival" && !f.OnGround && !double.IsNaN(f.GapNm) ? Math.Round(f.GapNm, 1) : (double?)null,
                         dth = f.Kind == "arrival" && !f.OnGround ? Math.Round((f.ThrS - f.S) / Geo2.MPerNm, 1) : (double?)null,
                         fixes = f.Kind == "arrival" && !f.OnGround && f.FixEtas.Count > 0
                             ? f.FixEtas.Take(4).Select(x => new { fix = x.Fix, eta = Math.Round(Math.Max(0, x.At - wd.Time)) }).ToList() : null,
@@ -284,6 +286,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 prediction = w?.PredictionSummary,
                 restrictions = w?.RestrictionSummary,
                 separation = w?.SeparationSummary,
+                arrivalManager = w?.ArrivalManagerSummary,
                 navdata = nasrDb.Status,
                 routes = $"{routesDb.Status}{(w is null ? "" : $"; {w.RoutesUsed} SIDs/STARs from them so far; {w.FiledRoutesFlown} whole-sky flights on their filed airways")}",
                 rules = w?.Rules is { Charts.Length: > 0 } ru ? ru.Describe() : null,
