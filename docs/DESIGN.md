@@ -120,6 +120,7 @@ work runs on a second PC on the home network, so the sim PC stays fast.
 - **Pushback problems at KLGA** (0.1.49 survey): 8 stands where the push "turns among the gates" (Parking 61–86) and 1 that "faces a dead end" (Gate 46).
 - **Some real-gate airline codes look like codeshares** (WJA and VIR at KLGA). Check them against the AirLabs codeshare flag.
 - **The arrival spawn distance is 7–40 nm.** This will be replaced by the TRACON-wide world (step 1).
+- **To investigate — parallel taxiways by direction (user, 12 Nov 2026, MCO stress test on 0.1.154):** where a runway has two parallel taxiways, the one closest to the runway typically carries arrivals and the one farther away carries departures. This is guidance, not a hard rule. Seen at MCO: CMP459 and UAL413 taxiing out and GLO7602 taxiing in all on the same line. Idea: in taxi routing, prefer the inner parallel for taxi-in and the outer for taxi-out (a cost, not a ban), worked out from geometry (which of two parallel taxiways is nearer the runway), so it applies at every airport.
 
 ---
 
