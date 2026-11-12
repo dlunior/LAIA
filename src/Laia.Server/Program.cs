@@ -116,6 +116,7 @@ app.MapPost("/api/sim/state", async (HttpContext ctx, ServerState s, SimBriefSer
         try { var need = traffic.NeededAirports(st); if (need.Count > 0) reply.NeedAirports = need; } catch { }
         try { var sch = traffic.NeededSchedules(st); if (sch.Count > 0) reply.NeedSchedules = sch; } catch { }
         reply.NeedCatalog = !src.HasCatalog;
+        try { reply.Notices = traffic.UserNotices(); } catch { }
     }
     reply.NeedNetwork = src.HasCatalog && net.Wanted();
     return Results.Json(reply, jsonOpts);
@@ -151,6 +152,8 @@ app.MapPost("/api/network", async (HttpContext ctx, NetworkStore net) =>
     var n = await net.AddAsync(ctx.Request.Body, ctx.RequestAborted);
     return n > 0 ? Results.Json(new { ok = true, flights = n }, jsonOpts) : Results.BadRequest();
 });
+app.MapGet("/api/notices", (TrafficEngine t) => Results.Json(t.UserNotices(), jsonOpts));
+app.MapGet("/notices", () => Results.Content(NoticesPage.Html, "text/html; charset=utf-8"));
 app.MapGet("/api/map/real", (TrafficEngine t) => t.RealTracks() is { } r ? Results.Json(r, jsonOpts) : Results.NotFound());
 app.MapGet("/api/map/net/{id}", (string id, TrafficEngine t) => t.MapNetPath(id) is { } p ? Results.Json(p, jsonOpts) : Results.NotFound());
 app.MapPost("/api/traffic/catalog", async (HttpContext ctx, FlightSource src) =>

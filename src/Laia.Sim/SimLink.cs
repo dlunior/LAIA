@@ -26,6 +26,8 @@ internal sealed class SimLink : IDisposable
 
     public Func<ServerInfo?>? Server { get; set; }
     public event Action<string>? StatusChanged;
+    /// <summary>The Smart traffic notices from the server, each time a reply arrives (on a background thread).</summary>
+    public event Action<List<NoticeDto>>? NoticesChanged;
     public string Status { get; private set; } = "Waiting for MSFS";
     public bool Connected => _sc is not null && DateTime.UtcNow - _lastData < TimeSpan.FromSeconds(10);
 
@@ -185,6 +187,7 @@ internal sealed class SimLink : IDisposable
                         if (reply is not null)
                         {
                             tr.Update(reply.Traffic, reply.ServerTimeMs / 1000.0, reply.Motion ?? "laia");
+                            NoticesChanged?.Invoke(reply.Notices ?? new());
                             _airports.Request(reply.NeedAirports, server.BaseUrl, snap.Simulator, ct);
                             if (reply.NeedCatalog && _catalog is { } cat) _ = SendCatalogAsync(server.BaseUrl, cat, ct);
                             if (_catalog is { } cat2) _schedules.Request(reply.NeedSchedules, server.BaseUrl, cat2, ct);

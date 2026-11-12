@@ -134,7 +134,7 @@ public sealed class Flight
 /// along the real departure procedure, arrivals along the real arrival and approach, spacing on final,
 /// landing, runway exit and taxi to a gate. Pure logic (no simulator or network), so it can be tested offline.
 /// </summary>
-public sealed class TrafficWorld
+public sealed partial class TrafficWorld
 {
     public const int Nav = 1, Beacon = 2, Strobes = 4, Landing = 8, Taxi = 16, Logo = 32, Wing = 64, Cabin = 128;
     private const double G = 9.81;
@@ -447,16 +447,22 @@ public sealed class TrafficWorld
         // Landing order on each runway, by predicted time, and the arrival manager: each arrival's slot is the later of
         // its own unhindered time and the slot ahead plus the gap needed; the difference is the delay it should lose
         // far out with speed (cruise and descent slower), so it reaches the approach already spaced instead of holding.
-        foreach (var g in Flights.Where(f => f.Kind == "arrival" && !f.OnGround && !f.Done && !double.IsNaN(f.EtaSec) && f.Rwy is not null && f.Phase != "go-around").GroupBy(f => f.Rwy!.Runway))
+        // The user takes part with a generous planned slot (M8): LAIA's arrivals space around it.
+        try { UpdateUserArrival(); } catch { UserArr = null; }
+        var sequenced = Flights.Where(f => f.Kind == "arrival" && !f.OnGround && !f.Done && !double.IsNaN(f.EtaSec) && f.Rwy is not null && f.Phase != "go-around").ToList();
+        if (UserArr is { } ua) sequenced.Add(ua);
+        foreach (var g in sequenced.GroupBy(f => f.Rwy!.Runway))
         {
             var i = 0;
             Flight? prev = null; double prevSlot = 0;
             // Frozen arrivals (inside ~15 minutes) keep their place; the rest are ordered by their own unhindered time.
-            foreach (var f in g.OrderBy(f => f.Frozen ? f.FrozenSlot : f.EtaNominal))
+            var ordered = g.OrderBy(f => f.Frozen ? f.FrozenSlot : f.EtaNominal).ToList();
+            foreach (var f in ordered)
             {
                 f.Seq = ++i;
                 var slot = f.EtaNominal;
                 if (prev is not null) slot = Math.Max(slot, prevSlot + ThresholdGapNeeded(prev, f, forDepartures: false) + 15);
+                if (f == UserArr) { prev = f; prevSlot = slot; continue; }
                 f.Delay = slot - f.EtaNominal;
                 if (f.Frozen) f.FrozenSlot = Math.Max(f.FrozenSlot, slot);
                 else if (f.EtaSec < 900) { f.Frozen = true; f.FrozenSlot = slot; }
@@ -464,7 +470,9 @@ public sealed class TrafficWorld
                 f.Slowed = f.SlowDv > 0;
                 prev = f; prevSlot = slot;
             }
+            if (UserArr is { } me && ordered.Contains(me)) DescribeUserSequence(ordered);
         }
+        try { UpdateNotices(); } catch { }
         Flights.RemoveAll(f => f.Done);
     }
 
@@ -2896,7 +2904,9 @@ public sealed class TrafficWorld
         // crosses it) — not because some other runway has a queue.
         var mine = forDepartures && mixed && DeparturesFor(r => r == f.Rwy.Runway);
         var cross = forDepartures && !mine && crossing && DeparturesFor(r => deps.Any(d => d.Runway == r && Crossing(f.Rwy, d) is not null));
-        return Math.Max(wake, occupancy) + 10 + (mine ? 70 : cross ? 30 : 0);
+        var need = Math.Max(wake, occupancy) + 10 + (mine ? 70 : cross ? 30 : 0);
+        // The human gets a generous gap either side (about 10–12 nm between the aircraft around them).
+        return leader == UserArr || f == UserArr ? Math.Max(need, UserSideGapSec) : need;
     }
 
     /// <summary>
@@ -3770,7 +3780,7 @@ public sealed class TrafficWorld
             // Spacing behind the arrival ahead on the same runway.
             Flight? leader = null;
             var leaderD = double.MinValue;
-            foreach (var o in Flights)
+            foreach (var o in UserArr is { } uaf ? Flights.Append(uaf) : Flights)
             {
                 if (o == f || o.Kind != "arrival" || o.Rwy?.Runway != rwy.Runway || o.Phase == "go-around") continue;
                 var od = o.OnGround ? -1 : (o.ThrS - o.S) / Geo2.MPerNm;
@@ -3781,7 +3791,7 @@ public sealed class TrafficWorld
                 // Measured and predicted all the time: the gap now, and the predicted gap when each crosses the
                 // threshold (compression: the leader slows to its approach speed first), against the gap needed there.
                 var gap = dth - leaderD;
-                var gapSec = EtaToThreshold(f, dth) - EtaToThreshold(leader, leaderD);
+                var gapSec = EtaToThreshold(f, dth) - (leader == UserArr ? leader.EtaSec : EtaToThreshold(leader, leaderD));
                 var needSec = ThresholdGapNeeded(leader, f);
                 var needNm = Cwt.MilesBehind(leader.Wake, f.Wake);
                 // Speed first (7110.65 5-7-1), never below what a controller may assign (5-7-3: jets 210 kt below

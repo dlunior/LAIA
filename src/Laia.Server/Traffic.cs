@@ -9,7 +9,7 @@ namespace Laia.Server;
 /// Without a layout (or for the test buttons at an airport not read yet) a simple runway-only world is used.
 /// </summary>
 public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportStore airports, FlightSource source, SettingsStore settings,
-    SimBriefService simbrief, ServerState state, ScheduleStore schedules, NetworkStore network, WorldAirports worldAirports, RoutesDb routesDb, NasrDb nasrDb, AdsbHistory history, MetarReader metar, LiveRunways liveRunways, ILogger<TrafficEngine> log) : BackgroundService
+    SimBriefService simbrief, ServerState state, ScheduleStore schedules, NetworkStore network, WorldAirports worldAirports, RoutesDb routesDb, NasrDb nasrDb, AdsbHistory history, MetarReader metar, LiveRunways liveRunways, SimBriefService simBrief, ILogger<TrafficEngine> log) : BackgroundService
 {
     private readonly object _gate = new();
     private readonly List<TrafficWorld> _neighbours = new();
@@ -221,6 +221,19 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     }
 
     /// <summary>A network flight's great-circle route: flown so far and still to go.</summary>
+    /// <summary>Smart traffic mode notices for the user (M8), from the traffic airport (and a neighbour the user is at).</summary>
+    public List<Laia.Common.SimConnect.NoticeDto> UserNotices()
+    {
+        lock (_gate)
+        {
+            var res = new List<Laia.Common.SimConnect.NoticeDto>();
+            foreach (var w in Worlds())
+                foreach (var n in w.Notices)
+                    res.Add(new() { Id = w.Apt.Icao + ":" + n.Id, Text = n.Text, Warning = n.Warning });
+            return res.Take(5).ToList();
+        }
+    }
+
     /// <summary>Real tracks (adsb.lol) learned for the airport, for the map: a sample of arrivals and departures per runway.</summary>
     public object? RealTracks()
     {
@@ -511,6 +524,11 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                             else if (dNm < 15 && sim.AltitudeFt < w.Apt.ElevationFt + 5000) w.Wind = new Wind(sim.WindDirection, sim.WindSpeed);
                             w.UserPos = w.Apt.Map.ToXY(sim.Lat, sim.Lon);
                             w.UserOnGround = sim.OnGround;
+                            w.UserAltFt = sim.AltitudeFt; w.UserGs = sim.GroundSpeed; w.UserTrack = sim.HeadingTrue;
+                            var plan = simBrief.Plan;
+                            w.UserCallsign = plan?.Callsign is { Length: > 0 } pc ? pc : (sim.AtcAirline + " " + sim.AtcFlightNumber).Trim() is { Length: > 0 } ac ? ac : sim.AtcId;
+                            w.UserType = plan?.Aircraft ?? "";
+                            w.UserDestination = plan?.Destination;
                         }
                         if (w == _world || _neighbours.Contains(w))
                         {

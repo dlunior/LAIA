@@ -35,6 +35,9 @@ public sealed class SimSettings
     public string? SpeakerDeviceId { get; set; }
     public int Volume { get; set; } = 90;
     public bool RadioClicks { get; set; } = true;
+    /// <summary>Smart traffic notices window (M8), and whether new warnings are spoken.</summary>
+    public bool ShowNotices { get; set; } = true;
+    public bool SpeakNotices { get; set; }
 
     private static string PathOnDisk => System.IO.Path.Combine(Log.Dir, "sim-settings.json");
     private static readonly JsonSerializerOptions Opts = new() { WriteIndented = true };

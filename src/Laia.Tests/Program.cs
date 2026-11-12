@@ -1083,6 +1083,56 @@ Console.WriteLine("== No ATIS: real traffic picks the runways before the wind (l
     Check(byWind == "09" && byLearned == "27" && byLive == "09" && world.DepRwy!.Ident == "09", "the learned day beats a light wind; live traffic beats both");
 }
 
+Console.WriteLine("== M8 Smart traffic notices: the user's place in the sequence (generous gap) and runway notices on the ground");
+{
+    var nm = Geo2.MPerNm;
+    var world = new TrafficWorld(new AirportModel(TestAirport.Build(false)), new TestSource(), seed: 14) { Automatic = false, Wind = new Wind(270, 10) };
+    var log = new List<string>(); world.Log = s2 => log.Add(s2);
+    world.SelectRunways(true);
+    var r = world.ArrRwy!;
+    Laia.Common.Airports.ScheduleLeg L(string reg, string fl) => new() { Airline = "DAL", Operator = "DAL", Type = "A321", Reg = reg, Flight = fl, Dep = "KXXX", Arr = "TEST" };
+    var a = world.SpawnArrival(18, false, L("N71", "71"))!;
+    var b = world.SpawnArrival(30, false, L("N72", "72"))!;
+    // The user: straight in on the final, 24 nm out, between the two.
+    var u = r.Threshold - r.Dir * (24 * nm);
+    world.UserCallsign = "N123AB"; world.UserType = "C172"; world.UserDestination = "TEST";
+    world.UserOnGround = false; world.UserTrack = r.Heading; world.UserGs = 160; world.UserAltFt = 6000;
+    double landA = -1, landB = -1, userLand = -1;
+    string? firstSeq = null;
+    for (var t = 0.0; t < 2400 && (landB < 0 || userLand < 0); t += 0.5)
+    {
+        if (userLand < 0)
+        {
+            var left = -r.Along(u) / nm;
+            var kt = left > 6 ? 160 : 110;
+            u += r.Dir * (kt * Geo2.MpsPerKt * 0.5);
+            world.UserGs = kt; world.UserAltFt = Math.Max(0, Math.Min(6000, left * 318));
+            if (r.Along(u) >= 0) userLand = world.Time;
+        }
+        world.UserPos = u;
+        world.Step(0.5);
+        if (firstSeq is null && world.Notices.FirstOrDefault(n => n.Id == "seq") is { } sq) firstSeq = sq.Text;
+        if (landA < 0 && a.OnGround) landA = world.Time;
+        if (landB < 0 && b.OnGround) landB = world.Time;
+    }
+    Console.WriteLine($"  notice: {firstSeq}");
+    Console.WriteLine($"  landings: DAL71 {landA:0}, you {userLand:0}, DAL72 {landB:0} → DAL72 {landB - userLand:0} s behind you");
+    Check(firstSeq is not null && firstSeq.Contains("Number 2") && firstSeq.Contains("DAL71") && firstSeq.Contains("DAL72"), "the user is told their number and the two aircraft they're between");
+    Check(landB - userLand >= 125, "LAIA's arrival behind the user leaves the generous gap (about 140 s, 5–6 nm)");
+
+    // On the ground: the user holding short of the runway with an arrival on short final.
+    var world2 = new TrafficWorld(new AirportModel(TestAirport.Build(false)), new TestSource(), seed: 15) { Automatic = false, Wind = new Wind(270, 10) };
+    world2.SelectRunways(true);
+    var r2 = world2.ArrRwy!;
+    var arr = world2.SpawnArrival(6, false, L("N73", "73"))!;
+    world2.UserOnGround = true; world2.UserGs = 0; world2.UserTrack = r2.Heading + 90;
+    world2.UserPos = r2.Threshold + r2.Dir * 150 + new V2(-r2.Dir.Y, r2.Dir.X) * 60;   // beside the runway near this end
+    string? fin = null;
+    for (var t = 0.0; t < 120 && fin is null; t += 0.5) { world2.Step(0.5); fin = world2.Notices.FirstOrDefault(n => n.Text.Contains("final"))?.Text; }
+    Console.WriteLine($"  on the ground: {fin}");
+    Check(fin is not null && fin.Contains("DAL73") && fin.Contains("don't line up"), "holding short with traffic on final: a notice, not an instruction to the AI");
+}
+
 Console.WriteLine("== Neighbouring fields: runway traffic only, on the main airport's clock; satellite STARs are a last resort");
 {
     var nm = Geo2.MPerNm;

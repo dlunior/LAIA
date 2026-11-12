@@ -116,3 +116,63 @@ internal sealed class RadioLogForm : Form
         _box.ScrollToCaret();
     }
 }
+
+
+/// <summary>
+/// Smart traffic notices (M8): a small always-on-top window that shows only what matters now — traffic on final or on
+/// the runway, traffic crossing downfield, a runway or taxiway about to be busy, traffic waiting for you, and your place
+/// in the arrival sequence. Never instructions. Warnings in amber, the rest in blue; empty when there's nothing.
+/// </summary>
+internal sealed class NoticesForm : Form
+{
+    private readonly FlowLayoutPanel _list;
+    private readonly Label _empty;
+
+    public NoticesForm()
+    {
+        Theme.Apply(this);
+        Text = "LAIA - Traffic notices";
+        Icon = Theme.AppIcon(32);
+        StartPosition = FormStartPosition.Manual;
+        Size = new Size(460, 190);
+        MinimumSize = new Size(300, 110);
+        TopMost = true;
+        ShowInTaskbar = false;
+        _list = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoScroll = true, BackColor = Theme.Bg, Padding = new Padding(10, 8, 6, 8) };
+        _empty = new Label { Text = "No traffic notices", AutoSize = true, ForeColor = Theme.Muted, Font = new Font("Segoe UI", 10.5f), Margin = new Padding(4, 6, 4, 4) };
+        _list.Controls.Add(_empty);
+        Controls.Add(_list);
+        Theme.Done(this);
+        var placed = false;
+        Shown += (_, _) =>
+        {
+            if (placed) return;
+            placed = true;
+            var wa = Screen.FromControl(this).WorkingArea;
+            Location = new Point(wa.Right - Width - 24, wa.Top + 24);
+        };
+        FormClosing += (_, e) => { if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); } };
+        _list.Resize += (_, _) => { foreach (Control c in _list.Controls) if (c is Label l && l != _empty) l.MaximumSize = new Size(_list.ClientSize.Width - 24, 0); };
+    }
+
+    private string _shown = "";
+
+    public void Show(List<Laia.Common.SimConnect.NoticeDto> notices)
+    {
+        if (IsDisposed) return;
+        var key = string.Join("|", notices.Select(n => n.Id + n.Text));
+        if (key == _shown) return;
+        _shown = key;
+        _list.SuspendLayout();
+        _list.Controls.Clear();
+        if (notices.Count == 0) _list.Controls.Add(_empty);
+        foreach (var n in notices)
+            _list.Controls.Add(new Label
+            {
+                Text = n.Text, AutoSize = true, MaximumSize = new Size(Math.Max(200, _list.ClientSize.Width - 24), 0),
+                ForeColor = n.Warning ? Color.FromArgb(245, 165, 36) : Color.FromArgb(76, 195, 255),
+                Font = new Font("Segoe UI", 11.5f, FontStyle.Bold), Margin = new Padding(4, 4, 4, 6),
+            });
+        _list.ResumeLayout();
+    }
+}

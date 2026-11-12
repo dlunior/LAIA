@@ -17,6 +17,10 @@ internal sealed class TrayApp : ApplicationContext
     private readonly Recorder _recorder = new();
     private readonly ServerLink _link = new();
     private readonly RadioLogForm _radioLog = new();
+    private readonly NoticesForm _notices = new();
+    private ToolStripMenuItem _noticesItem = null!, _speakItem = null!;
+    private readonly HashSet<string> _spoken = new();
+    private System.Speech.Synthesis.SpeechSynthesizer? _voice;
     private readonly SimLink _sim = new();
     private readonly ToolStripMenuItem _simItem = new("Waiting for MSFS") { Enabled = false };
     private readonly ToolStripMenuItem _statusItem;
@@ -54,6 +58,10 @@ internal sealed class TrayApp : ApplicationContext
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(_pttItem);
         menu.Items.Add(_logItem);
+        _noticesItem = new ToolStripMenuItem("Show traffic notices", null, (_, _) => ToggleNotices()) { Checked = _settings.ShowNotices };
+        _speakItem = new ToolStripMenuItem("Speak traffic notices", null, (_, _) => { _settings.SpeakNotices = !_settings.SpeakNotices; _speakItem.Checked = _settings.SpeakNotices; _settings.Save(); }) { Checked = _settings.SpeakNotices };
+        menu.Items.Add(_noticesItem);
+        menu.Items.Add(_speakItem);
         menu.Items.Add(new ToolStripMenuItem("Open ATC control page", null, (_, _) => OpenControlPage()));
         menu.Items.Add(_updateItem);
         menu.Items.Add(new ToolStripSeparator());
@@ -77,6 +85,8 @@ internal sealed class TrayApp : ApplicationContext
         _sim.Server = () => _server;
         var ui = SynchronizationContext.Current;
         _sim.StatusChanged += st => ui?.Post(_ => _simItem.Text = st, null);
+        _ = _notices.Handle;   // so notices can be posted to it before it's first shown
+        _sim.NoticesChanged += OnNotices;
         _sim.Start();
 
         _updates.Changed += () => ui?.Post(_ => RefreshUpdateItem(), null);
@@ -321,6 +331,41 @@ internal sealed class TrayApp : ApplicationContext
         }
         _logItem.Checked = _settings.ShowTranscript;
         _settings.Save();
+    }
+
+    private void ToggleNotices()
+    {
+        _settings.ShowNotices = !_settings.ShowNotices;
+        if (_settings.ShowNotices) _notices.Show(); else _notices.Hide();
+        _noticesItem.Checked = _settings.ShowNotices;
+        _settings.Save();
+    }
+
+    /// <summary>New notices from the server: shown in the notices window; new warnings and sequence changes spoken
+    /// (Windows' built-in voice) when that's on. Each notice is spoken once while it lasts.</summary>
+    private void OnNotices(List<Laia.Common.SimConnect.NoticeDto> list)
+    {
+        try
+        {
+            _notices.BeginInvoke(() =>
+            {
+                if (_settings.ShowNotices && list.Count > 0 && !_notices.Visible) _notices.Show();
+                _notices.Show(list);
+                if (_settings.SpeakNotices)
+                {
+                    foreach (var n in list)
+                    {
+                        // A sequence notice is spoken again only when its text changes (a new number or new neighbours).
+                        var key = n.Id.EndsWith(":seq") ? n.Id + n.Text : n.Id;
+                        if (!_spoken.Add(key)) continue;
+                        if (!n.Warning && !n.Id.EndsWith(":seq")) continue;
+                        try { (_voice ??= new System.Speech.Synthesis.SpeechSynthesizer()).SpeakAsync(n.Text.Replace(" — ", ". ")); } catch { }
+                    }
+                    _spoken.RemoveWhere(k => !list.Any(n => k.StartsWith(n.Id)));
+                }
+            });
+        }
+        catch { }
     }
 
     private void OpenControlPage()

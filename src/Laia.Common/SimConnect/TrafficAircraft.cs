@@ -43,4 +43,14 @@ public sealed class SimStateReply
     public bool NeedCatalog { get; set; }
     /// <summary>True when the server wants every AIG schedule (the whole sky), not just its airports'.</summary>
     public bool NeedNetwork { get; set; }
+    /// <summary>Smart traffic mode notices for the user (M8): only what matters now, never an instruction.</summary>
+    public List<NoticeDto>? Notices { get; set; }
+}
+
+/// <summary>One notice: a stable id (to tell new ones from ones already shown), the text, and whether it's a warning.</summary>
+public sealed class NoticeDto
+{
+    public string Id { get; set; } = "";
+    public string Text { get; set; } = "";
+    public bool Warning { get; set; }
 }
