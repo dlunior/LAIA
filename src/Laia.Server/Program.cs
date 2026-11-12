@@ -154,6 +154,7 @@ app.MapPost("/api/network", async (HttpContext ctx, NetworkStore net) =>
 });
 app.MapGet("/api/notices", (TrafficEngine t) => Results.Json(t.UserNotices(), jsonOpts));
 app.MapGet("/notices", () => Results.Content(NoticesPage.Html, "text/html; charset=utf-8"));
+app.MapGet("/api/map/flow", (TrafficEngine t) => t.TaxiFlowMap() is { } r ? Results.Json(r, jsonOpts) : Results.NotFound());
 app.MapGet("/api/map/real", (TrafficEngine t) => t.RealTracks() is { } r ? Results.Json(r, jsonOpts) : Results.NotFound());
 app.MapGet("/api/map/net/{id}", (string id, TrafficEngine t) => t.MapNetPath(id) is { } p ? Results.Json(p, jsonOpts) : Results.NotFound());
 app.MapPost("/api/traffic/catalog", async (HttpContext ctx, FlightSource src) =>

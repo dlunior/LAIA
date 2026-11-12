@@ -1338,6 +1338,36 @@ Console.WriteLine("== Peak-hour test setting replays the busiest hours now");
     Check(airborne >= 4, $"the rush is replayed now, at night ({airborne} departures in 40 min)");
 }
 
+Console.WriteLine("== Taxi flow: the inner parallel for arrivals, the outer for departures, one-way stretches");
+{
+    var apt = new AirportModel(TestAirport.Build(false, twoParallels: true));
+    var world = new TrafficWorld(apt, new TestSource(), seed: 4) { Level = TrafficLevel.Busy, Wind = new Wind(270, 10), WaitForTaxiFlow = true };
+    world.SelectRunways(true);
+    world.Step(0.25);
+    var fl = world.Flow;
+    Console.WriteLine("  " + (fl is null ? "(no taxi flow)" : fl.Key + ": " + fl.Summary));
+    Check(fl is not null && fl.InnerEdges > 0 && fl.OuterEdges > 0, $"taxiway A is found as the inner parallel and B as the outer ({fl?.InnerEdges} / {fl?.OuterEdges})");
+    Check(fl is not null && fl.OneWay > 0, $"one-way stretches found ({fl?.OneWay})");
+    // An arrival from the first exit to a gate, and a departure from that gate to the runway: which parallel each uses.
+    var rwy = world.ArrRwys[0];
+    var gate = apt.Spots[8];
+    var exit = TaxiFlow.Exits(apt, rwy, gate.P)[0];
+    double OnName(List<int>? r, string name)
+    {
+        if (r is null) return -1;
+        double on = 0;
+        for (var i = 0; i + 1 < r.Count; i++)
+            if (apt.Adj[r[i]].FirstOrDefault(e => e.B == r[i + 1]) is { } e && e.Name == name) on += e.Len;
+        return on;
+    }
+    var inRoute = apt.Route(exit, gate.Access, null, null, (u, v, len) => fl!.Cost(u, v, len, true));
+    var hold = TaxiFlow.Exits(apt, world.DepRwys[0], gate.P).Count >= 0 ? apt.RunwayLinks(world.DepRwys[0].Runway).OrderBy(l => world.DepRwys[0].Along(apt.Nodes[l.on])).First().off : -1;
+    var outRoute = apt.Route(gate.Access, hold, null, null, (u, v, len) => fl!.Cost(u, v, len, false));
+    Console.WriteLine($"  arrival taxi in: {OnName(inRoute, "A"):0} m on A, {OnName(inRoute, "B"):0} m on B; departure taxi out: {OnName(outRoute, "A"):0} m on A, {OnName(outRoute, "B"):0} m on B");
+    Check(OnName(inRoute, "A") > OnName(inRoute, "B"), "the arrival taxis in mostly on the inner taxiway A");
+    Check(OnName(outRoute, "B") > OnName(outRoute, "A"), "the departure taxis out mostly on the outer taxiway B");
+}
+
 Console.WriteLine("== Traffic starts even when no installed model fits the small gates");
 {
     var apt = new AirportModel(TestAirport.Build(false));
@@ -1438,7 +1468,7 @@ sealed class TestSource : IFlightSource
 /// <summary>A made-up airport: runway 09/27 (3,000 m), a parallel taxiway, six connectors, an apron with 16 gates.</summary>
 static class TestAirport
 {
-    public static AirportData Build(bool swapAxes)
+    public static AirportData Build(bool swapAxes, bool twoParallels = false)
     {
         var map = new LocalMap(40, -75);
         var d = new AirportData { Icao = "TEST", Name = "Test Field", Lat = 40, Lon = -75, ElevationM = 10, MagVar = -12, ScannedUtc = DateTime.UtcNow };
@@ -1449,7 +1479,8 @@ static class TestAirport
             d.Points.Add(swapAxes ? new TaxiPoint { Type = type, BiasX = y, BiasZ = x } : new TaxiPoint { Type = type, BiasX = x, BiasZ = y });
             return d.Points.Count - 1;
         }
-        void Path(int a, int b, int type = 1) => d.Paths.Add(new TaxiPath { Type = type, Start = a, End = b, WidthM = 23 });
+        void Path(int a, int b, int type = 1, int name = 0) => d.Paths.Add(new TaxiPath { Type = type, Start = a, End = b, WidthM = 23, NameIndex = name });
+        if (twoParallels) d.TaxiNames.AddRange(new[] { "", "A", "B", "J" });   // index 0 stays unnamed for everything else
         // Runway centreline points every 300 m.
         var rw = new List<int>();
         for (var x = -1500; x <= 1500; x += 300) rw.Add(Pt(x, 0));
@@ -1457,13 +1488,21 @@ static class TestAirport
         // Parallel taxiway at y = -200, every 300 m.
         var tw = new Dictionary<int, int>();
         for (var x = -1500; x <= 1500; x += 300) tw[x] = Pt(x, -200);
-        for (var x = -1500; x < 1500; x += 300) Path(tw[x], tw[x + 300]);
+        for (var x = -1500; x < 1500; x += 300) Path(tw[x], tw[x + 300], name: twoParallels ? 2 : 0);
+        // With two parallels: an inner taxiway A at y = -140 (nearer the runway) and the outer one, B, at y = -200.
+        var inner = new Dictionary<int, int>();
+        if (twoParallels)
+        {
+            for (var x = -1500; x <= 1500; x += 300) inner[x] = Pt(x, -140);
+            for (var x = -1500; x < 1500; x += 300) Path(inner[x], inner[x + 300], name: 1);
+        }
         // Connectors with hold-short points.
         foreach (var x in new[] { -1500, -900, -300, 300, 900, 1500 })
         {
             var hold = Pt(x, -95, 2);
-            Path(rw[(x + 1500) / 300], hold);
-            Path(hold, tw[x]);
+            Path(rw[(x + 1500) / 300], hold, name: twoParallels ? 3 : 0);
+            if (twoParallels) { Path(hold, inner[x], name: 3); Path(inner[x], tw[x], name: 3); }
+            else Path(hold, tw[x]);
         }
         // Apron lane at y = -280 linked to the taxiway at x = -600, 0, 600 (via the taxiway points nearby).
         var lane = new Dictionary<int, int>();

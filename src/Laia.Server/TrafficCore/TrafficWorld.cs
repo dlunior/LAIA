@@ -464,6 +464,7 @@ public sealed partial class TrafficWorld
     {
         Time += dt;
         if (ArrRwy is null || Time - _lastRunwayCheck > 120) { SelectRunways(); _lastRunwayCheck = Time; }
+        UpdateTaxiFlow();
         foreach (var f in Flights)
         {
             f.Age += dt;
@@ -1361,6 +1362,58 @@ public sealed partial class TrafficWorld
         return (u, v, len) => used.Contains((v, u)) ? 250 + len * 5 : 0;
     }
 
+    // ------------------------------------------------------------------ taxi flow (TaxiFlow)
+    private TaxiFlow? _flow;
+    private string _flowKey = "";
+    private Task<TaxiFlow>? _flowTask;
+    /// <summary>The taxi flow for the runways in use (null until the airport has ground data and runways).</summary>
+    public TaxiFlow? Flow => _flow;
+    /// <summary>Set false to keep the taxi flow from being worked out (tests that compare without it).</summary>
+    public bool UseTaxiFlow { get; set; } = true;
+    /// <summary>Tests: wait for the background work and take it now.</summary>
+    public bool WaitForTaxiFlow { get; set; }
+
+    /// <summary>
+    /// When the runways in use change, the parallel-taxiway preference applies at once and the full flow (rehearsed
+    /// routes and directions) is worked out in the background, then taken over and logged.
+    /// </summary>
+    private void UpdateTaxiFlow()
+    {
+        if (!UseTaxiFlow || !Apt.HasGround || RunwayOnly || ArrRwys.Count == 0 || DepRwys.Count == 0) return;
+        if (_flowTask is { IsCompleted: true } t)
+        {
+            _flowTask = null;
+            if (t.IsCompletedSuccessfully && t.Result.Key == _flowKey)
+            {
+                _flow = t.Result;
+                Log($"{Apt.Icao}: taxi flow for {_flowKey}: {_flow.Summary}");
+            }
+            else if (t.IsFaulted) Log($"{Apt.Icao}: taxi flow couldn't be worked out: {t.Exception?.InnerException?.Message}");
+        }
+        var key = $"landing {string.Join("/", ArrRwys.Select(r => r.Ident))}, departing {string.Join("/", DepRwys.Select(r => r.Ident))}";
+        if (key == _flowKey) return;
+        _flowKey = key;
+        _flow = TaxiFlow.Sides(Apt, ArrRwys.Concat(DepRwys).ToList(), key);
+        // The hold-short node each departure runway would use from each stand, picked here (same as the real taxi out).
+        var holds = new Dictionary<(AirportModel.ParkingSpot, RunwayEnd), int>();
+        foreach (var sp in TaxiFlow.RehearsalStands(Apt))
+            foreach (var d in DepRwys)
+                holds[(sp, d)] = PickRunwayEntry(d, out _, sp.P);
+        var arr = ArrRwys.ToList(); var dep = DepRwys.ToList(); var active = ActiveRunways();
+        _flowTask = Task.Run(() => TaxiFlow.Build(Apt, arr, dep, active, (d, sp) => holds.GetValueOrDefault((sp, d), -1), key));
+        if (WaitForTaxiFlow) { _flowTask.Wait(); UpdateTaxiFlow(); }
+    }
+
+    /// <summary>The taxi route's extra costs: traffic coming the other way, and the airport's taxi flow.</summary>
+    private Func<int, int, double, double> TaxiCost(Flight f)
+    {
+        var opp = OpposingTraffic(f);
+        var flow = _flow;
+        if (flow is null) return opp;
+        var inbound = f.Kind == "arrival";
+        return (u, v, len) => opp(u, v, len) + flow.Cost(u, v, len, inbound);
+    }
+
     /// <summary>A new taxi route from where the aircraft is, avoiding the area around another aircraft.</summary>
     private bool Reroute(Flight f, Flight other) => Reroute(f, other.Pos, other.Callsign);
 
@@ -1396,7 +1449,7 @@ public sealed partial class TrafficWorld
                 if (d < best) { best = d; from = i; }
             }
         if (from < 0 || best > (onOwn ? 300 : 40)) return false;
-        var route = Apt.Route(from, dest, ActiveRunways(), avoid, OpposingTraffic(f));
+        var route = Apt.Route(from, dest, ActiveRunways(), avoid, TaxiCost(f));
         if (route is null) return false;
         var pts = new List<V2> { f.Pos };
         var fwd = V2.FromBearing(f.Heading);
@@ -1541,7 +1594,7 @@ public sealed partial class TrafficWorld
         // …and from the first taxi point, don't double straight back along the line the aircraft is on.
         foreach (var e in Apt.Adj[from])
             if (e.B != f.HoldNode && V2.Dot((Apt.Nodes[e.B] - Apt.Nodes[from]).Unit, nose) < -0.5) behind.Add(e.B);
-        var opp = OpposingTraffic(f);
+        var opp = TaxiCost(f);
         var route = Apt.Route(from, f.HoldNode, ActiveRunways(), behind, opp) ?? Apt.Route(from, f.HoldNode, ActiveRunways(), null, opp);
         if (route is null) { Log($"{f.Callsign}: no taxi route to runway {f.Rwy!.Ident}"); return false; }
         // Stop at the painted hold-short line, not at the edge of the runway.
@@ -3310,7 +3363,7 @@ public sealed partial class TrafficWorld
             {
                 exit ??= c;
                 if (gate is null) break;
-                taxi = Apt.Route(c.off, gate.Access, ActiveRunways(), null, OpposingTraffic(f));
+                taxi = Apt.Route(c.off, gate.Access, ActiveRunways(), null, TaxiCost(f));
                 if (taxi is not null) { exit = c; break; }
             }
             if (taxi is null) gate = null;

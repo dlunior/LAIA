@@ -75,6 +75,7 @@
       <label><input type="checkbox" id="tFollow">Follow me</label>
       <label><input type="checkbox" id="tSky" checked>Whole sky</label>
       <label><input type="checkbox" id="tReal">Real tracks</label>
+      <label title="The planned direction of each one-way stretch of taxiway: violet arrivals, teal departures"><input type="checkbox" id="tFlow">Taxi flow</label>
     </div>
     <div style="margin-top:8px;display:flex;gap:6px"><button id="bAirport">Airport</button><button id="bMe">Me</button><button id="bList">Flights</button></div>
   </div>
@@ -95,7 +96,7 @@ L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png?key=c
   attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>'
 }).addTo(map);
 
-const layers = { real: L.layerGroup().addTo(map), rwy: L.layerGroup().addTo(map), ring: L.layerGroup().addTo(map), paths: L.layerGroup().addTo(map), sel: L.layerGroup().addTo(map), ac: L.layerGroup().addTo(map) };
+const layers = { flow: L.layerGroup().addTo(map), real: L.layerGroup().addTo(map), rwy: L.layerGroup().addTo(map), ring: L.layerGroup().addTo(map), paths: L.layerGroup().addTo(map), sel: L.layerGroup().addTo(map), ac: L.layerGroup().addTo(map) };
 const markers = new Map();      // id -> marker
 const skyRenderer = L.canvas({ padding: .3 });
 const skyLayer = L.layerGroup().addTo(map);
@@ -240,6 +241,32 @@ async function updateReal() {
   } catch { }
 }
 
+// The taxi flow (one-way stretches worked out from the layout for the runways in use), with arrows.
+let flowAt = 0, flowKey = "";
+async function updateFlow() {
+  if (!$("tFlow").checked) { layers.flow.clearLayers(); flowAt = 0; flowKey = ""; return; }
+  if (Date.now() - flowAt < 20000) return;
+  flowAt = Date.now();
+  try {
+    const r = await fetch("/api/map/flow", { cache: "no-store" });
+    if (!r.ok) { layers.flow.clearLayers(); return; }
+    const d = await r.json();
+    if (d.key + d.stretches.length === flowKey) return;
+    flowKey = d.key + d.stretches.length;
+    layers.flow.clearLayers();
+    for (const st of d.stretches) {
+      const col = st.departures ? "#2dd4bf" : "#a78bfa";
+      L.polyline(st.points, { color: col, weight: 3, opacity: .55, interactive: false }).addTo(layers.flow);
+      for (let i = 0; i + 1 < st.points.length; i++) {
+        const [a, b] = [st.points[i], st.points[i + 1]];
+        const brg = Math.atan2((b[1] - a[1]) * Math.cos(a[0] * Math.PI / 180), b[0] - a[0]) * 180 / Math.PI;
+        const icon = L.divIcon({ className: "", iconSize: [14, 14], iconAnchor: [7, 7], html: `<div style="transform:rotate(${brg}deg);color:${col};font-size:13px;line-height:14px;text-align:center">▲</div>` });
+        L.marker([(a[0] + b[0]) / 2, (a[1] + b[1]) / 2], { icon, interactive: false, keyboard: false }).addTo(layers.flow);
+      }
+    }
+  } catch { }
+}
+
 function updateSky() {
   const show = $("tSky").checked;
   const seen = new Set();
@@ -339,6 +366,7 @@ function render() {
   updateUser(data.user);
   updateSky();
   updateReal();
+  updateFlow();
   renderList();
   renderSeq();
   if (selected) { const f = findSel(selected); if (f) renderSel(f); else { selected = null; $("sel").hidden = true; layers.sel.clearLayers(); } }

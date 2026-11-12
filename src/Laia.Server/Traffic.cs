@@ -252,6 +252,25 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         };
     }
 
+    /// <summary>The main airport's taxi flow for the map: one-way stretches with their direction.</summary>
+    public object? TaxiFlowMap()
+    {
+        lock (_gate)
+        {
+            var w = _world;
+            if (w?.Flow is not { } fl) return null;
+            return new
+            {
+                key = fl.Key, summary = fl.Summary,
+                stretches = fl.Stretches.Select(st => new
+                {
+                    name = st.name, departures = st.departures,
+                    points = st.pts.Select(q => { var (la, lo) = w.Apt.Map.ToLatLon(q); return new[] { Math.Round(la, 6), Math.Round(lo, 6) }; }),
+                }),
+            };
+        }
+    }
+
     public object? MapNetPath(string id)
     {
         var l = network.Find(id);
