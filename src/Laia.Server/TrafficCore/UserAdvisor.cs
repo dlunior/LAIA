@@ -90,6 +90,7 @@ public sealed partial class TrafficWorld
         // The runway: the one it already has while it's still in use, else the one on the user's side of the field.
         if (f.Rwy is null || !arrs.Contains(f.Rwy))
             f.Rwy = arrs.OrderBy(r => UserTrackNm(r, u)).First();
+        f.OnGround = false; f.Gear = false;
         f.Pos = u; f.AltFt = UserAltFt; f.Gs = UserGs; f.Ias = Math.Min(UserGs, 250); f.Heading = UserTrack;
         f.SetPhase("arriving", Time);
         var nm = UserTrackNm(f.Rwy, u);
