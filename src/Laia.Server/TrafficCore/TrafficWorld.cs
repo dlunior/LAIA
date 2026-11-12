@@ -1285,6 +1285,12 @@ public sealed class TrafficWorld
         }
         pts.AddRange(route.Select(n => Apt.Nodes[n]));
         if (f.Phase == "taxi in" && f.Spot is { } gate) LeadIntoGate(pts, route, offset, gate, f.P);
+        // Only a way that really goes round: no point of it within 45 m of what it's avoiding (past the first 30 m).
+        {
+            var test = new PathGeom(pts, _ => 30, 1.0);
+            for (var s2 = 30.0; s2 < test.Length; s2 += 10)
+                if ((test.At(s2).p - otherPos).Length < 45) return false;
+        }
         SetGroundPath(f, pts, route, offset);
         Log($"{f.Callsign}: taking another way round {otherName}");
         return true;
@@ -3146,7 +3152,9 @@ public sealed class TrafficWorld
         if (f.StuckFor > 20 && f.BlockedByUser && UserPos is { } u && Time - f.RerouteTime > 60)
         {
             f.RerouteTime = Time;
-            if (Reroute(f, u, "your aircraft")) { f.StuckFor = 0; return; }
+            // A new way doesn't reset the clock: only moving does (DAL1885 rerouted every minute for 10 minutes,
+            // never reaching the "another gate" step, while the user's aircraft sat in its way).
+            if (Reroute(f, u, "your aircraft")) return;
         }
         if (f.StuckFor > 120 && f.Phase == "taxi in" && Time - f.RerouteTime > 60 && TryOtherGate(f)) { f.StuckFor = 0; return; }
         if (f.StuckFor > 300)
@@ -3422,6 +3430,8 @@ public sealed class TrafficWorld
                 if ((o.Pos - d.Pos).Length >= 3 * Geo2.MPerNm || Math.Abs(o.AltFt - d.AltFt) >= 900) continue;
                 // A departure off one parallel while an arrival is on final to another, near the field, is legal.
                 if (o.Kind == "arrival" && o.Phase is "final" or "approach" && d.Pos.Length < 6 * Geo2.MPerNm) continue;
+                // Two departures off different parallel runways at once, near the field: legal (diverging SIDs).
+                if (o.Kind == "departure" && o.Rwy is not null && d.Rwy is not null && o.Rwy.Runway != d.Rwy.Runway && d.Pos.Length < 6 * Geo2.MPerNm && o.Pos.Length < 6 * Geo2.MPerNm) continue;
                 var key = (d.Callsign, o.Callsign);
                 if (_losSeen.TryGetValue(key, out var at) && Time - at < 120) continue;
                 _losSeen[key] = Time; _losCount++;
