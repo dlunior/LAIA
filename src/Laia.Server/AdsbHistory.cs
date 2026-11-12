@@ -82,7 +82,9 @@ public sealed class AdsbHistory(ILogger<AdsbHistory> log)
             var targets = apts.Select(a => (a, lat: a.Data.Lat, lon: a.Data.Lon, elev: a.ElevationFt)).ToList();
             var kept = targets.ToDictionary(t => t.a.Icao, _ => new List<IReadOnlyList<TrackPoint>>(), StringComparer.OrdinalIgnoreCase);
             long done = 0; var files = 0;
-            await using var stream = new PartsStream(http, rl.parts.Select(p => p.url).ToList(), n => { done = n; Status = $"learning {names} from real tracks: {done / 1e9:0.0} of {total / 1e9:0.0} GB read"; });
+            log.LogInformation("adsb.lol parts: {parts}", string.Join(", ", rl.parts.Select(p => $"{p.name} ({p.size / 1e6:0} MB)")));
+            await using var stream = new PartsStream(http, rl.parts.Select(p => p.url).ToList(), n => { done = n; Status = $"learning {names} from real tracks: {done / 1e9:0.0} of {total / 1e9:0.0} GB read"; })
+            { Log = m => log.LogInformation("adsb.lol {m}", m) };
             using var tar = new TarReader(stream);
             TarEntry? entry;
             while ((entry = await tar.GetNextEntryAsync(copyData: false, ct)) is not null)
@@ -122,7 +124,7 @@ public sealed class AdsbHistory(ILogger<AdsbHistory> log)
         catch (Exception ex)
         {
             Status = "learning from real tracks failed: " + ex.Message;
-            log.LogWarning("adsb.lol history: {msg}", ex.Message);
+            log.LogWarning("adsb.lol history: {msg}", ex.ToString().Split('\n').Take(6).Aggregate((a, b) => a + " | " + b.Trim()));
         }
     }
 
@@ -133,6 +135,7 @@ public sealed class AdsbHistory(ILogger<AdsbHistory> log)
         private Stream? _cur;
         private HttpResponseMessage? _resp;
         private long _read;
+        public Action<string>? Log;
         public override bool CanRead => true; public override bool CanSeek => false; public override bool CanWrite => false;
         public override long Length => throw new NotSupportedException();
         public override long Position { get => _read; set => throw new NotSupportedException(); }
@@ -144,14 +147,20 @@ public sealed class AdsbHistory(ILogger<AdsbHistory> log)
         public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken ct) => ReadAsync(buffer.AsMemory(offset, count), ct).AsTask();
         public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default)
         {
+            if (buffer.Length == 0) return 0;
             while (true)
             {
                 if (_cur is null)
                 {
                     if (++_i >= urls.Count) return 0;
                     _resp?.Dispose();
-                    _resp = await http.GetAsync(urls[_i], HttpCompletionOption.ResponseHeadersRead, ct);
+                    using (var req = new HttpRequestMessage(HttpMethod.Get, urls[_i]))
+                    {
+                        req.Headers.Accept.ParseAdd("application/octet-stream");
+                        _resp = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
+                    }
                     _resp.EnsureSuccessStatusCode();
+                    Log?.Invoke($"part {_i + 1} of {urls.Count}: HTTP {(int)_resp.StatusCode}, {_resp.Content.Headers.ContentLength?.ToString() ?? "?"} bytes from {_resp.RequestMessage?.RequestUri?.Host}");
                     _cur = await _resp.Content.ReadAsStreamAsync(ct);
                 }
                 var n = await _cur.ReadAsync(buffer, ct);

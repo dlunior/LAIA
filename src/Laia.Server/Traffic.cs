@@ -9,7 +9,7 @@ namespace Laia.Server;
 /// Without a layout (or for the test buttons at an airport not read yet) a simple runway-only world is used.
 /// </summary>
 public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportStore airports, FlightSource source, SettingsStore settings,
-    SimBriefService simbrief, ServerState state, ScheduleStore schedules, NetworkStore network, WorldAirports worldAirports, RoutesDb routesDb, NasrDb nasrDb, AdsbHistory history, ILogger<TrafficEngine> log) : BackgroundService
+    SimBriefService simbrief, ServerState state, ScheduleStore schedules, NetworkStore network, WorldAirports worldAirports, RoutesDb routesDb, NasrDb nasrDb, AdsbHistory history, MetarReader metar, ILogger<TrafficEngine> log) : BackgroundService
 {
     private readonly object _gate = new();
     private readonly List<TrafficWorld> _neighbours = new();
@@ -447,6 +447,11 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     private void UpdateWorldCore(AircraftState sim)
     {
         var near = airports.Nearest(sim.Lat, sim.Lon, 40);
+        // Keep the traffic airport while the user is still within 40 nm of it: flying out past a neighbour (Mirabel,
+        // climbing west out of Montréal) doesn't make the neighbour the traffic airport — only landing or being on
+        // the ground at another airport does, or leaving the area.
+        if (_world is not null && near is { } n0 && n0.model != _world.Apt && !(sim.OnGround && n0.nm < 3)
+            && Geo2.DistanceNm(sim.Lat, sim.Lon, _world.Apt.Data.Lat, _world.Apt.Data.Lon) < 40) return;
         if (near is { } n && n.model.HasGround)
         {
             if (_world is null || _world.Apt != n.model)
@@ -498,7 +503,12 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                     {
                         if (live)
                         {
-                            w.Wind = new Wind(sim!.WindDirection, sim.WindSpeed);
+                            // The sim's wind is the wind where the user is: the airport's own only when the user is there
+                            // (within 15 nm and below 5,000 ft above it); otherwise the airport's METAR, and failing
+                            // that the last wind it had (never the wind at the user's cruise level).
+                            var dNm = Geo2.DistanceNm(sim!.Lat, sim.Lon, w.Apt.Data.Lat, w.Apt.Data.Lon);
+                            if (dNm < 15 && sim.AltitudeFt < w.Apt.ElevationFt + 5000) w.Wind = new Wind(sim.WindDirection, sim.WindSpeed);
+                            else if (metar.Wind(w.Apt.Icao) is { } mw) w.Wind = new Wind(mw.dir ?? w.Wind.FromDeg, mw.kt);
                             w.UserPos = w.Apt.Map.ToXY(sim.Lat, sim.Lon);
                             w.UserOnGround = sim.OnGround;
                         }

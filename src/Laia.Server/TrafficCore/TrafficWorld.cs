@@ -1581,6 +1581,10 @@ public sealed class TrafficWorld
     {
         var r = f.Rwy!.Runway;
         if (RunwayBusy(r, f)) return false;
+        // During a runway change, no departures the new way while arrivals still come in the old way (the opposite
+        // direction) within 30 nm: the airport turns round once the last of them has landed.
+        if (Flights.Any(a => a.Kind == "arrival" && !a.Done && !a.OnGround && a.Rwy is { } ar && Math.Abs(Geo2.Diff(ar.Heading, f.Rwy.Heading)) > 90
+                && (a.ThrS - a.S) < 30 * Geo2.MPerNm)) return false;
         // Only line up if the takeoff can follow without delaying the next arrival.
         var eta = ArrivalEta(r);
         // Line-up ~25 s, short wait, takeoff roll ~55 s, and the departure must be off the runway well before the arrival.
@@ -3617,9 +3621,9 @@ public sealed class TrafficWorld
         foreach (var a in Flights)
         {
             // Arrivals on the approach or final are the runway's business (landing behind a departure is normal),
-            // not a reason to stop a climb.
+            // not a reason to stop a climb; arrivals still being vectored (downwind, base) are (CYUL: departures off 06R
+            // climbed through 2,200 ft 1.9 nm from arrivals at 3,100 ft being vectored for 06L).
             if (a.Kind != "arrival" || a.OnGround || a.Done || a.Path is null || a.Phase is "flare" or "landing roll" or "final" or "approach" or "go-around") continue;
-            if ((a.ThrS - a.S) / Geo2.MPerNm < 12) continue;
             if ((a.Pos - d.Pos).Length > 20 * Geo2.MPerNm || a.AltFt < d.AltFt - 1500) continue;
             for (var t = 0.0; t <= 120; t += 15)
             {
