@@ -1671,6 +1671,15 @@ public sealed class TrafficWorld
         f.SetPhase("lining up", Time);
     }
 
+    /// <summary>The learned typical departure path off a runway nearest a direction (bearing from the airport), in map metres.</summary>
+    private List<V2>? LearnedDeparture(RunwayEnd rwy, double bearing)
+    {
+        if (Learned?.Departures.TryGetValue(rwy.Ident, out var d) != true || d!.Paths.Count == 0) return null;
+        var best = d.Paths.Where(p => p.Count >= 3).OrderBy(p => Math.Abs(Geo2.Diff(p.Bearing, bearing))).FirstOrDefault();
+        if (best is null || Math.Abs(Geo2.Diff(best.Bearing, bearing)) > 60) return null;
+        return best.Points.Select(x => Apt.Map.ToXY(x[0], x[1])).ToList();
+    }
+
     /// <summary>The departure route: straight ahead past the runway end, then the SID (or a turn out). Also its course.</summary>
     private void PlanDeparture(Flight f)
     {
@@ -1678,12 +1687,26 @@ public sealed class TrafficWorld
         var pts = new List<AirPoint> { new(rwy.FarEnd, ""), new(rwy.FarEnd + rwy.Dir * Geo2.MPerNm, "") };
         f.DepRoute = "";
         var sid = PickSid(f, rwy, out var sidLegs);
+        var vectors = sid is null;
         if (sid is not null && sidLegs.Count > 0)
         {
-            var sp = Apt.LegsToPoints(sidLegs, rwy.FarEnd, rwy.ElevationFt + 400, out _, hybrid: true);
+            var sp = Apt.LegsToPoints(sidLegs, rwy.FarEnd, rwy.ElevationFt + 400, out var endsInVectors, hybrid: true);
             // Ignore points behind the runway end (some SIDs begin with the runway fix).
             sp = sp.Where(p => rwy.Along(p.P) > rwy.LengthM + Geo2.MPerNm + 300 || (p.P - rwy.FarEnd).Length > 4000).ToList();
+            // A SID that ends "fly heading, expect vectors" (LGA's): the made-up 5 nm on the heading goes, and the real
+            // vectors learned for this runway and direction take over (below).
+            if (endsInVectors && sp.Count > 0 && Learned is not null) { sp.RemoveAt(sp.Count - 1); vectors = true; }
             if (sp.Count > 0) { pts.AddRange(sp); f.DepRoute = sid.Name; }
+        }
+        // Radar-vector departures as the airport's controllers really give them (M6): the typical path off this
+        // runway towards the flight's direction, learned from real tracks, from where the SID (if any) leaves off.
+        if (vectors && LearnedDeparture(rwy, BearingTo(f.Other) ?? rwy.Heading) is { Count: > 2 } lp)
+        {
+            var from = pts[^1].P;
+            var k = 0; var best = double.MaxValue;
+            for (var i = 0; i < lp.Count; i++) { var d = (lp[i] - from).Length; if (d < best && lp[i].Length > from.Length - 500) { best = d; k = i; } }
+            foreach (var q in lp.Skip(k + 1)) if (q.Length > from.Length) pts.Add(new AirPoint(q, ""));
+            if (f.DepRoute.Length == 0) f.DepRoute = "vectors";
         }
         if (pts.Count <= 2)
         {
@@ -2318,7 +2341,7 @@ public sealed class TrafficWorld
         if (from is { } start)
         {
             route.Add(start);
-            route.AddRange(Vectors(start, rwy));
+            route.AddRange(Vectors(start, rwy, ShapeFor(rwy)));
         }
         else
         {
@@ -2379,9 +2402,9 @@ public sealed class TrafficWorld
             route.AddRange(starPts.Select(p => p.P));
             speeds.AddRange(starPts.Select(p => p.SpeedKt));
             if (appPts.Count > 0) { route.AddRange(appPts.Select(p => p.P)); speeds.AddRange(appPts.Select(p => p.SpeedKt)); }
-            else route.AddRange(Vectors(route[^1], rwy));
+            else route.AddRange(Vectors(route[^1], rwy, ShapeFor(rwy)));
             while (speeds.Count < route.Count) speeds.Add(0);
-            ShapeFinal(route, speeds, rwy);
+            ShapeFinal(route, speeds, rwy, ShapeFor(rwy));
         }
         var thrIndex = route.Count;
         route.Add(rwy.Threshold);
@@ -2635,14 +2658,34 @@ public sealed class TrafficWorld
     /// <summary>Where vectored arrivals join the final: about 9.5 nm out (best practice 8–10 nm).</summary>
     private const double JoinNm = 9.5;
 
+    /// <summary>Real tracks learned for this airport (M6), or null until it has been learned.</summary>
+    public AirportProfile? Learned { get; set; }
+
+    /// <summary>
+    /// The vectors-to-final shape for a runway: what the airport's real controllers do, learned from real tracks (where
+    /// they join the final — a different place for each flight, within the middle half of the real spread — the base
+    /// turn, the downwind's distance and the intercept angle), or the generic numbers until the airport is learned.
+    /// </summary>
+    private VectorShape ShapeFor(RunwayEnd rwy)
+    {
+        if (Learned?.Arrivals.TryGetValue(rwy.Ident, out var a) != true || a!.Count < 5 || double.IsNaN(a.JoinP50)) return VectorShape.Default;
+        var join = Math.Clamp(a.JoinP25 + (a.JoinP75 - a.JoinP25) * Rng.NextDouble(), 6, 16);
+        var bas = double.IsNaN(a.BaseNm) ? join + 3 : Math.Clamp(a.BaseNm, join + 1.5, join + 10);
+        var dw = double.IsNaN(a.DownwindNm) ? double.NaN : Math.Clamp(a.DownwindNm, 2, 10);
+        var icpt = double.IsNaN(a.InterceptDeg) ? 28 : Math.Clamp(a.InterceptDeg, 15, 45);
+        return new VectorShape(join, bas, dw, icpt);
+    }
+
     /// <summary>
     /// Radar vectors to final the way a controller gives them (7110.65 5-9-2): a downwind, a base leg at right angles
     /// to the final, then an intercept heading about 25° to the final approach course, joining about 9.5 nm out
     /// (at least 2 nm outside the approach gate). From behind, inside a 30° cone, it's a straight-in to the join point.
     /// Coming from beyond the airport, it goes round the side rather than over the field.
     /// </summary>
-    private static List<V2> Vectors(V2 from, RunwayEnd rwy)
+    private static List<V2> Vectors(V2 from, RunwayEnd rwy, VectorShape? shape = null)
     {
+        var sh = shape ?? VectorShape.Default;
+        var JoinNm = sh.JoinNm;
         var nm = Geo2.MPerNm;
         var dir = rwy.Dir;
         var left = new V2(-dir.Y, dir.X);
@@ -2658,10 +2701,12 @@ public sealed class TrafficWorld
             pts.Add(join);
             return pts;
         }
-        const double baseNm = 12.5, endOfBaseNm = 1.6;   // base 12.5 nm out; turn to intercept 1.6 nm from the course (≈ 28°)
+        // Generic: base 12.5 nm out, turning to intercept 1.6 nm from the course (≈ 28°); learned: the airport's own.
+        var baseNm = sh.BaseNm;
+        var endOfBaseNm = Math.Clamp((baseNm - JoinNm) * Math.Tan(sh.InterceptDeg * Math.PI / 180), 0.8, 4);
         if (along > -baseNm * nm)
         {
-            var dw = Math.Clamp(Math.Abs(off), 3 * nm, 6 * nm);
+            var dw = double.IsNaN(sh.DownwindNm) ? Math.Clamp(Math.Abs(off), 3 * nm, 6 * nm) : sh.DownwindNm * nm;
             // From beyond the airport, close to its extended centreline: go round its side first.
             if (along > 3 * nm && Math.Abs(off) < 5 * nm)
                 pts.Add(thr + left * (side * 5 * nm) + dir * Math.Min(along, 12 * nm));
@@ -2684,8 +2729,9 @@ public sealed class TrafficWorld
     /// replaced by a downwind, base and an intercept heading about 25° to the course 8–10 nm out — what a controller
     /// does when the arrival doesn't feed straight into the approach. Straight-in joins are left alone.
     /// </summary>
-    private static void ShapeFinal(List<V2> route, List<double> speeds, RunwayEnd rwy)
+    private static void ShapeFinal(List<V2> route, List<double> speeds, RunwayEnd rwy, VectorShape? shape = null)
     {
+        var JoinNm = (shape ?? VectorShape.Default).JoinNm;
         var nm = Geo2.MPerNm;
         if (route.Count < 3) return;
         bool OnFinal(V2 p) => Math.Abs(rwy.Offset(p)) < 0.3 * nm && rwy.Along(p) < -0.3 * nm;
@@ -2708,7 +2754,7 @@ public sealed class TrafficWorld
             if (!(a < -11 * nm && o < 7 * nm) && o >= 1 * nm) break;
             m--;
         }
-        var vec = Vectors(route[m], rwy);
+        var vec = Vectors(route[m], rwy, shape);
         var tail = new List<(V2 p, double kt)>();
         for (var i = k; i < route.Count; i++)
             if (-rwy.Along(route[i]) < JoinNm * nm - 300) tail.Add((route[i], i < speeds.Count ? speeds[i] : 0));
@@ -2820,7 +2866,7 @@ public sealed class TrafficWorld
         Log($"{f.Callsign}: breaking off the approach for spacing ({why}): turn {(V2.Cross(V2.FromBearing(dir), outPt - p) > 0 ? "left" : "right")} heading {heading:000}, vectors back around");
         f.LastOrbit = Time;
         var pts = new List<V2> { p, p + V2.FromBearing(dir, 700), outPt };
-        pts.AddRange(Vectors(outPt, rwy));
+        pts.AddRange(Vectors(outPt, rwy, ShapeFor(rwy)));
         var thrIndex = pts.Count;
         pts.Add(rwy.Threshold);
         pts.Add(rwy.FarEnd);

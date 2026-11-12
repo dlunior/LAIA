@@ -14,7 +14,20 @@ public sealed class NasrDb(ILogger<NasrDb> log)
     public string Status { get; private set; } = "not loaded";
     private string _loaded = "";
 
-    private static readonly string[] Parts = { "FIX", "NAV", "AWY" };
+    private static readonly string[] Parts = { "FIX", "NAV", "AWY", "ATC" };
+    /// <summary>Each towered airport's primary approach control facility (ATC_BASE: APCH_P_PROVIDER, e.g. MCO → F11), by ICAO and FAA id.</summary>
+    private Dictionary<string, string> _approach = new(StringComparer.OrdinalIgnoreCase);
+
+    public string? ApproachFacility(string icao) => _approach.TryGetValue(icao, out var f) ? f : null;
+
+    /// <summary>The other airports worked by the same approach control as this one (its satellites and neighbours), ICAO codes.</summary>
+    public List<string> SameApproach(string icao)
+    {
+        var f = ApproachFacility(icao);
+        if (f is null) return new();
+        return _approach.Where(kv => kv.Value.Equals(f, StringComparison.OrdinalIgnoreCase) && kv.Key.Length == 4 && !kv.Key.Equals(icao, StringComparison.OrdinalIgnoreCase))
+            .Select(kv => kv.Key).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    }
 
     public async Task RefreshAsync(CancellationToken ct)
     {
@@ -33,13 +46,19 @@ public sealed class NasrDb(ILogger<NasrDb> log)
                 if (File.Exists(file)) continue;
                 var url = $"https://nfdc.faa.gov/webContent/28DaySub/extra/{tag}_{part}_CSV.zip";
                 log.LogInformation("Downloading FAA NASR {part} {url}", part, url);
-                var bytes = await http.GetByteArrayAsync(url, ct);
-                await File.WriteAllBytesAsync(file + ".tmp", bytes, ct);
-                File.Move(file + ".tmp", file, true);
+                try
+                {
+                    var bytes = await http.GetByteArrayAsync(url, ct);
+                    await File.WriteAllBytesAsync(file + ".tmp", bytes, ct);
+                    File.Move(file + ".tmp", file, true);
+                }
+                catch (Exception ex) when (part == "ATC" && ex is not OperationCanceledException) { log.LogWarning("FAA NASR ATC data not available: {msg}", ex.Message); }
             }
             var nav = new NavDb();
+            var approach = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             foreach (var part in Parts)
             {
+                if (!File.Exists(Path.Combine(dir, part + ".zip"))) continue;
                 using var zip = ZipFile.OpenRead(Path.Combine(dir, part + ".zip"));
                 foreach (var e in zip.Entries.Where(e => e.FullName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase)))
                 {
@@ -48,11 +67,33 @@ public sealed class NasrDb(ILogger<NasrDb> log)
                     if (part == "FIX" && name.StartsWith("FIX_BASE")) nav.AddPoints(Rows(e), false, name);
                     else if (part == "NAV" && name.StartsWith("NAV_BASE")) nav.AddPoints(Rows(e), true, name);
                     else if (part == "AWY" && (name.StartsWith("AWY_BASE") || name.StartsWith("AWY_SEG"))) { if (nav.Airways == 0 || name.StartsWith("AWY_BASE")) nav.AddAirways(Rows(e), name); }
+                    else if (part == "ATC" && name.StartsWith("ATC_BASE"))
+                    {
+                        string[]? head = null; int iId = -1, iIcao = -1, iApp = -1;
+                        foreach (var r in Rows(e))
+                        {
+                            if (head is null)
+                            {
+                                head = r.Select(h => h.Trim().Trim('"').ToUpperInvariant()).ToArray();
+                                iId = Array.IndexOf(head, "FACILITY_ID"); iIcao = Array.IndexOf(head, "ICAO_ID"); iApp = Array.IndexOf(head, "APCH_P_PROVIDER");
+                                nav.Notes.Add($"{name}: id={(iId >= 0 ? "FACILITY_ID" : "?")}, icao={(iIcao >= 0 ? "ICAO_ID" : "?")}, approach={(iApp >= 0 ? "APCH_P_PROVIDER" : "?")}");
+                                if (iId < 0 || iApp < 0) { nav.Notes.Add($"{name} header: {string.Join(",", head.Take(30))}"); break; }
+                                continue;
+                            }
+                            if (r.Length <= Math.Max(iId, iApp)) continue;
+                            var app = r[iApp].Trim();
+                            if (app.Length is < 2 or > 5) continue;
+                            var id = r[iId].Trim();
+                            var icao = iIcao >= 0 && iIcao < r.Length && r[iIcao].Trim().Length == 4 ? r[iIcao].Trim() : id.Length == 3 && id.All(char.IsLetter) ? "K" + id : id;
+                            approach[icao] = app;
+                        }
+                    }
                 }
             }
             Nav = nav;
+            _approach = approach;
             _loaded = tag;
-            Status = $"{nav.Fixes:N0} fixes, {nav.Navaids:N0} navaids, {nav.Airways:N0} airways (FAA NASR {tag.Replace('_', ' ')})";
+            Status = $"{nav.Fixes:N0} fixes, {nav.Navaids:N0} navaids, {nav.Airways:N0} airways, approach control for {approach.Count:N0} airports (FAA NASR {tag.Replace('_', ' ')})";
             log.LogInformation("FAA NASR: {status}; columns: {notes}", Status, string.Join(" | ", nav.Notes));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

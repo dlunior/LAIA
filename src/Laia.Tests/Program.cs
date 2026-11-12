@@ -980,6 +980,88 @@ Console.WriteLine("== Departures never climb into arrivals; freighters park on c
     Check(TrafficWorld.IsCargo("UPS") && TrafficWorld.IsCargo("FDX") && !TrafficWorld.IsCargo("SWA"), "UPS and FedEx are known as cargo airlines");
 }
 
+Console.WriteLine("== M6: learning an airport from real tracks (synthetic adsb.lol-style traces), and flying what was learned");
+{
+    var nm = Geo2.MPerNm;
+    var data = TestAirport.Build(false);
+    var apt = new AirportModel(data);
+    var map = apt.Map;
+    var r27 = apt.Ends.First(e => e.Ident == "27");
+    var left = new V2(-r27.Dir.Y, r27.Dir.X);
+    V2 At(double along, double off) => r27.Threshold + r27.Dir * (along * nm) + left * (off * nm);
+    var rng = new Random(3);
+    var tracks = new List<IReadOnlyList<TrackPoint>>();
+    List<TrackPoint> Fly(List<(V2 p, double? alt)> poly, double t0)
+    {
+        var res = new List<TrackPoint>(); var t = t0;
+        for (var i = 0; i + 1 < poly.Count; i++)
+        {
+            var a = poly[i]; var b = poly[i + 1]; var len = (b.p - a.p).Length; var brg = (b.p - a.p).Bearing;
+            var n = Math.Max(1, (int)(len / (0.2 * nm)));
+            for (var k = 0; k < n; k++)
+            {
+                var u = (double)k / n; var p = a.p + (b.p - a.p) * u;
+                double? alt = a.alt is null || b.alt is null ? (u < 0.5 ? a.alt : b.alt) : a.alt + (b.alt - a.alt) * u;
+                var (la, lo) = map.ToLatLon(p);
+                res.Add(new TrackPoint(t, la, lo, alt, brg)); t += 3.6;
+            }
+        }
+        return res;
+    }
+    for (var i = 0; i < 12; i++)
+    {
+        // Left downwind 4 nm out, base at 14 nm, a 30° intercept joining at about 10 nm, landing.
+        var join = 9.4 + rng.NextDouble() * 1.2; var dw = 3.8 + rng.NextDouble() * 0.4; var bas = join + 4;
+        var e = (bas - join) * Math.Tan(30 * Math.PI / 180);
+        tracks.Add(Fly(new() { (At(3, dw), 4000), (At(-bas, dw), 3000), (At(-bas, e), 2800), (At(-join, 0), 2600), (At(0, 0), 60), (At(0.6, 0), null), (At(1.2, 0), null) }, i * 900));
+    }
+    for (var i = 0; i < 10; i++)
+    {
+        // Off runway 27, straight out 3 nm past the end, then a right turn to the north for 25 nm (radar vectors).
+        var endA = r27.LengthM / nm;
+        var p3 = At(endA + 3, 0);
+        tracks.Add(Fly(new() { (At(0.1, 0), null), (At(endA * 0.6, 0), null), (At(endA * 0.75, 0), 300), (p3, 2500), (p3 + V2.FromBearing(15 + rng.NextDouble() * 10, 25 * nm), 12000) }, 20000 + i * 900));
+    }
+    var prof = TrackLearner.Learn("TEST", map, apt.ElevationFt, apt.Ends, tracks, "test", "2026-11-10");
+    Console.WriteLine("  " + prof.Describe());
+    var a27 = prof.Arrivals.GetValueOrDefault("27");
+    Check(a27 is not null && a27.Count == 12 && Math.Abs(a27.JoinP50 - 10) < 1 && Math.Abs(a27.InterceptDeg - 30) < 8 && Math.Abs(a27.DownwindNm - 4) < 0.7 && Math.Abs(a27.BaseNm - 14) < 1.5,
+        "arrivals: joins at ~10 nm, 30° intercept, downwind 4 nm out, base at ~14 nm");
+    var d27 = prof.Departures.GetValueOrDefault("27");
+    Check(d27 is not null && d27.Count == 10 && d27.Paths.Any(p => p.Bearing is 0 or 30 or 330), "departures: a typical path to the north off 27");
+    var json = System.Text.Json.JsonSerializer.Serialize(prof, AdsbTrace.Json);
+    var back = System.Text.Json.JsonSerializer.Deserialize<AirportProfile>(json, AdsbTrace.Json)!;
+    Check(back.Arrivals["27"].Count == 12 && back.Samples.Count > 0, "the profile saves and loads");
+    var trace = System.Text.Encoding.UTF8.GetBytes("{\"icao\":\"a1b2c3\",\"timestamp\":1731283200.0,\"trace\":[[0.0,28.4,-81.3,\"ground\",10.1,180.0,0,null,null,\"adsb_icao\"],[5.5,28.41,-81.3,1200,150.2,181.0,0,1500,null,\"adsb_icao\"]]}");
+    var pts = AdsbTrace.Parse(trace)!;
+    Check(pts.Count == 2 && pts[0].AltFt is null && pts[1].AltFt == 1200 && Math.Abs(pts[1].T - 1731283205.5) < 0.01, "a readsb trace file is read (ground and altitude points)");
+
+    // Flying it: vectored arrivals join where real ones do; a runway-heading departure turns where real ones turn.
+    var data2 = TestAirport.Build(false);
+    data2.Arrivals.Clear();
+    var world = new TrafficWorld(new AirportModel(data2), new TestSource(), seed: 9) { Automatic = false, Wind = new Wind(270, 10), Learned = prof };
+    world.SelectRunways(true);
+    var joins = new List<double>();
+    for (var i = 0; i < 6; i++)
+    {
+        Laia.Common.Airports.ScheduleLeg L() => new() { Airline = "DAL", Operator = "DAL", Type = "A321", Reg = "N" + i, Flight = "9" + i, Dep = "KXXX", Arr = "TEST" };
+        var f = world.SpawnArrival(0, false, L(), entry: (At(-5, 15) , 6000, 6000));
+        if (f is null) continue;
+        var rw = f.Rwy!;
+        // Where the path settles on the centreline for good.
+        double joinAt = double.NaN;
+        for (var s2 = f.ThrS; s2 > 0; s2 -= 100)
+        {
+            var (pp, dd, _) = f.Path!.At(s2);
+            if (Math.Abs(rw.Offset(pp)) > 0.1 * nm || Math.Abs(Geo2.Diff(dd, rw.Heading)) > 3) { joinAt = -rw.Along(pp) / nm; break; }
+        }
+        joins.Add(joinAt);
+        f.Done = true;
+    }
+    Console.WriteLine($"  vectored arrivals join the final at {string.Join(", ", joins.Select(j => j.ToString("0.0")))} nm");
+    Check(joins.Count >= 4 && joins.All(j => j is > 8.5 and < 12), "vectored arrivals join where the real ones do (about 9.4–10.6 nm, not the generic 9.5 every time)");
+}
+
 Console.WriteLine("== Neighbouring fields: runway traffic only, on the main airport's clock; satellite STARs are a last resort");
 {
     var nm = Geo2.MPerNm;

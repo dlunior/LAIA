@@ -74,6 +74,7 @@
       <label><input type="checkbox" id="tAllPaths">All routes</label>
       <label><input type="checkbox" id="tFollow">Follow me</label>
       <label><input type="checkbox" id="tSky" checked>Whole sky</label>
+      <label><input type="checkbox" id="tReal">Real tracks</label>
     </div>
     <div style="margin-top:8px;display:flex;gap:6px"><button id="bAirport">Airport</button><button id="bMe">Me</button><button id="bList">Flights</button></div>
   </div>
@@ -94,7 +95,7 @@ L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png?key=c
   attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>'
 }).addTo(map);
 
-const layers = { rwy: L.layerGroup().addTo(map), ring: L.layerGroup().addTo(map), paths: L.layerGroup().addTo(map), sel: L.layerGroup().addTo(map), ac: L.layerGroup().addTo(map) };
+const layers = { real: L.layerGroup().addTo(map), rwy: L.layerGroup().addTo(map), ring: L.layerGroup().addTo(map), paths: L.layerGroup().addTo(map), sel: L.layerGroup().addTo(map), ac: L.layerGroup().addTo(map) };
 const markers = new Map();      // id -> marker
 const skyRenderer = L.canvas({ padding: .3 });
 const skyLayer = L.layerGroup().addTo(map);
@@ -224,6 +225,21 @@ function skyDetailsHtml(f) {
     <div style="margin-top:8px;display:flex;gap:6px"><button id="bZoomSel">Zoom to it</button><button id="bClose">Close</button></div>`;
 }
 
+// Real tracks learned from adsb.lol (M6), drawn faintly under LAIA's traffic to compare: arrivals violet, departures teal.
+let realAt = 0;
+async function updateReal() {
+  if (!$("tReal").checked) { layers.real.clearLayers(); realAt = 0; return; }
+  if (Date.now() - realAt < 60000) return;
+  realAt = Date.now();
+  try {
+    const r = await fetch("/api/map/real", { cache: "no-store" });
+    layers.real.clearLayers();
+    if (!r.ok) return;
+    const d = await r.json();
+    for (const t of d.tracks) L.polyline(t.points.map(p => [p[0], p[1]]), { color: t.kind === "arrival" ? "#a78bfa" : "#2dd4bf", weight: 1.2, opacity: .35, interactive: false }).addTo(layers.real);
+  } catch { }
+}
+
 function updateSky() {
   const show = $("tSky").checked;
   const seen = new Set();
@@ -322,6 +338,7 @@ function render() {
   updateAircraft(data.flights);
   updateUser(data.user);
   updateSky();
+  updateReal();
   renderList();
   renderSeq();
   if (selected) { const f = findSel(selected); if (f) renderSel(f); else { selected = null; $("sel").hidden = true; layers.sel.clearLayers(); } }

@@ -179,6 +179,22 @@ public sealed class NetworkStore(WorldAirports world, ILogger<NetworkStore> log)
         }
     }
 
+    /// <summary>Of these airports, those with at least this many scheduled flights a week, busiest first.</summary>
+    public List<string> BusyAmong(IEnumerable<string> icaos, int minWeekly)
+    {
+        var want = new HashSet<string>(icaos, StringComparer.OrdinalIgnoreCase);
+        lock (_gate)
+        {
+            var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            foreach (var l in _legs)
+            {
+                if (want.Contains(l.Dep)) counts[l.Dep] = counts.GetValueOrDefault(l.Dep) + 1;
+                if (want.Contains(l.Arr)) counts[l.Arr] = counts.GetValueOrDefault(l.Arr) + 1;
+            }
+            return counts.Where(kv => kv.Value >= minWeekly).OrderByDescending(kv => kv.Value).Select(kv => kv.Key).ToList();
+        }
+    }
+
     public int AirborneNow(double weekMin)
     {
         lock (_gate)

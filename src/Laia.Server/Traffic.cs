@@ -9,11 +9,12 @@ namespace Laia.Server;
 /// Without a layout (or for the test buttons at an airport not read yet) a simple runway-only world is used.
 /// </summary>
 public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportStore airports, FlightSource source, SettingsStore settings,
-    SimBriefService simbrief, ServerState state, ScheduleStore schedules, NetworkStore network, WorldAirports worldAirports, RoutesDb routesDb, NasrDb nasrDb, ILogger<TrafficEngine> log) : BackgroundService
+    SimBriefService simbrief, ServerState state, ScheduleStore schedules, NetworkStore network, WorldAirports worldAirports, RoutesDb routesDb, NasrDb nasrDb, AdsbHistory history, ILogger<TrafficEngine> log) : BackgroundService
 {
     private readonly object _gate = new();
     private readonly List<TrafficWorld> _neighbours = new();
     private List<string> _neighbourWant = new();
+    private string _neighbourHow = "";
     private DateTime _neighbourAt = DateTime.MinValue;
     private AtisReader? _atisReader;
     private AtisReader Atis => _atisReader ??= new AtisReader(log);
@@ -70,7 +71,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
 
     /// <summary>Most aircraft drawn in the sim at once (MSFS slows down with many AI objects).</summary>
     private const int MaxDrawn = 50;
-    private const double DrawRadiusNm = 40, DrawBandFt = 10000;
+    private const double DrawRadiusNm = 60, DrawBandFt = 10000;   // nearest 50 within 60 nm (a TRACON's satellites, e.g. MLB 55 nm from MCO)
 
     /// <summary>
     /// Which simulated flights are drawn in the sim (null = all, when MSFS isn't connected): airborne traffic within
@@ -220,6 +221,19 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     }
 
     /// <summary>A network flight's great-circle route: flown so far and still to go.</summary>
+    /// <summary>Real tracks (adsb.lol) learned for the airport, for the map: a sample of arrivals and departures per runway.</summary>
+    public object? RealTracks()
+    {
+        var w = _world;
+        if (w is null || history.Profile(w.Apt.Icao) is not { } p) return null;
+        var rw = w.ArrRwys.Select(e => e.Ident).Concat(w.DepRwys.Select(e => e.Ident)).ToHashSet();
+        return new
+        {
+            icao = p.Icao, day = p.Day, source = p.Source,
+            tracks = p.Samples.Where(t => rw.Count == 0 || rw.Contains(t.Runway)).Select(t => new { kind = t.Kind, runway = t.Runway, points = t.Points }),
+        };
+    }
+
     public object? MapNetPath(string id)
     {
         var l = network.Find(id);
@@ -302,7 +316,8 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                     alt = Math.Round(f.AltFt), gs = Math.Round(f.Gs), gate = f.Spot?.Label, ground = f.OnGround,
                 })).Where(f => f.Kind != "parked").ToList(),
                 parked = Worlds().Sum(x => x.Flights.Count(f => f.Kind == "parked")),
-                neighbours = _neighbours.Count == 0 ? null : string.Join(", ", _neighbours.Select(n => $"{n.Apt.Icao} ({n.Flights.Count} flying{(n.PredictionSummary is { } ps ? "; predictions: " + ps : "")})")),
+                learned = history.Status + (w is not null && history.Profile(w.Apt.Icao) is { } lp ? "; " + lp.Describe() : ""),
+                neighbours = _neighbours.Count == 0 ? null : $"({_neighbourHow}) " + string.Join(", ", _neighbours.Select(n => $"{n.Apt.Icao} ({n.Flights.Count} flying{(n.PredictionSummary is { } ps ? "; predictions: " + ps : "")})")),
                 sky = network.Count == 0 ? network.Status : $"{network.AirborneNow(w?.ScheduleClock ?? WeekMinuteNow()):N0} flights in the air worldwide · {network.Status}",
             };
         }
@@ -388,7 +403,17 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         if (DateTime.UtcNow - _neighbourAt > TimeSpan.FromMinutes(2))
         {
             _neighbourAt = DateTime.UtcNow;
-            _neighbourWant = network.BusyAirportsNear(main.Apt.Data.Lat, main.Apt.Data.Lon, 40, 14, main.Apt.Icao).Take(4).ToList();
+            // The airports worked by the same approach control (the FAA's records: MCO's F11 also works SFB, ORL, MLB,
+            // ISM, TIX, LEE) that have airline traffic in the schedules; a 40 nm circle where the FAA data has none.
+            var family = nasrDb.SameApproach(main.Apt.Icao)
+                .Where(i => worldAirports.Find(i) is { } p && Geo2.DistanceNm(main.Apt.Data.Lat, main.Apt.Data.Lon, p.lat, p.lon) < 120).ToList();
+            _neighbourWant = (family.Count > 0 ? network.BusyAmong(family, 14) : network.BusyAirportsNear(main.Apt.Data.Lat, main.Apt.Data.Lon, 40, 14, main.Apt.Icao))
+                .Where(i => !i.Equals(main.Apt.Icao, StringComparison.OrdinalIgnoreCase)).Take(6).ToList();
+            _neighbourHow = family.Count > 0 ? $"{nasrDb.ApproachFacility(main.Apt.Icao)} approach control" : "within 40 nm";
+            // Learn the airport and its neighbours from real tracks (M6), once, in the background.
+            var learn = new List<AirportModel> { main.Apt };
+            foreach (var icao in _neighbourWant) if (airports.Model(icao) is { } m) learn.Add(m);
+            history.Want(learn);
         }
         foreach (var n in _neighbours.Where(n => !_neighbourWant.Contains(n.Apt.Icao) || n.ClockOwner != main).ToList())
         {
@@ -491,6 +516,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                             }
                             w.Routes = routesDb.Routes;
                             w.NavData = nasrDb.Nav;
+                            w.Learned = history.Profile(w.Apt.Icao);
                             w.Locate ??= code => worldAirports.Find(code) is { } p ? (p.lat, p.lon) : null;
                         }
                         w.WeekMinute = live && sim!.ZuluWeekMinute >= 0 ? sim.ZuluWeekMinute : WeekMinuteNow();

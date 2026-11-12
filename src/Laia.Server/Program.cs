@@ -34,6 +34,7 @@ builder.Services.AddHostedService<NetworkUpdater>();
 builder.Services.AddSingleton<RoutesDb>();
 builder.Services.AddHostedService<RoutesUpdater>();
 builder.Services.AddSingleton<NasrDb>();
+builder.Services.AddSingleton<AdsbHistory>();
 builder.Services.AddHostedService<NasrUpdater>();
 builder.Services.AddSingleton<FlightSource>();
 builder.Services.AddSingleton<TrafficEngine>();
@@ -148,6 +149,7 @@ app.MapPost("/api/network", async (HttpContext ctx, NetworkStore net) =>
     var n = await net.AddAsync(ctx.Request.Body, ctx.RequestAborted);
     return n > 0 ? Results.Json(new { ok = true, flights = n }, jsonOpts) : Results.BadRequest();
 });
+app.MapGet("/api/map/real", (TrafficEngine t) => t.RealTracks() is { } r ? Results.Json(r, jsonOpts) : Results.NotFound());
 app.MapGet("/api/map/net/{id}", (string id, TrafficEngine t) => t.MapNetPath(id) is { } p ? Results.Json(p, jsonOpts) : Results.NotFound());
 app.MapPost("/api/traffic/catalog", async (HttpContext ctx, FlightSource src) =>
 {
