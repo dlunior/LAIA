@@ -1114,6 +1114,8 @@ Console.WriteLine("== M8 Smart traffic notices: the user's place in the sequence
         if (firstSeq is null && world.Time > 12 && world.Notices.FirstOrDefault(n => n.Id == "seq") is { } sq) { firstSeq = sq.Text; behindCs = world.Sequence?.BehindCallsign; }
         if (landA < 0 && a.OnGround) landA = world.Time;
         if (landB < 0 && b.OnGround) landB = world.Time;
+        if (Math.Abs(world.Time % 30) < 0.25 && !b.OnGround)
+            Console.WriteLine($"    t={world.Time:0} you {-r.Along(u) / nm:0.0} nm (eta {world.UserArr?.EtaSec:0}); DAL72 {(b.ThrS - b.S) / nm:0.0} nm {b.Ias:0} kt eta {b.EtaSec:0} seq {b.Seq} gap {b.GapNm:0.0} nm/{b.GapSec:0} s {b.Phase} {b.Mgr}");
     }
     Console.WriteLine($"  notice: {firstSeq}");
     foreach (var x in log.Where(x => x.Contains("(you)") || x.Contains("behind N123AB") || x.Contains("for spacing"))) Console.WriteLine("  " + x);
