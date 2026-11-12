@@ -116,7 +116,7 @@ public sealed class TaxiFlow
         }
 
         // ---- stretches of each named taxiway, and their direction
-        var runs = Stretches(apt);
+        var runs = StretchesOf(apt);
         var oneWay = new List<(string name, double lenM, double brg, bool deps, double share)>();
         foreach (var (name, nodes) in runs)
         {
@@ -179,7 +179,7 @@ public sealed class TaxiFlow
     /// Each named taxiway cut into stretches: runs of its own segments, ending where it branches, turns more than 35°
     /// or meets a runway.
     /// </summary>
-    public static List<(string name, List<int> nodes)> Stretches(AirportModel apt)
+    public static List<(string name, List<int> nodes)> StretchesOf(AirportModel apt)
     {
         var res = new List<(string, List<int>)>();
         foreach (var grp in apt.TaxiLines.Where(e => AirportModel.IsTaxiway(e.Name)).GroupBy(e => e.Name.ToUpperInvariant()))
