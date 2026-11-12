@@ -2093,6 +2093,10 @@ public sealed class TrafficWorld
             if (ruled.Count > 0) serving = ruled;
         }
         var side = star is { } st ? SideOf(axis, EntryFix(st.p, st.t)) : BearingTo(origin) is { } b ? V2.Cross(axis, V2.FromBearing(b)) : 0;
+        // The STAR's side is a firm preference (user: SNFLD/MUNGI to the east runway, PRICY/GRNCH to the west "9 out of
+        // 10 times"), even for a STAR that comes in only a little off the runway axis (SNFLD from the north-north-east
+        // in north flow): only a clearly longer queue on that side moves an arrival across.
+        side = Math.Abs(side) < 0.1 ? side / 0.1 : Math.Sign(side);
         int Queue(RunwayEnd e) => Flights.Count(o => !o.Done && o.Kind == "arrival" && !o.OnGround && o.Rwy?.Runway == e.Runway);
         var minQ = serving.Min(i => Queue(list[i]));
         var best = serving.OrderByDescending(i => pos[i] * side * 2 - 0.25 * (Queue(list[i]) - minQ)).ThenByDescending(i => list[i].LengthM).First();
@@ -2871,7 +2875,7 @@ public sealed class TrafficWorld
             f.SlowDv = 0;
             var base0 = EtaToThreshold(f, dth);
             var dv = 0.0;
-            for (var c = 5.0; c <= 60; c += 5)
+            for (var c = 5.0; c <= 40; c += 5)   // 40 kt at most (250 → 210, 280 → 240)
             {
                 f.SlowDv = c;
                 dv = c;
