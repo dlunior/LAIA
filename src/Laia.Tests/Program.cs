@@ -1062,6 +1062,27 @@ Console.WriteLine("== M6: learning an airport from real tracks (synthetic adsb.l
     Check(joins.Count >= 4 && joins.All(j => j is > 8.5 and < 12), "vectored arrivals join where the real ones do (about 9.4–10.6 nm, not the generic 9.5 every time)");
 }
 
+Console.WriteLine("== No ATIS: real traffic picks the runways before the wind (live first, then the learned day)");
+{
+    var world = new TrafficWorld(new AirportModel(TestAirport.Build(false)), new TestSource(), seed: 2) { Automatic = false, Wind = new Wind(100, 6) };
+    var log = new List<string>(); world.Log = s2 => log.Add(s2);
+    world.SelectRunways(true);
+    var byWind = world.ArrRwy!.Ident;
+    var prof = new AirportProfile { Icao = "TEST", Day = "2026-11-11" };
+    prof.Arrivals["27"] = new AirportProfile.RunwayArrivals { Count = 20, JoinP25 = 9, JoinP50 = 10, JoinP75 = 11 };
+    prof.Arrivals["09"] = new AirportProfile.RunwayArrivals { Count = 4, JoinP25 = 9, JoinP50 = 10, JoinP75 = 11 };
+    prof.Departures["27"] = new AirportProfile.RunwayDepartures { Count = 18 };
+    world.Learned = prof;
+    world.SelectRunways(true);
+    var byLearned = world.ArrRwy!.Ident;
+    world.LiveLanding = new() { "09" }; world.LiveDeparting = new() { "09" };
+    world.SelectRunways(true);
+    var byLive = world.ArrRwy!.Ident;
+    Console.WriteLine($"  wind 100/6: by wind {byWind}; learned day (27 most used) {byLearned}; live traffic on 09 {byLive}");
+    foreach (var x in log.Where(x => x.StartsWith("Runways in use")).TakeLast(2)) Console.WriteLine("  " + x);
+    Check(byWind == "09" && byLearned == "27" && byLive == "09" && world.DepRwy!.Ident == "09", "the learned day beats a light wind; live traffic beats both");
+}
+
 Console.WriteLine("== Neighbouring fields: runway traffic only, on the main airport's clock; satellite STARs are a last resort");
 {
     var nm = Geo2.MPerNm;

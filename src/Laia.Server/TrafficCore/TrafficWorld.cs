@@ -305,6 +305,15 @@ public sealed class TrafficWorld
             DepRwy = atisDeps[0];
             return;
         }
+        // No ATIS: what real traffic is doing ranks above the wind (user rule) — first what it's doing now (live
+        // positions), then what it did on the learned day in this wind (real tracks, M6); the wind rule is the last resort.
+        if (RealConfig(usable) is { } rc)
+        {
+            if (!ArrRwys.SequenceEqual(rc.arr) || !DepRwys.SequenceEqual(rc.dep))
+                Log($"Runways in use at {Apt.Icao}: landing {string.Join(", ", rc.arr.Select(e => e.Ident))}, departing {string.Join(", ", rc.dep.Select(e => e.Ident))} ({rc.why}; wind {Wind.FromDeg:000} at {Wind.Kt:0} kt)");
+            ArrRwys = rc.arr; DepRwys = rc.dep; ArrRwy = rc.arr[0]; DepRwy = rc.dep[0];
+            return;
+        }
         RunwayEnd best;
         if (Wind.Kt < 4 && ArrRwy is not null && usable.Contains(ArrRwy) && !force) best = ArrRwy;
         else if (Wind.Kt < 4) best = usable.OrderByDescending(e => e.LengthM).First();
@@ -341,6 +350,44 @@ public sealed class TrafficWorld
         DepRwy = dep;
         ArrRwys = new() { arr };
         DepRwys = new() { dep };
+    }
+
+    /// <summary>Runways real traffic is landing on and departing from right now (live adsb.lol positions), set by the server.</summary>
+    public List<string> LiveLanding { get; set; } = new();
+    public List<string> LiveDeparting { get; set; } = new();
+
+    /// <summary>
+    /// The runway configuration real traffic shows: live traffic first (both lists, or landing only — then departures
+    /// use the same runways); otherwise the learned day's most used runways among those not out of limits in today's
+    /// wind (tailwind up to 10 kt, crosswind 25), with parallels used at least a quarter as much. Null when neither.
+    /// </summary>
+    private (List<RunwayEnd> arr, List<RunwayEnd> dep, string why)? RealConfig(List<RunwayEnd> usable)
+    {
+        List<RunwayEnd> Map(IEnumerable<string> ids) => ids.Select(id => usable.FirstOrDefault(e => e.Ident == id)).Where(e => e is not null).Select(e => e!).Distinct().ToList();
+        var la = Map(LiveLanding); var ld = Map(LiveDeparting);
+        if (la.Count > 0 || ld.Count > 0)
+        {
+            if (la.Count == 0) la = ld.Take(1).ToList();
+            if (ld.Count == 0) ld = la.ToList();
+            return (la, ld, "from live traffic, adsb.lol");
+        }
+        if (Learned is null) return null;
+        bool Ok(RunwayEnd e) => Wind.Kt < 4 || (Wind.Headwind(e.Heading) >= -10 && Crosswind(e.Heading) <= 25);
+        List<RunwayEnd> Top(IEnumerable<(string id, int n)> counts)
+        {
+            var c = counts.Select(x => (e: usable.FirstOrDefault(u => u.Ident == x.id), x.n)).Where(x => x.e is not null && Ok(x.e!) && x.n >= 3)
+                .OrderByDescending(x => x.n).ThenByDescending(x => Wind.Headwind(x.e!.Heading)).ToList();
+            if (c.Count == 0) return new();
+            var top = c[0];
+            return c.Where(x => x.e == top.e || (x.n * 4 >= top.n && Math.Abs(Geo2.Diff(x.e!.Heading, top.e!.Heading)) < 30)).Select(x => x.e!).ToList();
+        }
+        var arr = Top(Learned.Arrivals.Select(kv => (kv.Key, kv.Value.Count)));
+        var dep = Top(Learned.Departures.Select(kv => (kv.Key, kv.Value.Count)));
+        if (arr.Count == 0) return null;
+        // Departures off the learned day must be the same way round as today's landings.
+        dep = dep.Where(d => arr.Any(a => Math.Abs(Geo2.Diff(a.Heading, d.Heading)) < 100)).ToList();
+        if (dep.Count == 0) dep = arr.ToList();
+        return (arr, dep, $"as real traffic used them on {Learned.Day} in a wind like today's (adsb.lol)");
     }
 
     private static bool SegmentsCross(V2 a0, V2 a1, V2 b0, V2 b1)
