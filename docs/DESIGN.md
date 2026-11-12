@@ -84,7 +84,7 @@ work runs on a second PC on the home network, so the sim PC stays fast.
   - **Published speed limits** on SIDs, STARs and approaches are flown.
   - **CWT wake categories A–I:** spacing on final, and 3-9-6 departure wake times.
   - **Same-runway departures:** the 6,000 ft rule, and diverging departures 5-8-3.
-  - **Crossing-runway operations (3-9-8, 3-10-4):** a crossing runway is used for departures at Normal and Busy levels when its departures stay clear of the final.
+  - **Crossing-runway operations (3-9-8, 3-10-4):** a crossing runway is used for departures at Medium level and above when its departures stay clear of the final.
   - **Runway choice:** tailwind limit 5 kt, crosswind limit 25 kt.
   - **Stabilized approach by 1,000 ft (AIM 5-4),** or the aircraft goes around.
   - **Holding (AIM 5-3-8)** far out. 360s are used only within 15 nm. Today's holds use 200 kt up to 6,000 ft and 230 kt above. The full AIM limits are 200 kt up to 6,000 ft MSL, 230 kt from 6,001 to 14,000 ft (210 where charted), and 265 kt above 14,000 ft, with one-minute legs at or below 14,000 ft and 1.5 minutes above. The 265 kt and 1.5-minute rules still need adding.
@@ -105,7 +105,12 @@ work runs on a second PC on the home network, so the sim PC stays fast.
   - Eased taxi turns (curvature ramps in and out) with a radius of about 1.1 × span (30–60 m), and lead-in arcs into the stands.
 - **M2, the live map (0.1.67):** `/map` on the control site. It shows you, drawn traffic and simulated-only traffic in three colours. Click an aircraft for its details and route ahead, with published speed limits. It also shows runways in use, the drawing range, all routes, a follow-me option and a flight list. It is phone-friendly.
 - **Approaches joined the published way (0.1.71):** when the STAR doesn't lead into the approach, the arrival flies the approach's published transition that starts nearest the end of the STAR (within about 12 nm). At LGA's RNAV Y 31, the southwest STARs ending at PROUD go via FEDEM (over the field at 4,000 ft, then out northeast and east to GEMKE, clear of JFK), and VADDR1 and NOBBI1 go via WASBO. Otherwise the arrival is vectored to the approach's first fix, lined up with its inbound course, never a generic straight-in final. Approaches are trimmed only at the runway fix, so transitions that start beyond the threshold are kept.
-- **Peak (test) traffic level (0.1.54):** for testing at quiet times. It finds the airport's busiest 3 hours in its real schedule and replays them now, real flights and all, then replays them again when they finish. The control page says it isn't the real time. Busy and Peak both fly every scheduled flight; Peak has a higher object limit.
+- **Traffic levels (0.1.154, user request 12 Nov 2026):** Off, Light, Medium (was Normal), Busy, Real world, Peak (stress test).
+  - Light flies about 35% of the real schedule, Medium about 65%, Busy, Real world and Peak all of it. Whole airframes are kept or left out, the same ones every time.
+  - Light, Medium and Busy have caps on aircraft at the airport and moving at once (12/4, 22/7, 34/11), multiplied by the airport's size: its busiest real hour's movements ÷ 20, between 1 and 2 (a regional field ×1, a hub like MCO ×2). Busy is the real schedule trimmed by those caps.
+  - Real world: the whole real schedule for the current time, no practical cap.
+  - Peak (stress test, since 0.1.54): finds the airport's busiest 3 hours in its real schedule and replays them now, in full and uncapped, then replays them again. The control page says it isn't the real time.
+  - Medium and above may open a crossing departure runway. The sim draws the nearest 50 aircraft within 60 nm, 80 at Real world and Peak.
 - **Safety nets:** a stuck-aircraft watchdog (reroute after 20 s, another gate after 2 min, removed after 5 min with the reason logged), ground separation and intersection yielding.
 
 ### Known gaps / open items
@@ -213,7 +218,7 @@ Three layers, with a flight moving smoothly from one to the next:
 | **Neighbouring fields** (inside the airspace layer) | Only the runway and the air. Departures appear lined up on the runway and take off. Arrivals fly the approach, land, and disappear on the runway once slowed to taxi speed. Their ground part is simulated, not drawn. |
 | **Airborne traffic** (anyone's) | Within 40 nm horizontally and ±10,000 ft of the user, matching a TCAS display's range, so the user's TCAS and ND show the real picture, not just what's close enough to see. Drawn at 40 nm and removed at 45, so aircraft don't flicker at the edge. |
 
-- **Object limit:** a cap on the number of drawn objects, set by traffic level, protects the sim PC. If the cap is reached, the aircraft that matter most are kept: closest, converging with the user's path, at the user's runway, or about to enter the user's view.
+- **Object limit:** a cap on the number of drawn objects, set by traffic level (50, or 80 at Real world and Peak), protects the sim PC. If the cap is reached, the aircraft that matter most are kept: closest, converging with the user's path, at the user's runway, or about to enter the user's view.
 - **No pop-in at neighbouring runways:** if the user is within about 3 nm of a neighbouring runway and low enough to see it, a departure there is drawn earlier, at the hold short line, and an arrival is removed only after it has turned off the runway.
 
 - **Reading the schedules:** the server reads all of them at once (one pass over the AIG files, a few seconds), instead of one airport at a time.

@@ -31,12 +31,16 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
 
     public TrafficLevel Level
     {
-        get => (settings.Get("traffic_level") ?? "normal") switch { "off" => TrafficLevel.Off, "light" => TrafficLevel.Light, "busy" => TrafficLevel.Busy, "peak" => TrafficLevel.Peak, _ => TrafficLevel.Normal };
+        get => (settings.Get("traffic_level") ?? "medium") switch { "off" => TrafficLevel.Off, "light" => TrafficLevel.Light, "busy" => TrafficLevel.Busy, "real" => TrafficLevel.RealWorld, "peak" => TrafficLevel.Peak, _ => TrafficLevel.Medium };   // "normal" (older) = Medium
     }
+
+    /// <summary>The level's setting name ("normal" from older versions reads as "medium").</summary>
+    private string LevelName => (settings.Get("traffic_level") ?? "medium") is "normal" ? "medium" : settings.Get("traffic_level") ?? "medium";
 
     public void SetLevel(string level)
     {
-        if (level is not ("off" or "light" or "normal" or "busy" or "peak")) return;
+        if (level == "normal") level = "medium";
+        if (level is not ("off" or "light" or "medium" or "busy" or "real" or "peak")) return;
         settings.Update(System.Text.Json.JsonSerializer.SerializeToElement(new Dictionary<string, string> { ["traffic_level"] = level }));
         lock (_gate) if (_world is not null) _world.Level = Level;
         log.LogInformation("Traffic level: {level}", level);
@@ -70,8 +74,9 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     }
 
     /// <summary>Most aircraft drawn in the sim at once (MSFS slows down with many AI objects).</summary>
-    private const int MaxDrawn = 50;
-    private const double DrawRadiusNm = 60, DrawBandFt = 10000;   // nearest 50 within 60 nm (a TRACON's satellites, e.g. MLB 55 nm from MCO)
+    /// <summary>Real world and Peak allow more, as there's more traffic close by worth seeing.</summary>
+    private int MaxDrawn => Level >= TrafficLevel.RealWorld ? 80 : 50;
+    private const double DrawRadiusNm = 60, DrawBandFt = 10000;   // nearest 50 (80 at Real world and Peak) within 60 nm (a TRACON's satellites, e.g. MLB 55 nm from MCO)
 
     /// <summary>
     /// Which simulated flights are drawn in the sim (null = all, when MSFS isn't connected): airborne traffic within
@@ -180,7 +185,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 airport = w is null ? null : new { icao = w.Apt.Icao, name = w.Apt.Name, lat = w.Apt.Map.ToLatLon(new V2(0, 0)).lat, lon = w.Apt.Map.ToLatLon(new V2(0, 0)).lon },
                 user = live ? new { lat = sim!.Lat, lon = sim.Lon, hdg = Math.Round(sim.HeadingTrue), alt = Math.Round(sim.AltitudeFt), gs = Math.Round(sim.GroundSpeed), ground = sim.OnGround, callsign = sim.AtcId } : null,
                 drawRadiusNm = DrawRadiusNm,
-                level = settings.Get("traffic_level") ?? "normal",
+                level = LevelName,
                 peak = w?.PeakInfo,
                 approach = w?.ApproachInUse,
                 runways,
@@ -304,7 +309,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
             var w = _world;
             return new
             {
-                level = (settings.Get("traffic_level") ?? "normal"),
+                level = (LevelName),
                 airport = w?.Apt.Icao,
                 airportName = w?.Apt.Name,
                 layout = w is null ? null : $"{w.Apt.Spots.Count} parking spots, {w.Apt.Data.Departures.Count} SIDs, {w.Apt.Data.Arrivals.Count} STARs, {w.Apt.Data.Approaches.Count} approaches",

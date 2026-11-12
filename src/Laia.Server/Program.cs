@@ -129,7 +129,7 @@ app.MapGet("/api/traffic", (TrafficEngine t, RunwayDb r) => Results.Json(new { r
 app.MapPost("/api/traffic/level/{level}", (string level, TrafficEngine t) =>
 {
     t.SetLevel(level);
-    var msg = level switch { "off" => "AI traffic off.", "light" => "Light traffic.", "busy" => "Busy traffic.", "peak" => "Peak-hour test: the airport's busiest hours from its real schedule, replayed now.", _ => "Normal traffic." };
+    var msg = level switch { "off" => "AI traffic off.", "light" => "Light traffic: about a third of the real schedule.", "busy" => "Busy traffic: the whole real schedule, within limits that grow with the airport.", "real" => "Real world: the whole real schedule, no limits.", "peak" => "Peak stress test: the airport's busiest 3 hours from its real schedule, replayed now in full, no limits.", _ => "Medium traffic: about two thirds of the real schedule." };
     return Results.Json(new { ok = true, message = msg }, jsonOpts);
 });
 // LAIA Sim sends an airport's layout and procedures, read from MSFS.

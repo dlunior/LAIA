@@ -3,7 +3,12 @@ using Laia.Common.Airports;
 namespace Laia.Server.TrafficCore;
 
 /// <summary>Peak is a test setting: the airport's busiest hours from its real schedule, replayed now (not the real time).</summary>
-public enum TrafficLevel { Off, Light, Normal, Busy, Peak }
+/// <summary>
+/// Off; Light, Medium and Busy fly a share of the real schedule (35%, 65%, all of it) under caps that grow with the
+/// airport's size; Real world flies the whole real schedule with no caps; Peak is the stress test — the airport's busiest
+/// 3 hours, replayed now, in full and with no caps.
+/// </summary>
+public enum TrafficLevel { Off, Light, Medium, Busy, RealWorld, Peak }
 
 public sealed record AircraftIdentity(string Airline, string Type, string Callsign, string Other);
 
@@ -154,14 +159,14 @@ public sealed partial class TrafficWorld
         set
         {
             if (_level == value) return;
-            var wasBusy = _level is TrafficLevel.Normal or TrafficLevel.Busy or TrafficLevel.Peak;
+            var wasBusy = _level >= TrafficLevel.Medium;
             _level = value;
-            var isBusy = value is TrafficLevel.Normal or TrafficLevel.Busy or TrafficLevel.Peak;
+            var isBusy = value >= TrafficLevel.Medium;
             if (value != TrafficLevel.Peak) { _peakSet = false; _peakOffset = 0; PeakInfo = null; }
             if (wasBusy != isBusy && ArrRwy is not null) SelectRunways(true);
         }
     }
-    private TrafficLevel _level = TrafficLevel.Normal;
+    private TrafficLevel _level = TrafficLevel.Medium;
     public RunwayEnd? ArrRwy { get; private set; }
     /// <summary>Every landing runway in use (the ATIS can name several, e.g. Orlando's 35L and 36L); ArrRwy is the main one.</summary>
     public List<RunwayEnd> ArrRwys { get; private set; } = new();
@@ -258,14 +263,60 @@ public sealed partial class TrafficWorld
 
     // ------------------------------------------------------------------ levels
 
-    private (int maxObjects, int maxActive, double movementsPerHour, double parkedFill) Budget => Level switch
+    /// <summary>
+    /// Most aircraft at the airport, most moving at once, the made-up movements an hour (only without a real schedule) and
+    /// the share of parking filled. Light, Medium and Busy caps grow with the airport (<see cref="SizeFactor"/>, up to
+    /// double); Real world and Peak have no practical cap — the real schedule decides.
+    /// </summary>
+    private (int maxObjects, int maxActive, double movementsPerHour, double parkedFill) Budget
     {
-        TrafficLevel.Light => (12, 4, 10, 0.25),
-        TrafficLevel.Normal => (22, 7, 20, 0.40),
-        TrafficLevel.Busy => (34, 11, 32, 0.55),
-        TrafficLevel.Peak => (44, 14, 40, 0.65),
-        _ => (0, 0, 0, 0),
-    };
+        get
+        {
+            var (o, a, m, f) = Level switch
+            {
+                TrafficLevel.Light => (12, 4, 10.0, 0.25),
+                TrafficLevel.Medium => (22, 7, 20.0, 0.40),
+                TrafficLevel.Busy => (34, 11, 32.0, 0.55),
+                TrafficLevel.RealWorld => (400, 150, 40.0, 0.65),
+                TrafficLevel.Peak => (400, 150, 44.0, 0.70),
+                _ => (0, 0, 0.0, 0.0),
+            };
+            if (Level is TrafficLevel.Light or TrafficLevel.Medium or TrafficLevel.Busy)
+            {
+                var k = SizeFactor;
+                o = (int)Math.Round(o * k); a = (int)Math.Round(a * k);
+            }
+            return (o, a, m, f);
+        }
+    }
+
+    private ScheduleData? _sizeFor;
+    private double _size = 1;
+    /// <summary>
+    /// How big the airport is, from its real schedule: its busiest hour's movements over 20 (what the base caps suit),
+    /// between 1 and 2. A regional field stays at 1; a hub like Orlando gets double the room. 1 without a schedule.
+    /// </summary>
+    public double SizeFactor
+    {
+        get
+        {
+            var s = Schedule;
+            if (s is null) return 1;
+            if (!ReferenceEquals(s, _sizeFor))
+            {
+                _sizeFor = s;
+                var me = Apt.Icao;
+                var bins = new int[168];
+                foreach (var l in s.Legs)
+                {
+                    if (l.Dep == me) bins[((l.DepMin % 10080 + 10080) % 10080) / 60]++;
+                    if (l.Arr == me) bins[((l.ArrMin % 10080 + 10080) % 10080) / 60]++;
+                }
+                _size = Math.Clamp(bins.Max() / 20.0, 1, 2);
+            }
+            return _size;
+        }
+    }
 
     // ------------------------------------------------------------------ runways
 
@@ -331,7 +382,7 @@ public sealed partial class TrafficWorld
         var group = usable.Where(e => Math.Abs(Geo2.Diff(e.Heading, best.Heading)) < 25).OrderByDescending(e => e.LengthM).ToList();
         var arr = group[0];
         var dep = group.Skip(1).FirstOrDefault(e => e.Runway != arr.Runway && e.LengthM >= 2000);
-        if (dep is null && Level is TrafficLevel.Normal or TrafficLevel.Busy or TrafficLevel.Peak)
+        if (dep is null && Level >= TrafficLevel.Medium)
         {
             var nm = Geo2.MPerNm;
             dep = usable.Where(e => e.Runway != arr.Runway && e.LengthM >= 1900 && WindOk(e) && Crossing(arr, e) is not null)
@@ -815,7 +866,7 @@ public sealed partial class TrafficWorld
     /// <summary>The traffic level thins the real schedule (the same flights each time).</summary>
     private bool Keep(ScheduleLeg l)
     {
-        var pct = Level switch { TrafficLevel.Light => 35, TrafficLevel.Normal => 65, _ => 100 };   // Busy and Peak: every flight
+        var pct = Level switch { TrafficLevel.Light => 35, TrafficLevel.Medium => 65, _ => 100 };   // Busy, Real world and Peak: every flight (Busy under caps)
         // Whole airframes are kept or left out (so an aircraft that lands also leaves again), the same ones every time.
         uint h = 2166136261;
         foreach (var c in l.Reg.Length > 0 ? l.Reg : l.Callsign) h = (h ^ c) * 16777619;
@@ -976,7 +1027,7 @@ public sealed partial class TrafficWorld
                 _done.Add(Key(l, 'A'));
                 SpawnArrival(d, false, l, plan);
             }
-            Log($"{me}: following the real {Schedule.Source} schedule ({deps.Count} departures and {arrs.Count} arrivals a week at this level); {placed} aircraft at the gates waiting for their next flight");
+            Log($"{me}: following the real {Schedule.Source} schedule ({deps.Count} departures and {arrs.Count} arrivals a week at {Level}; {(maxObjects >= 400 ? "no cap" : $"up to {maxObjects} aircraft, {maxActive} moving, airport size x{SizeFactor:0.0}")}); {placed} aircraft at the gates waiting for their next flight");
         }
         // Arrivals still far out (handed over from the whole sky) don't count against the traffic level: only what's
         // near the airport does (and only that is ever drawn in the sim).
