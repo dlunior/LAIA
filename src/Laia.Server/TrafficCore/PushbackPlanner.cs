@@ -21,6 +21,10 @@ public sealed class PushPlan
 /// push straight back along the lead-in until the wingtips are past the service road behind the gates, turn
 /// once, end lined up on a taxi line facing the shorter way to the runway, never into a dead end, never
 /// through another stand, never across a road. Hard problems always rank below clean options.
+/// LAIA can't see buildings (the sim's airport data has none), so a pushback must stay on the pavement the scenery
+/// defines: its lead-in, taxi lines and stands (user, MCO Gate 91, 12 Nov 2026: a "clear the gates" push left the
+/// lines and swung the tail into the hub building). Leaving them is a hard problem; turning before the service road
+/// behind the gates is only a penalty when the turn is on the scenery's own lines.
 /// </summary>
 public sealed class PushbackPlanner(AirportModel apt)
 {
@@ -36,6 +40,7 @@ public sealed class PushbackPlanner(AirportModel apt)
         // The service road behind the gate, and where the wingtips are clear of it.
         var (roadDist, wingDist) = RoadBehind(s0, back, span);
 
+        var leadIn = spot.Access >= 0 ? (apt.Nodes[spot.Access] - s0).Length : 0;
         var cands = new List<PushPlan>();
         foreach (var line in apt.TaxiLines)
         {
@@ -58,7 +63,8 @@ public sealed class PushbackPlanner(AirportModel apt)
                 var sc = V2.Dot(n, a - s0) / denom;   // distance back to the corner
                 // A tug pushes onto the taxilane behind the stand, not a long way out onto a taxiway (MCO: 205 m pushes
                 // into the taxiway jammed the traffic): at most about 100 m straight back.
-                if (sc < 5 || sc > Math.Max(100, perf.LengthM * 2.2)) continue;
+                // A stand's own lead-in can be longer (MCO's international gates: 110 m) — pushing back along it is fine.
+                if (sc < 5 || sc > Math.Max(Math.Max(100, perf.LengthM * 2.2), leadIn + 10)) continue;
                 var corner = s0 + back * sc;
                 if (!WithinLine(corner, a, b, u, 40)) continue;
                 foreach (var r in new[] { rcomf, rmin * 1.15, rcomf * 1.4 })
@@ -78,11 +84,13 @@ public sealed class PushbackPlanner(AirportModel apt)
             }
         }
 
-        // Check the most promising ones for dead ends and facing the right way.
+        // Check the most promising ones for dead ends, facing the right way and staying on the pavement.
+        var paved = Pavement(s0);
         var shortlist = cands.OrderBy(c => c.Problems.Count > 0 ? 1 : 0).ThenBy(c => c.Score).Take(8).ToList();
-        foreach (var c in shortlist) CheckRoute(c, targetNode);
+        foreach (var c in shortlist) { CheckRoute(c, targetNode); CheckPavement(c, perf, paved); }
         var best = shortlist.OrderBy(c => c.Problems.Count > 0 ? 1 : 0).ThenBy(c => c.Score).FirstOrDefault();
         var fallback = Fallback(spot, perf, roadDist, wingDist, rcomf, targetNode);
+        CheckPavement(fallback, perf, paved);
         if (best is null || (best.Problems.Count > 0 && fallback.Problems.Count < best.Problems.Count)) return fallback;
         return best;
     }
@@ -131,7 +139,9 @@ public sealed class PushbackPlanner(AirportModel apt)
         var score = 0.5 * (p.TurnStart + afterTurn) + 0.3 * turnDeg;
         if (p.Kind != "straight")
         {
-            if (!double.IsNaN(roadDist) && p.TurnStart < roadDist - 5) p.Problems.Add("turns among the gates");
+            // Turning before the service road: real pushes avoid it, but on the scenery's own lead-in and taxilane
+            // (a stand entered at an angle, the road crossing its lead-in) it's what the lines are for: a penalty only.
+            if (!double.IsNaN(roadDist) && p.TurnStart < roadDist - 5) score += 200;
             if (p.TurnStart < wingDist) score += 10 + 0.5 * (wingDist - p.TurnStart);
             if (p.Radius < rcomf) score += 3 * (rcomf - p.Radius);
         }
@@ -157,6 +167,55 @@ public sealed class PushbackPlanner(AirportModel apt)
         }
         p.Score = score;
         return p;
+    }
+
+    /// <summary>The scenery's pavement near a stand: taxi lines, every stand's lead-in, and the stands themselves.</summary>
+    private (List<(V2 a, V2 b)> lines, List<(V2 p, double r)> stands) Pavement(V2 s0)
+    {
+        var lines = new List<(V2 a, V2 b)>();
+        foreach (var l in apt.TaxiLines)
+        {
+            var a = apt.Nodes[l.A]; var b = apt.Nodes[l.B];
+            if (DistToSegment(s0, a, b) < 400) lines.Add((a, b));
+        }
+        var stands = new List<(V2 p, double r)>();
+        foreach (var o in apt.Spots)
+        {
+            if ((o.P - s0).Length > 400) continue;
+            stands.Add((o.P, Math.Max(10, o.RadiusM)));
+            if (o.Access >= 0) lines.Add((o.P, apt.Nodes[o.Access]));
+        }
+        return (lines, stands);
+    }
+
+    /// <summary>
+    /// Hard problem when the pushback leaves the pavement: the aircraft's middle more than 30 m from any line or stand,
+    /// or its tail more than 40 m — beyond that there may be a building the sim's data doesn't show.
+    /// </summary>
+    private static void CheckPavement(PushPlan p, Perf perf, (List<(V2 a, V2 b)> lines, List<(V2 p, double r)> stands) paved)
+    {
+        double Off(V2 q)
+        {
+            var d = double.MaxValue;
+            foreach (var (a, b) in paved.lines) d = Math.Min(d, DistToSegment(q, a, b));
+            foreach (var (c, r) in paved.stands) d = Math.Min(d, Math.Max(0, (c - q).Length - r));
+            return d;
+        }
+        var path = new PathGeom(p.Points, _ => p.Radius, 1);
+        for (double s = 0; s <= path.Length; s += 4)
+        {
+            var (q, dir, _) = path.At(s);
+            var tail = q + V2.FromBearing(dir) * (perf.LengthM / 2);   // pushing: the tail leads
+            if (Off(q) > 30 || Off(tail) > 40) { p.Problems.Add("leaves the taxi lines"); return; }
+        }
+    }
+
+    private static double DistToSegment(V2 p, V2 a, V2 b)
+    {
+        var ab = b - a;
+        var len2 = V2.Dot(ab, ab);
+        var t = len2 < 1e-9 ? 0 : Math.Clamp(V2.Dot(p - a, ab) / len2, 0, 1);
+        return (p - (a + ab * t)).Length;
     }
 
     private static bool SegmentsCross(V2 p1, V2 p2, V2 q1, V2 q2)
