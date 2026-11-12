@@ -264,7 +264,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 key = fl.Key, summary = fl.Summary,
                 stretches = fl.Stretches.Select(st => new
                 {
-                    name = st.name, departures = st.departures,
+                    name = st.name, departures = st.departures, real = st.real,
                     points = st.pts.Select(q => { var (la, lo) = w.Apt.Map.ToLatLon(q); return new[] { Math.Round(la, 6), Math.Round(lo, 6) }; }),
                 }),
             };

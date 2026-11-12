@@ -40,7 +40,7 @@ public sealed class AdsbHistory(ILogger<AdsbHistory> log)
         lock (_gate)
         {
             if (_running is { IsCompleted: false }) return;
-            var need = airports.Where(a => Profile(a.Icao) is not { } p || DateTime.UtcNow - p.LearnedUtc > TimeSpan.FromDays(60)).ToList();
+            var need = airports.Where(a => Profile(a.Icao) is not { } p || p.Version < AirportProfile.CurrentVersion || DateTime.UtcNow - p.LearnedUtc > TimeSpan.FromDays(60)).ToList();
             if (need.Count == 0) return;
             if (_lastTry.TryGetValue(string.Join(",", need.Select(a => a.Icao)), out var at) && DateTime.UtcNow - at < TimeSpan.FromHours(6)) return;
             _lastTry[string.Join(",", need.Select(a => a.Icao))] = DateTime.UtcNow;

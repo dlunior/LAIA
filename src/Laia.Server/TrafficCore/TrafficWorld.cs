@@ -1365,6 +1365,7 @@ public sealed partial class TrafficWorld
     // ------------------------------------------------------------------ taxi flow (TaxiFlow)
     private TaxiFlow? _flow;
     private string _flowKey = "";
+    private string? _flowDay;
     private Task<TaxiFlow>? _flowTask;
     /// <summary>The taxi flow for the runways in use (null until the airport has ground data and runways).</summary>
     public TaxiFlow? Flow => _flow;
@@ -1391,7 +1392,9 @@ public sealed partial class TrafficWorld
             else if (t.IsFaulted) Log($"{Apt.Icao}: taxi flow couldn't be worked out: {t.Exception?.InnerException?.Message}");
         }
         var key = $"landing {string.Join("/", ArrRwys.Select(r => r.Ident))}, departing {string.Join("/", DepRwys.Select(r => r.Ident))}";
-        if (key == _flowKey) return;
+        var learned = Learned is { Taxi.Count: > 0 } lp ? lp : null;
+        if (key + learned?.Day == _flowKey + _flowDay) return;
+        _flowDay = learned?.Day;
         _flowKey = key;
         _flow = TaxiFlow.Sides(Apt, ArrRwys.Concat(DepRwys).ToList(), key);
         // The hold-short node each departure runway would use from each stand, picked here (same as the real taxi out).
@@ -1400,7 +1403,20 @@ public sealed partial class TrafficWorld
             foreach (var d in DepRwys)
                 holds[(sp, d)] = PickRunwayEntry(d, out _, sp.P);
         var arr = ArrRwys.ToList(); var dep = DepRwys.ToList(); var active = ActiveRunways();
-        _flowTask = Task.Run(() => TaxiFlow.Build(Apt, arr, dep, active, (d, sp) => holds.GetValueOrDefault((sp, d), -1), key));
+        // Real taxi tracks (adsb.lol) for these runways: taxi-ins from the landing runways, taxi-outs to the departure ones.
+        var real = new List<(bool arrival, List<(V2 p, double trk)> pts)>();
+        if (learned is not null)
+        {
+            var arrIds = arr.Select(r => r.Ident).ToHashSet(); var depIds = dep.Select(r => r.Ident).ToHashSet();
+            foreach (var t in learned.Taxi)
+            {
+                var isArr = t.Kind == "arrival";
+                if (!(isArr ? arrIds : depIds).Contains(t.Runway)) continue;
+                real.Add((isArr, t.Points.Where(q => q.Length >= 3).Select(q => (Apt.Map.ToXY(q[0], q[1]), q[2])).ToList()));
+            }
+        }
+        var src = learned is null ? "" : $"{learned.Source} {learned.Day}";
+        _flowTask = Task.Run(() => TaxiFlow.Build(Apt, arr, dep, active, (d, sp) => holds.GetValueOrDefault((sp, d), -1), key, real, src));
         if (WaitForTaxiFlow) { _flowTask.Wait(); UpdateTaxiFlow(); }
     }
 

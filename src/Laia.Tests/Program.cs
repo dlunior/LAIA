@@ -1370,6 +1370,22 @@ Console.WriteLine("== Taxi flow: the inner parallel for arrivals, the outer for 
     Check(OnName(outRoute, "B") > OnName(outRoute, "A"), "the departure taxis out mostly on the outer taxiway B");
 }
 
+Console.WriteLine("== Taxi flow: real taxi tracks decide a stretch over the layout");
+{
+    var apt = new AirportModel(TestAirport.Build(false, twoParallels: true));
+    var rwy = apt.Ends.First(e => e.Ident == "27");
+    // Four real departures taxiing WEST on B (the layout's rehearsal sends departures east, towards runway 27's start).
+    var real = new List<(bool arrival, List<(V2 p, double trk)> pts)>();
+    for (var k = 0; k < 4; k++)
+        real.Add((false, Enumerable.Range(0, 25).Select(i => (new V2(1200 - i * 100 + k * 7, -200 + k), 270.0)).ToList()));
+    var fl = TaxiFlow.Build(apt, new[] { rwy }, new[] { rwy }, new HashSet<int>(), (d, sp) => -1, "test", real, "test day");
+    Console.WriteLine("  " + fl.Summary);
+    int Near(V2 p) => Enumerable.Range(0, apt.TaxiPointCount).OrderBy(i => (apt.Nodes[i] - p).Length).First();
+    var (w, e) = (Near(new V2(0, -200)), Near(new V2(300, -200)));
+    Check(fl.RealStretches > 0, $"real tracks decide some stretches ({fl.RealStretches})");
+    Check(fl.Against(w, e) && !fl.Against(e, w), "B flows west as the real aircraft did (eastbound is against the flow)");
+}
+
 Console.WriteLine("== Traffic starts even when no installed model fits the small gates");
 {
     var apt = new AirportModel(TestAirport.Build(false));

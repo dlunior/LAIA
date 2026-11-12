@@ -13,6 +13,9 @@ namespace Laia.Server.TrafficCore;
 /// that as its direction; going against it costs two and a half times the distance, so a parallel that flows the
 /// other way is used when there is one, and a short stretch or a taxiway with no alternative is still used both ways
 /// (the nose-to-nose waiting handles meetings there).</item>
+/// <item>Real taxi tracks first (user: real data over scenery): where adsb.lol's ground positions for the runways in use
+/// cover a stretch (3+ aircraft, 6+ positions), they decide it — one-way when 75% go one way, both ways otherwise —
+/// and replace the inner/outer guess there (a stretch only arrivals or only departures were seen on leans to them).</item>
 /// </list>
 /// Worked out again whenever the runways in use change.
 /// </summary>
@@ -20,6 +23,9 @@ public sealed class TaxiFlow
 {
     private readonly HashSet<(int, int)> _inner = new(), _outer = new();
     private readonly HashSet<(int, int)> _against = new();
+    private readonly HashSet<(int, int)> _depOnly = new(), _arrOnly = new();   // real tracks: only that kind uses it
+    public int RealStretches { get; private set; }
+    public int RealTracks { get; private set; }
     public string Key { get; init; } = "";
     public string Summary { get; private set; } = "";
     public int OneWay { get; private set; }
@@ -27,13 +33,13 @@ public sealed class TaxiFlow
     public int InnerEdges => _inner.Count / 2;
     public int OuterEdges => _outer.Count / 2;
     /// <summary>The one-way stretches for the map: points in the flow's direction, with the taxiway name.</summary>
-    public List<(string name, List<V2> pts, bool departures)> Stretches { get; } = new();
+    public List<(string name, List<V2> pts, bool departures, bool real)> Stretches { get; } = new();
 
     /// <summary>Extra cost of taxiing u → v (length len) for an arrival taxiing in or a departure taxiing out.</summary>
     public double Cost(int u, int v, double len, bool inbound)
     {
         double c = 0;
-        if (inbound ? _outer.Contains((u, v)) : _inner.Contains((u, v))) c += len * 0.5;
+        if (inbound ? _outer.Contains((u, v)) || _depOnly.Contains((u, v)) : _inner.Contains((u, v)) || _arrOnly.Contains((u, v))) c += len * 0.5;
         if (_against.Contains((u, v))) c += len * 1.5;
         return c;
     }
@@ -82,7 +88,8 @@ public sealed class TaxiFlow
     /// the background). holds: each departure runway's hold-short node for a stand (the node the world would use).
     /// </summary>
     public static TaxiFlow Build(AirportModel apt, IReadOnlyList<RunwayEnd> arr, IReadOnlyList<RunwayEnd> dep,
-        IReadOnlySet<int> activeRunways, Func<RunwayEnd, AirportModel.ParkingSpot, int> holdFor, string key)
+        IReadOnlySet<int> activeRunways, Func<RunwayEnd, AirportModel.ParkingSpot, int> holdFor, string key,
+        IReadOnlyList<(bool arrival, List<(V2 p, double trk)> pts)>? real = null, string realSource = "")
     {
         var f = new TaxiFlow { Key = key };
         f.FindParallels(apt, arr.Concat(dep).ToList());
@@ -115,43 +122,126 @@ public sealed class TaxiFlow
             }
         }
 
-        // ---- stretches of each named taxiway, and their direction
+        // ---- stretches of each named taxiway
         var runs = StretchesOf(apt);
-        var oneWay = new List<(string name, double lenM, double brg, bool deps, double share)>();
-        foreach (var (name, nodes) in runs)
+
+        // ---- real ground tracks (adsb.lol), matched onto the stretches: each ground position within 20 m of a stretch's
+        // segment and moving along it (within 35°) counts one way or the other, for arrivals or departures.
+        var obs = new (double f, double b, double arr, double dep, HashSet<int> tracks)[runs.Count];
+        for (var r = 0; r < runs.Count; r++) obs[r] = (0, 0, 0, 0, new HashSet<int>());
+        if (real is { Count: > 0 })
         {
-            double fwd = 0, bwd = 0, fDep = 0, bDep = 0, len = 0;
-            for (var i = 0; i + 1 < nodes.Count; i++)
+            RealTracks = real.Count;
+            const double cell = 60;
+            var grid = new Dictionary<(int, int), List<(int run, V2 a, V2 b)>>();
+            (int, int) Cell(V2 p) => ((int)Math.Floor(p.X / cell), (int)Math.Floor(p.Y / cell));
+            for (var r = 0; r < runs.Count; r++)
             {
-                var (u, v) = (nodes[i], nodes[i + 1]);
-                var l = (apt.Nodes[v] - apt.Nodes[u]).Length; len += l;
-                var fd = depUse.GetValueOrDefault((u, v)); var fa = arrUse.GetValueOrDefault((u, v));
-                var bd = depUse.GetValueOrDefault((v, u)); var ba = arrUse.GetValueOrDefault((v, u));
-                fwd += (fd + fa) * l; bwd += (bd + ba) * l; fDep += fd * l; bDep += bd * l;
+                var nodes = runs[r].nodes;
+                for (var i = 0; i + 1 < nodes.Count; i++)
+                {
+                    var a = apt.Nodes[nodes[i]]; var b = apt.Nodes[nodes[i + 1]];
+                    var (x0, y0) = Cell(new V2(Math.Min(a.X, b.X) - 20, Math.Min(a.Y, b.Y) - 20));
+                    var (x1, y1) = Cell(new V2(Math.Max(a.X, b.X) + 20, Math.Max(a.Y, b.Y) + 20));
+                    for (var cx = x0; cx <= x1; cx++)
+                        for (var cy = y0; cy <= y1; cy++)
+                            (grid.TryGetValue((cx, cy), out var l) ? l : grid[(cx, cy)] = new()).Add((r, a, b));
+                }
             }
-            var total = fwd + bwd;
-            // At least about two rehearsed aircraft over the whole stretch, and 70% one way.
-            if (len < 1 || total / len < 2 || Math.Max(fwd, bwd) / total < 0.7) { f.TwoWay++; continue; }
-            var forward = fwd >= bwd;
+            for (var t = 0; t < real.Count; t++)
+            {
+                var (isArr, pts) = real[t];
+                foreach (var (p, trk) in pts)
+                {
+                    if (!grid.TryGetValue(Cell(p), out var segs)) continue;
+                    var best = 20.0; int bestRun = -1; var fwd = false;
+                    foreach (var (run, a, b) in segs)
+                    {
+                        var d = DistToSegment(p, a, b);
+                        if (d >= best) continue;
+                        var diff = Math.Abs(Geo2.Diff((b - a).Bearing, trk));
+                        if (diff < 35) { best = d; bestRun = run; fwd = true; }
+                        else if (diff > 145) { best = d; bestRun = run; fwd = false; }
+                    }
+                    if (bestRun < 0) continue;
+                    var o = obs[bestRun];
+                    obs[bestRun] = (o.f + (fwd ? 1 : 0), o.b + (fwd ? 0 : 1), o.arr + (isArr ? 1 : 0), o.dep + (isArr ? 0 : 1), o.tracks);
+                    o.tracks.Add(t);
+                }
+            }
+        }
+
+        // ---- each stretch's direction: real tracks when there are enough of them, the rehearsal otherwise
+        var oneWay = new List<(string name, double lenM, double brg, bool deps, double share, bool real)>();
+        int fromLayout = 0;
+        for (var r = 0; r < runs.Count; r++)
+        {
+            var (name, nodes) = runs[r];
+            var o = obs[r];
+            bool? forward = null; bool deps;
+            var isReal = o.tracks.Count >= 3 && o.f + o.b >= 6;
+            if (isReal)
+            {
+                f.RealStretches++;
+                if (Math.Max(o.f, o.b) / (o.f + o.b) >= 0.75) forward = o.f >= o.b;
+                deps = o.dep >= o.arr;
+                // What really uses it overrides the inner/outer guess.
+                for (var i = 0; i + 1 < nodes.Count; i++)
+                {
+                    var (u, v) = (nodes[i], nodes[i + 1]);
+                    foreach (var e in new[] { (u, v), (v, u) })
+                    {
+                        f._inner.Remove(e); f._outer.Remove(e);
+                        if (o.arr == 0 && o.dep >= 6) f._depOnly.Add(e);
+                        if (o.dep == 0 && o.arr >= 6) f._arrOnly.Add(e);
+                    }
+                }
+            }
+            else
+            {
+                double fwd = 0, bwd = 0, fDep = 0, bDep = 0, len0 = 0;
+                for (var i = 0; i + 1 < nodes.Count; i++)
+                {
+                    var (u, v) = (nodes[i], nodes[i + 1]);
+                    var l = (apt.Nodes[v] - apt.Nodes[u]).Length; len0 += l;
+                    var fd = depUse.GetValueOrDefault((u, v)); var fa = arrUse.GetValueOrDefault((u, v));
+                    var bd = depUse.GetValueOrDefault((v, u)); var ba = arrUse.GetValueOrDefault((v, u));
+                    fwd += (fd + fa) * l; bwd += (bd + ba) * l; fDep += fd * l; bDep += bd * l;
+                }
+                var total = fwd + bwd;
+                // At least about two rehearsed aircraft over the whole stretch, and 70% one way.
+                if (len0 >= 1 && total / len0 >= 2 && Math.Max(fwd, bwd) / total >= 0.7) { forward = fwd >= bwd; fromLayout++; }
+                deps = (forward ?? true) ? fDep >= fwd - fDep : bDep >= bwd - bDep;
+            }
+            if (forward is not { } fw) { f.TwoWay++; continue; }
             for (var i = 0; i + 1 < nodes.Count; i++)
-                f._against.Add(forward ? (nodes[i + 1], nodes[i]) : (nodes[i], nodes[i + 1]));
+                f._against.Add(fw ? (nodes[i + 1], nodes[i]) : (nodes[i], nodes[i + 1]));
             var pts = nodes.Select(n => apt.Nodes[n]).ToList();
-            if (!forward) pts.Reverse();
-            var depShare = forward ? fDep / Math.Max(1e-9, fwd) : bDep / Math.Max(1e-9, bwd);
-            f.Stretches.Add((name, pts, depShare >= 0.5));
+            if (!fw) pts.Reverse();
+            var len = 0.0; for (var i = 1; i < pts.Count; i++) len += (pts[i] - pts[i - 1]).Length;
+            f.Stretches.Add((name, pts, deps, isReal));
             f.OneWay++;
-            oneWay.Add((name, len, (pts[^1] - pts[0]).Bearing, depShare >= 0.5, Math.Max(depShare, 1 - depShare)));
+            oneWay.Add((name, len, (pts[^1] - pts[0]).Bearing, deps, 0, isReal));
         }
 
         // ---- the log line: one entry per taxiway and direction
         string Compass(double b) => new[] { "northbound", "northeastbound", "eastbound", "southeastbound", "southbound", "southwestbound", "westbound", "northwestbound" }[(int)Math.Round(Geo2.Norm(b) / 45) % 8];
-        var groups = oneWay.GroupBy(o => (o.name, Compass(o.brg), o.deps))
-            .Select(g => (g.Key.name, dir: g.Key.Item2, g.Key.deps, len: g.Sum(o => o.lenM)))
+        var groups = oneWay.GroupBy(o => (o.name, Compass(o.brg), o.deps, o.real))
+            .Select(g => (g.Key.name, dir: g.Key.Item2, g.Key.deps, g.Key.real, len: g.Sum(o => o.lenM)))
             .OrderByDescending(g => g.len).ToList();
-        var shown = string.Join(", ", groups.Take(14).Select(g => $"{g.name} {g.dir} ({(g.deps ? "departures" : "arrivals")}, {g.len / 1000:0.0} km)"));
+        var shown = string.Join(", ", groups.Take(14).Select(g => $"{g.name} {g.dir} ({(g.deps ? "departures" : "arrivals")}, {g.len / 1000:0.0} km{(g.real ? ", real" : "")})"));
         f.Summary = $"{f.OneWay} one-way stretches ({shown}{(groups.Count > 14 ? $", +{groups.Count - 14} more" : "")}); {f.TwoWay} stretches both ways; " +
+                    (f.RealTracks > 0 ? $"{f.RealStretches} stretches decided by {f.RealTracks} real taxi tracks ({realSource}), {fromLayout} one-way from the layout; " : "no real taxi tracks for these runways, so all from the layout; ") +
                     $"parallel taxiways: {f.InnerEdges} inner (arrivals) and {f.OuterEdges} outer (departures) segments; from {routes} rehearsed taxi routes at {stands.Count} stands";
         return f;
+    }
+
+    private static double DistToSegment(V2 p, V2 a, V2 b)
+    {
+        var ab = b - a;
+        var len2 = V2.Dot(ab, ab);
+        var t = len2 < 1e-9 ? 0 : Math.Clamp(V2.Dot(p - a, ab) / len2, 0, 1);
+        return (p - (a + ab * t)).Length;
     }
 
     /// <summary>The stands rehearsed: gates and larger stands, at most 90 spread evenly.</summary>

@@ -21,6 +21,18 @@ public sealed class AirportProfile
     public Dictionary<string, RunwayArrivals> Arrivals { get; set; } = new();
     public Dictionary<string, RunwayDepartures> Departures { get; set; } = new();
     public List<SampleTrack> Samples { get; set; } = new();
+    /// <summary>Real taxi tracks (ground positions off the runways), each with the runway it landed on or left from.</summary>
+    public List<TaxiTrack> Taxi { get; set; } = new();
+    /// <summary>What the profile holds: 2 = with taxi tracks. Older ones are learned again.</summary>
+    public int Version { get; set; }
+    public const int CurrentVersion = 2;
+
+    public sealed class TaxiTrack
+    {
+        public string Kind { get; set; } = "";       // arrival (taxi in) or departure (taxi out)
+        public string Runway { get; set; } = "";
+        public List<double[]> Points { get; set; } = new();   // lat, lon, track (°)
+    }
 
     public sealed class RunwayArrivals
     {
@@ -70,6 +82,7 @@ public sealed class AirportProfile
                       (a.Vectored > 0 ? $", downwind {a.DownwindNm:0.0} nm out, base at {a.BaseNm:0} nm" : ""));
         foreach (var (r, d) in Departures.OrderByDescending(x => x.Value.Count).Take(3))
             parts.Add($"{r}: {d.Count} departures in {d.Paths.Count} directions");
+        if (Taxi.Count > 0) parts.Add($"{Taxi.Count} taxi tracks ({Taxi.Count(t => t.Kind == "arrival")} in, {Taxi.Count(t => t.Kind == "departure")} out, {Taxi.Sum(t => t.Points.Count)} ground positions)");
         return $"{Source} {Day}: " + (parts.Count == 0 ? "nothing usable" : string.Join("; ", parts));
     }
 }
@@ -96,6 +109,7 @@ public static class TrackLearner
         var firstTurn = new Dictionary<string, List<double>>();
         var samples = new List<AirportProfile.SampleTrack>();
         var sampleCount = new Dictionary<string, int>();
+        var taxi = new List<AirportProfile.TaxiTrack>();
         foreach (var tr in tracks)
         {
             if (tr.Count < 5) continue;
@@ -118,6 +132,7 @@ public static class TrackLearner
                     l.Add(a.Value);
                     Sample("arrival", r.Ident, tr, Back(tr, i, 1500), i);
                 }
+                Taxi("arrival", r.Ident, tr, xy, i, +1);
                 // Skip past this landing (taxi, park).
                 while (i < tr.Count && (tr[i].AltFt is null || tr[i].AltFt < elevFt + 2000)) i++;
             }
@@ -129,6 +144,7 @@ public static class TrackLearner
                 var r = ends.FirstOrDefault(e => e.Along(xy[i]) > e.LengthM * 0.2 && e.Along(xy[i]) < e.LengthM + 3 * Nm && Math.Abs(e.Offset(xy[i])) < 300
                     && Math.Abs(Geo2.Diff(tr[i].Track, e.Heading)) < 20);
                 if (r is null) continue;
+                Taxi("departure", r.Ident, tr, xy, i, -1);
                 var path = new List<V2> { r.Threshold + r.Dir * r.LengthM };
                 var k = i;
                 double flown = 0;
@@ -156,7 +172,7 @@ public static class TrackLearner
             }
         }
 
-        var prof = new AirportProfile { Icao = icao, Source = source, Day = day, LearnedUtc = DateTime.UtcNow, Samples = samples };
+        var prof = new AirportProfile { Icao = icao, Source = source, Day = day, LearnedUtc = DateTime.UtcNow, Samples = samples, Taxi = taxi, Version = AirportProfile.CurrentVersion };
         foreach (var (rw, l) in arr)
         {
             if (l.Count < 3) continue;
@@ -197,6 +213,32 @@ public static class TrackLearner
             prof.Departures[rw] = d;
         }
         return prof;
+
+        // The ground part next to a landing (after it, dir +1) or a take-off (before it, dir -1): positions on the ground
+        // within 6 km of the airport and off the runways, in time order.
+        void Taxi(string kind, string rw, IReadOnlyList<TrackPoint> tr, List<V2> xy, int at, int dir)
+        {
+            if (taxi.Count >= 3000) return;
+            var pts = new List<double[]>();
+            var started = false;
+            V2? last = null;
+            for (var q = at; q >= 0 && q < tr.Count; q += dir)
+            {
+                if (Math.Abs(tr[q].T - tr[at].T) > 3600) break;
+                if (q != at && Math.Abs(tr[q].T - tr[q - dir].T) > 300) break;   // a long gap: parked, or out of coverage
+                var ground = tr[q].AltFt is null || tr[q].AltFt < elevFt + 50;
+                if (!ground) { if (started) break; continue; }                 // still flying (or flying again)
+                if (xy[q].Length > 6000) break;
+                if (ends.Any(e => e.Contains(xy[q], 10))) continue;            // on a runway: the roll, or crossing one
+                started = true;
+                if (last is { } l && (xy[q] - l).Length < 5) continue;        // standing still: no direction to learn
+                last = xy[q];
+                pts.Add(new[] { Math.Round(tr[q].Lat, 6), Math.Round(tr[q].Lon, 6), Math.Round(tr[q].Track) });
+            }
+            if (pts.Count < 3) return;
+            if (dir < 0) pts.Reverse();
+            taxi.Add(new AirportProfile.TaxiTrack { Kind = kind, Runway = rw, Points = pts });
+        }
 
         void Sample(string kind, string rw, IReadOnlyList<TrackPoint> tr, int from, int to)
         {
