@@ -1350,7 +1350,9 @@ Console.WriteLine("== Taxi flow: the inner parallel for arrivals, the outer for 
     Check(fl is not null && fl.OneWay > 0, $"one-way stretches found ({fl?.OneWay})");
     // An arrival from the first exit to a gate, and a departure from that gate to the runway: which parallel each uses.
     var rwy = world.ArrRwys[0];
-    var gate = apt.Spots[8];
+    // The far gate (x = 600) from the first exit (x = -300): 900 m along the parallels, worth staying on the inner one.
+    // (A gate 300 m from the exit legitimately uses the outer one: guidance, not a rule.)
+    var gate = apt.Spots.OrderByDescending(sp => sp.P.X).First();
     var exit = TaxiFlow.Exits(apt, rwy, gate.P)[0];
     double OnName(List<int>? r, string name)
     {
