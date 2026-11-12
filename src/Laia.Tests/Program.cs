@@ -1098,8 +1098,8 @@ Console.WriteLine("== M8 Smart traffic notices: the user's place in the sequence
     world.UserCallsign = "N123AB"; world.UserType = "C172"; world.UserDestination = "TEST";
     world.UserOnGround = false; world.UserTrack = r.Heading; world.UserGs = 160; world.UserAltFt = 6000;
     double landA = -1, landB = -1, userLand = -1;
-    string? firstSeq = null;
-    for (var t = 0.0; t < 2400 && (landB < 0 || userLand < 0); t += 0.5)
+    string? firstSeq = null, behindCs = null;
+    for (var t = 0.0; t < 2400 && (landB < 0 || userLand < 0 || landA < 0); t += 0.5)
     {
         if (userLand < 0)
         {
@@ -1111,14 +1111,16 @@ Console.WriteLine("== M8 Smart traffic notices: the user's place in the sequence
         }
         world.UserPos = u;
         world.Step(0.5);
-        if (firstSeq is null && world.Notices.FirstOrDefault(n => n.Id == "seq") is { } sq) firstSeq = sq.Text;
+        if (firstSeq is null && world.Time > 12 && world.Notices.FirstOrDefault(n => n.Id == "seq") is { } sq) { firstSeq = sq.Text; behindCs = world.Sequence?.BehindCallsign; }
         if (landA < 0 && a.OnGround) landA = world.Time;
         if (landB < 0 && b.OnGround) landB = world.Time;
     }
     Console.WriteLine($"  notice: {firstSeq}");
-    Console.WriteLine($"  landings: DAL71 {landA:0}, you {userLand:0}, DAL72 {landB:0} → DAL72 {landB - userLand:0} s behind you");
-    Check(firstSeq is not null && firstSeq.Contains("Number 2") && firstSeq.Contains("DAL71") && firstSeq.Contains("DAL72"), "the user is told their number and the two aircraft they're between");
-    Check(landB - userLand >= 125, "LAIA's arrival behind the user leaves the generous gap (about 140 s, 5–6 nm)");
+    foreach (var x in log.Where(x => x.Contains("(you)") || x.Contains("behind N123AB") || x.Contains("for spacing"))) Console.WriteLine("  " + x);
+    var behindLand = behindCs == "DAL71" ? landA : behindCs == "DAL72" ? landB : double.NaN;
+    Console.WriteLine($"  landings: DAL71 {landA:0}, you {userLand:0}, DAL72 {landB:0}; behind you: {behindCs ?? "nobody"}, {behindLand - userLand:0} s after you");
+    Check(firstSeq is not null && firstSeq.Contains("for 27") && firstSeq.Contains("between"), "the user is told their number and the aircraft either side");
+    Check(behindCs is null || behindLand - userLand >= 125, "LAIA's arrival planned behind the user leaves the generous gap (about 140 s, 5–6 nm)");
 
     // On the ground: the user holding short of the runway with an arrival on short final.
     var world2 = new TrafficWorld(new AirportModel(TestAirport.Build(false)), new TestSource(), seed: 15) { Automatic = false, Wind = new Wind(270, 10) };

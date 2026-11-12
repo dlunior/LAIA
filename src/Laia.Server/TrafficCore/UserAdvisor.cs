@@ -30,6 +30,8 @@ public sealed partial class TrafficWorld
     public Flight? UserArr { get; private set; }
     private double _userSlot = double.NaN, _userOffSince = double.NaN;
     private bool _userReplanned;
+    private string _seqSig = "";
+    private double _seqSince, _seqNewUntil = double.MinValue;
     public UserSequence? Sequence { get; private set; }
     public List<Notice> Notices { get; private set; } = new();
 
@@ -76,7 +78,7 @@ public sealed partial class TrafficWorld
     {
         if (!UserArriving() || UserPos is not { } u)
         {
-            UserArr = null; Sequence = null; _userSlot = double.NaN; return;
+            UserArr = null; Sequence = null; _userSlot = double.NaN; _seqSig = ""; return;
         }
         var arrs = ArrRwys.Count > 0 ? ArrRwys : ArrRwy is null ? new List<RunwayEnd>() : new() { ArrRwy };
         if (arrs.Count == 0) return;
@@ -122,11 +124,18 @@ public sealed partial class TrafficWorld
             var clock = (int)Math.Round(Geo2.Norm(v.Bearing - UserTrack) / 30) % 12;
             return $"{(clock == 0 ? 12 : clock)} o'clock, {v.Length / Geo2.MPerNm:0} nm, {Math.Round(o.AltFt / 100) * 100:N0} ft";
         }
-        var changed = _userReplanned;
+        // A new sequence when the plan was re-made for the user, or their number or neighbours changed (once settled:
+        // the first 10 s after they join are the sequence taking shape).
+        var sig = $"{me.Rwy!.Ident}|{me.Seq}|{ahead?.Id}|{behind?.Id}";
+        var changed = _userReplanned || (_seqSig.Length > 0 && sig != _seqSig && Time - _seqSince > 10);
+        if (_seqSig.Length == 0) _seqSince = Time;
+        _seqSig = sig;
         _userReplanned = false;
+        if (changed) _seqNewUntil = Time + 30;
+        changed |= Time < _seqNewUntil;
         Sequence = new UserSequence(me.Rwy!.Ident, me.Seq, ahead?.Callsign, ahead?.Type, ahead is null ? null : Where(ahead),
             behind?.Callsign, behind?.Type, changed, me.EtaSec);
-        if (changed) Log($"{me.Callsign} (you): new sequence — number {me.Seq} for {me.Rwy.Ident}, between {ahead?.Callsign ?? "nobody"} and {behind?.Callsign ?? "nobody"}");
+        if (changed && Time >= _seqNewUntil - 0.6) Log($"{me.Callsign} (you): new sequence — number {me.Seq} for {me.Rwy.Ident}, between {ahead?.Callsign ?? "nobody"} and {behind?.Callsign ?? "nobody"}");
     }
 
     /// <summary>The notices that matter now (rebuilt every step, shown while true).</summary>
