@@ -89,6 +89,7 @@ public sealed class Flight
     public Dictionary<string, double> FixPred10 = new();
     /// <summary>A departure's predicted take-off time (world time, NaN until predicted), and what was predicted 10 and 5 minutes before.</summary>
     public string DepReport = "";
+    public double GateTryTime = -999;
     /// <summary>A departure's climb stopped below crossing traffic (NaN: none), and when that was last checked.</summary>
     public double ClimbStop = double.NaN, ProbeAt = -99;
     public string? StoppedFor;
@@ -3338,6 +3339,9 @@ public sealed class TrafficWorld
         var atHold = f.Stops.Any(st => !st.Cleared && Math.Abs(st.S - f.S) < 3);
         if (f.Gs > 0.5 || atHold) { f.StuckFor = 0; return; }
         f.StuckFor += dt;
+        // After 2 minutes on the way in, another gate comes first (it used to wait for a minute without a reroute,
+        // which the reroutes every minute never allowed: DAL2225 was removed at MCO instead of going elsewhere).
+        if (f.StuckFor > 120 && f.Phase == "taxi in" && Time - f.GateTryTime > 60) { f.GateTryTime = Time; if (TryOtherGate(f)) { f.StuckFor = 0; return; } }
         if (f.StuckFor > 20 && f.BlockedByUser && UserPos is { } u && Time - f.RerouteTime > 60)
         {
             f.RerouteTime = Time;
@@ -3345,7 +3349,6 @@ public sealed class TrafficWorld
             // never reaching the "another gate" step, while the user's aircraft sat in its way).
             if (Reroute(f, u, "your aircraft")) return;
         }
-        if (f.StuckFor > 120 && f.Phase == "taxi in" && Time - f.RerouteTime > 60 && TryOtherGate(f)) { f.StuckFor = 0; return; }
         if (f.StuckFor > 300)
         {
             Log($"{f.Callsign}: stuck for 5 minutes at ({f.Pos.X:0}, {f.Pos.Y:0}), blocked by {f.BlockedBy?.Callsign ?? (f.BlockedByUser ? "your aircraft" : "nothing")}; removed");
@@ -3356,7 +3359,6 @@ public sealed class TrafficWorld
     /// <summary>An arriving aircraft that can't get to its gate takes another free gate it can reach.</summary>
     private bool TryOtherGate(Flight f)
     {
-        f.RerouteTime = Time;
         var old = f.Spot;
         f.Spot = null;
         var gate = FindGate(f.P, f.Airline, f.Brand, f.Callsign);
