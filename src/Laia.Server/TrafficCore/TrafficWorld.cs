@@ -110,6 +110,9 @@ public sealed class Flight
     public bool ClimbReleased;
     public string TopSource = "";
     public double TakeoffAt = double.NaN, TakeoffPred10 = double.NaN, TakeoffPred5 = double.NaN, ReadyAt = double.NaN;
+    /// <summary>Held at the gate for its departure slot since (world time; NaN: not held), and whether that's over.</summary>
+    public double GateHeldSince = double.NaN;
+    public bool GateHoldDone;
     /// <summary>The planned departure route (planned when lining up, so the spacing can look at where it goes).</summary>
     public List<AirPoint>? DepPlan;
     public string DepRoute = "";
@@ -2123,6 +2126,29 @@ public sealed partial class TrafficWorld
         return parts.Count == 0 ? "" : $" (take-off time as predicted {string.Join(", ", parts)})";
     }
 
+    /// <summary>
+    /// Planned departures (departure metering, as real airports do): a departure ready to push whose predicted slot on
+    /// the runway is more than 4 minutes after it could be there waits at the gate instead of in a queue at the runway,
+    /// and pushes when the wait is down to 2 minutes (at most 15 minutes held). Fewer engines running in line, and the
+    /// take-off time is planned from the slot, not from a queue's guess.
+    /// </summary>
+    private bool GateHold(Flight f)
+    {
+        if (f.Kind != "departure" || f.GateHoldDone || RunwayOnly || double.IsNaN(f.TakeoffAt) || double.IsNaN(f.ReadyAt)) return false;
+        var wait = f.TakeoffAt - (f.ReadyAt + 35);
+        if (double.IsNaN(f.GateHeldSince))
+        {
+            if (wait <= 240) return false;
+            f.GateHeldSince = Time;
+            Log($"{f.Callsign}: held at the gate for its departure slot (the wait at runway {f.Rwy?.Ident} would be {wait / 60:0.0} min)");
+            return true;
+        }
+        if (wait > 120 && Time - f.GateHeldSince < 900) return true;
+        f.GateHoldDone = true;
+        Log($"{f.Callsign}: released from the gate hold after {(Time - f.GateHeldSince) / 60:0.0} min (wait now {Math.Max(0, wait) / 60:0.0} min)");
+        return false;
+    }
+
     private double _lastDepPredict = -999;
     /// <summary>Seconds added to departures' ready times, learned from how late (or early) take-offs have been.</summary>
     private double _depBias;
@@ -3624,6 +3650,7 @@ public sealed partial class TrafficWorld
             case "boarding":
                 f.Lights = Nav | Logo | Cabin;
                 f.Timer -= dt;
+                if (f.Timer <= 0 && GateHold(f)) break;
                 if (f.Timer <= 0 && PushbackClear(f)) StartPushback(f);
                 break;
             case "pushback":
