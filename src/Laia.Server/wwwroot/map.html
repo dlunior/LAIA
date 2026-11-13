@@ -75,7 +75,7 @@
       <label><input type="checkbox" id="tFollow">Follow me</label>
       <label><input type="checkbox" id="tSky" checked>Whole sky</label>
       <label><input type="checkbox" id="tReal">Real tracks</label>
-      <label title="The planned direction of each one-way stretch of taxiway: violet arrivals, teal departures; solid from real taxi tracks, dashed worked out from the layout"><input type="checkbox" id="tFlow">Taxi flow</label>
+      <label title="The planned direction of each one-way stretch of taxiway: violet arrivals, teal departures, white both; solid from real taxi tracks, dashed worked out from the layout"><input type="checkbox" id="tFlow">Taxi flow</label>
     </div>
     <div style="margin-top:8px;display:flex;gap:6px"><button id="bAirport">Airport</button><button id="bMe">Me</button><button id="bList">Flights</button></div>
   </div>
@@ -255,7 +255,7 @@ async function updateFlow() {
     flowKey = d.key + d.stretches.length;
     layers.flow.clearLayers();
     for (const st of d.stretches) {
-      const col = st.departures ? "#2dd4bf" : "#a78bfa";
+      const col = st.use === "departures" ? "#2dd4bf" : st.use === "arrivals" ? "#a78bfa" : "#e5e7eb";
       // Solid: decided by real taxi tracks; dashed: worked out from the layout.
       L.polyline(st.points, { color: col, weight: 3, opacity: .55, dashArray: st.real ? null : "6 6", interactive: false }).addTo(layers.flow);
       for (let i = 0; i + 1 < st.points.length; i++) {

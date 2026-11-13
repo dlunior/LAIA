@@ -35,7 +35,7 @@ public sealed class TaxiFlow
     public int InnerEdges => _inner.Count / 2;
     public int OuterEdges => _outer.Count / 2;
     /// <summary>The one-way stretches for the map: points in the flow's direction, with the taxiway name.</summary>
-    public List<(string name, List<V2> pts, bool departures, bool real)> Stretches { get; } = new();
+    public List<(string name, List<V2> pts, string use, bool real)> Stretches { get; } = new();
 
     /// <summary>Extra cost of taxiing u → v (length len) for an arrival taxiing in or a departure taxiing out.</summary>
     public double Cost(int u, int v, double len, bool inbound)
@@ -183,20 +183,24 @@ public sealed class TaxiFlow
             }
         }
 
+        // Who uses a stretch: departures, arrivals, or both when the smaller share is 30% or more.
+        static string Use(double dep, double arr) =>
+            dep + arr <= 0 ? "both" : Math.Min(dep, arr) / (dep + arr) >= 0.3 ? "both" : dep > arr ? "departures" : "arrivals";
+
         // ---- each stretch's direction: real tracks when there are enough of them, the rehearsal otherwise
-        var oneWay = new List<(string name, double lenM, double brg, bool deps, double with, double against, bool real)>();
+        var oneWay = new List<(string name, double lenM, double brg, string deps, double with, double against, bool real)>();
         int fromLayout = 0;
         for (var r = 0; r < runs.Count; r++)
         {
             var (name, nodes) = runs[r];
             var o = obs[r];
-            bool? forward = null; bool deps;
+            bool? forward = null; string deps;
             var isReal = o.f + o.b >= 3;   // aircraft
             if (isReal)
             {
                 f.RealStretches++;
                 if (Math.Max(o.f, o.b) / (o.f + o.b) >= 0.75) forward = o.f >= o.b;
-                deps = o.dep >= o.arr;
+                deps = Use(o.dep, o.arr);
                 // What really uses it overrides the inner/outer guess.
                 for (var i = 0; i + 1 < nodes.Count; i++)
                 {
@@ -223,7 +227,7 @@ public sealed class TaxiFlow
                 var total = fwd + bwd;
                 // At least about two rehearsed aircraft over the whole stretch, and 70% one way.
                 if (len0 >= 1 && total / len0 >= 2 && Math.Max(fwd, bwd) / total >= 0.7) { forward = fwd >= bwd; fromLayout++; }
-                deps = (forward ?? true) ? fDep >= fwd - fDep : bDep >= bwd - bDep;
+                deps = (forward ?? true) ? Use(fDep, fwd - fDep) : Use(bDep, bwd - bDep);
             }
             if (forward is not { } fw) { f.TwoWay++; continue; }
             for (var i = 0; i + 1 < nodes.Count; i++)
@@ -241,8 +245,8 @@ public sealed class TaxiFlow
         var groups = oneWay.GroupBy(o => (o.name, Compass(o.brg), o.deps, o.real))
             .Select(g => (g.Key.name, dir: g.Key.Item2, g.Key.deps, g.Key.real, len: g.Sum(o => o.lenM), with: g.Max(o => o.with), against: g.Max(o => o.against)))
             .OrderByDescending(g => g.len).ToList();
-        f.Details = string.Join(", ", groups.OrderBy(g => g.name, StringComparer.Ordinal).Select(g => $"{g.name} {g.dir} ({(g.deps ? "departures" : "arrivals")}, {g.len / 1000:0.0} km{(g.real ? $", real {g.with:0}:{g.against:0}" : ", layout")})"));
-        var shown = string.Join(", ", groups.Take(14).Select(g => $"{g.name} {g.dir} ({(g.deps ? "departures" : "arrivals")}, {g.len / 1000:0.0} km{(g.real ? $", real: {g.with:0} aircraft that way, {g.against:0} the other" : "")})"));
+        f.Details = string.Join(", ", groups.OrderBy(g => g.name, StringComparer.Ordinal).Select(g => $"{g.name} {g.dir} ({g.deps}, {g.len / 1000:0.0} km{(g.real ? $", real {g.with:0}:{g.against:0}" : ", layout")})"));
+        var shown = string.Join(", ", groups.Take(14).Select(g => $"{g.name} {g.dir} ({g.deps}, {g.len / 1000:0.0} km{(g.real ? $", real: {g.with:0} aircraft that way, {g.against:0} the other" : "")})"));
         f.Summary = $"{f.OneWay} one-way stretches ({shown}{(groups.Count > 14 ? $", +{groups.Count - 14} more" : "")}); {f.TwoWay} stretches both ways; " +
                     (f.RealTracks > 0 ? $"{f.RealStretches} stretches decided by {f.RealTracks} real taxi tracks ({realSource}), {fromLayout} one-way from the layout; " : "no real taxi tracks for these runways, so all from the layout; ") +
                     $"parallel taxiways: {f.InnerEdges} inner (arrivals) and {f.OuterEdges} outer (departures) segments; from {routes} rehearsed taxi routes at {stands.Count} stands";
