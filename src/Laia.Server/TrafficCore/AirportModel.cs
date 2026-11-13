@@ -331,6 +331,27 @@ public sealed class AirportModel
 
     private double TrueCourse(ProcedureLeg l) => l.TrueCourse ? l.Course : Geo2.Norm(l.Course + MagVar);
 
+    /// <summary>
+    /// Where a heading-to-intercept leg (CI/VI) from here meets the next leg's course: a course to a fix (CF) is the
+    /// line through the fix on that course. Null when there's no such next leg, the two are nearly parallel, or the
+    /// meeting point isn't ahead (within 15 nm) and before the fix — then the old approximation is used.
+    /// </summary>
+    private V2? Intercept(V2 cur, ProcedureLeg l, ProcedureLeg? next)
+    {
+        if (next is null || next.Type != 4 || (Math.Abs(next.Lat) < 0.0001 && Math.Abs(next.Lon) < 0.0001)) return null;
+        var fix = Map.ToXY(next.Lat, next.Lon);
+        var hdg = V2.FromBearing(TrueCourse(l));
+        var crs = V2.FromBearing(TrueCourse(next));
+        var den = V2.Cross(hdg, crs);
+        if (Math.Abs(den) < 0.08) return null;                 // within about 5°: no real intercept
+        var d = fix - cur;
+        var t = V2.Cross(d, crs) / den;                        // along the heading
+        var u = V2.Cross(d, hdg) / den;                        // along the course from the fix (negative: before it)
+        if (t < -0.1 * Geo2.MPerNm || t > 15 * Geo2.MPerNm || u > -0.3 * Geo2.MPerNm) return null;
+        // At least half a mile on the heading (a departure turns once it's climbed away from the runway).
+        return cur + hdg * Math.Max(t, 0.5 * Geo2.MPerNm);
+    }
+
     /// <summary>Converts procedure legs to points on the map. Vector legs end the list (ATC would vector from there).</summary>
     public List<AirPoint> LegsToPoints(IEnumerable<ProcedureLeg> legs, V2 start, double startAltFt, out bool endedInVectors, bool hybrid = false)
     {
@@ -381,6 +402,13 @@ public sealed class AirportModel
                     endedInVectors = true;
                     return pts;
                 }
+                case 5 or 21 when !hasFix && Intercept(cur, l, li + 1 < list.Count ? list[li + 1] : null) is { } ip:
+                    // CI/VI ("heading 005 to intercept"): fly the heading only until it meets the next leg's course,
+                    // then that course to its fix (user, MCO FATHE4 off 35L: flown as 3 nm straight then a 50° turn
+                    // direct, LAIA's departures were 0.9 nm west of the real tracks 3–4 nm out). Every airport's SIDs
+                    // and approaches have these legs.
+                    if ((ip - cur).Length > 50) { cur = ip; pts.Add(new AirPoint(cur, "", minA, maxA, l.SpeedKt)); }
+                    break;
                 case 5 or 21 or 3 or 10 or 20 or 6 or 23: // CI/VI/CD/FD/VD/CR/VR: short course leg
                     if (hasFix) goto default;
                     cur += V2.FromBearing(TrueCourse(l), 3 * Geo2.MPerNm);

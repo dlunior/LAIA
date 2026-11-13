@@ -793,6 +793,25 @@ Console.WriteLine("== Vectors to final without a zigzag (MCO GRNCH5 for 36L: DOR
     Check(!zig, "no cutting in towards the final and back out again");
 }
 
+Console.WriteLine("== Heading to intercept (VI) then a course to a fix (CF): the turn comes where the heading meets the course (MCO FATHE4 off 35L)");
+{
+    var nm = Geo2.MPerNm;
+    var apt = new AirportModel(TestAirport.Build(false));
+    // From (0, 0): heading 000 to intercept course 037 to a fix at (2.9, 5.1) nm — the course line crosses x = 0 at y = 1.25 nm.
+    var fixPos = new V2(2.9 * nm, 5.1 * nm);
+    var (flat, flon) = apt.Map.ToLatLon(fixPos);
+    var legs = new List<ProcedureLeg>
+    {
+        new() { Type = 21, Course = 0, TrueCourse = true },
+        new() { Type = 4, Fix = "JWOLF", Lat = flat, Lon = flon, Course = 37, TrueCourse = true },
+    };
+    var pts = apt.LegsToPoints(legs, new V2(0, 0), 500, out _, hybrid: true);
+    var turn = pts[0].P;
+    Console.WriteLine($"  turn point at ({turn.X / nm:0.00}, {turn.Y / nm:0.00}) nm, then {pts[1].Fix} — was 3 nm straight ahead, then direct");
+    Check(Math.Abs(turn.X) < 0.1 * nm && Math.Abs(turn.Y / nm - 1.25) < 0.15, "it turns where the heading meets the 037 course, about 1.25 nm out");
+    Check(pts.Count == 2 && pts[1].Fix == "JWOLF", "and then flies the course to JWOLF");
+}
+
 Console.WriteLine("== Hybrid SIDs: RNAV to a fix, radar vectors, then RNAV again (MCO's runway → KAAPE → vectors → UKAYY)");
 {
     var nm = Geo2.MPerNm;

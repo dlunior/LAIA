@@ -2922,17 +2922,31 @@ public sealed partial class TrafficWorld
                 var trs = mine[name];
                 if (trs.Count < 3) continue;
                 checkedN++;
-                double maxDev = 0, at = 0, along = 0;
+                // Along LAIA's path, the median distance to the real departures. Real traffic is cleared direct and
+                // leaves the SID somewhere: from where it's more than 1.5 nm off and stays off, it's no longer the
+                // procedure being compared — only the part before that counts, and where they leave is reported.
+                var devs = new List<(double along, double dev, V2 p)>();
+                double along = 0;
                 for (var i = 0; i < pts.Count; i++)
                 {
                     if (i > 0) along += (pts[i] - pts[i - 1]).Length;
-                    var dev = Median(trs.Select(t => ToLine(pts[i], t)).ToList());
-                    if (dev > maxDev) { maxDev = dev; at = along; }
+                    devs.Add((along, Median(trs.Select(t => ToLine(pts[i], t)).ToList()), pts[i]));
                 }
-                var ok = maxDev <= 0.5 * nm;
+                var leave = -1;
+                for (var i = 0; i + 2 < devs.Count; i++)
+                    if (devs[i].dev > 1.5 * nm && devs[i + 1].dev > 1.0 * nm && devs[i + 2].dev > 1.0 * nm) { leave = i; break; }
+                var flown = leave < 0 ? devs : devs.Take(leave).ToList();
+                if (flown.Count == 0) continue;
+                var mx = flown.MaxBy(x => x.dev);
+                var ok = mx.dev <= 0.5 * nm;
                 if (!ok) differ++;
-                if (!ok && maxDev > worstNm) { worstNm = maxDev; worst = $"{name} {rwy.Ident} up to {maxDev / nm:0.0} nm off {at / nm:0.0} nm after the runway"; }
-                lines.Add($"{name} off {rwy.Ident}: {(ok ? "matches" : "DIFFERS from")} {trs.Count} real departures — LAIA's path is at most {maxDev / nm:0.0} nm from them ({at / nm:0.0} nm after the runway)");
+                if (!ok && mx.dev > worstNm) { worstNm = mx.dev; worst = $"{name} {rwy.Ident} up to {mx.dev / nm:0.0} nm off {mx.along / nm:0.0} nm after the runway"; }
+                var leaveFix = leave < 0 ? null : Apt.Data.Departures.First(d => d.Name == name).Legs
+                    .Concat(Apt.Data.Departures.First(d => d.Name == name).RunwayTransitions.Where(t => t.Name == rwy.Ident).SelectMany(t => t.Legs))
+                    .Where(l => l.Fix.Length > 0 && (Math.Abs(l.Lat) > 0.0001 || Math.Abs(l.Lon) > 0.0001))
+                    .OrderBy(l => (Apt.Map.ToXY(l.Lat, l.Lon) - devs[leave].p).Length).Select(l => l.Fix).FirstOrDefault();
+                lines.Add($"{name} off {rwy.Ident}: {(ok ? "matches" : "DIFFERS from")} {trs.Count} real departures — LAIA's path is at most {mx.dev / nm:0.0} nm from them ({mx.along / nm:0.0} nm after the runway)"
+                    + (leave < 0 ? "; flown as published as far as compared" : $"; real traffic leaves the SID about {devs[leave].along / nm:0} nm out{(leaveFix is null ? "" : $", near {leaveFix}")}, cleared direct"));
             }
         }
 
