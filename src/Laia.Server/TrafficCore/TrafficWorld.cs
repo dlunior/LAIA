@@ -2909,7 +2909,7 @@ public sealed partial class TrafficWorld
     /// replaced by a downwind, base and an intercept heading about 25° to the course 8–10 nm out — what a controller
     /// does when the arrival doesn't feed straight into the approach. Straight-in joins are left alone.
     /// </summary>
-    private static void ShapeFinal(List<V2> route, List<double> speeds, RunwayEnd rwy, VectorShape? shape = null)
+    internal static void ShapeFinal(List<V2> route, List<double> speeds, RunwayEnd rwy, VectorShape? shape = null)
     {
         var JoinNm = (shape ?? VectorShape.Default).JoinNm;
         var nm = Geo2.MPerNm;
@@ -2935,6 +2935,16 @@ public sealed partial class TrafficWorld
             m--;
         }
         var vec = Vectors(route[m], rwy, shape);
+        // No zigzag: a route that cuts in towards the final just before (the keep-clear point beside the airport, or a
+        // fix inside the downwind) and would then be sent back out to the downwind starts its vectors from the point
+        // before instead (MCO GRNCH5 for 36L: DORII → a point 1 nm inside the downwind → straight back out to it).
+        while (m > 0 && vec.Count > 0)
+        {
+            var o0 = Math.Abs(rwy.Offset(route[m]));
+            if (!(Math.Abs(rwy.Offset(vec[0])) > o0 + 0.5 * nm && Math.Abs(rwy.Offset(route[m - 1])) > o0 + 0.3 * nm)) break;
+            m--;
+            vec = Vectors(route[m], rwy, shape);
+        }
         var tail = new List<(V2 p, double kt)>();
         for (var i = k; i < route.Count; i++)
             if (-rwy.Along(route[i]) < JoinNm * nm - 300) tail.Add((route[i], i < speeds.Count ? speeds[i] : 0));
@@ -3635,6 +3645,7 @@ public sealed partial class TrafficWorld
         foreach (var o in Flights)
         {
             if (o == f || o.Done || !o.OnGround || o.Phase is not ("taxi" or "taxi in")) continue;
+            if (f.Ignore == o && Time < f.IgnoreUntil) continue;   // a standoff this one was told to go first in
             if (NextEdge(o) is not { } it) continue;
             // It's on (or entering first) the same segment the other way round.
             if (it.u == me.v && it.v == me.u && it.toU < me.toU) return o;
@@ -3647,7 +3658,11 @@ public sealed partial class TrafficWorld
         var mdir = V2.FromBearing(f.Reverse ? Geo2.Norm(f.Heading + 180) : f.Heading);
         Flight? by = null;
         var userBlock = false;
-        if (SingleLaneTraffic(f) is { } lane) { f.BlockedBy = lane; f.BlockedFor += 0.25; return true; }
+        // Waiting at a junction for traffic on a single taxiway: a block like any other, so a ring of aircraft waiting
+        // for each other is found and broken (MCO: SWA6325 waited for ASA301 to come off the single lane while ASA301
+        // waited behind SWA6325 — both sat 5 minutes until SWA6325 was removed).
+        by = SingleLaneTraffic(f);
+        if (by is null)
         foreach (var o in Flights)
         {
             if (o == f || !o.OnGround || o.Done || o.Phase is "parked" or "boarding" or "takeoff roll") continue;
@@ -3811,8 +3826,19 @@ public sealed partial class TrafficWorld
                 var aAlt = Math.Max(a.AltFt + Math.Min(0, a.Vs) * t / 60, (a.Rwy?.ElevationFt ?? 0));
                 if ((dp - ap).Length < 3.5 * Geo2.MPerNm && Math.Abs(dAlt - aAlt) < 1000 && d.AltFt < aAlt)
                 {
+                    // The lowest the arrival gets while it's still near (it keeps descending after the first conflict:
+                    // MCO, DAL328 descending through 9,100 ft 3 nm from SWA660 stopped at 8,177 ft).
                     var lowest = Math.Min(a.AltFt, aAlt);
+                    for (var t2 = t; t2 <= 120; t2 += 15)
+                    {
+                        var dp2 = d.Path.At(Math.Min(d.Path.Length, d.S + d.Gs * 0.5144 * t2)).p;
+                        var ap2 = a.Path.At(Math.Min(a.Path.Length, a.S + a.Gs * 0.5144 * t2)).p;
+                        if ((dp2 - ap2).Length < 5 * Geo2.MPerNm)
+                            lowest = Math.Min(lowest, Math.Max(a.AltFt + Math.Min(0, a.Vs) * t2 / 60, a.Rwy?.ElevationFt ?? 0));
+                    }
                     var level = Math.Floor((lowest - 1000) / 1000) * 1000;
+                    // Never raised while the same arrival is still in the way (a level-off isn't lifted early).
+                    if (d.StoppedFor == a.Callsign && !double.IsNaN(d.ClimbStop)) level = Math.Min(level, d.ClimbStop);
                     // Never stopped below 2,000 ft above the field (departure control's lowest level-off); below that
                     // it's the arrival that must be kept clear.
                     if (level < Apt.ElevationFt + 2000) break;

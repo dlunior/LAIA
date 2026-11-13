@@ -774,6 +774,25 @@ Console.WriteLine("== Hand-over of a short flight: one departing a field inside 
     Check(f is not null && firstAlt >= 9000, "taken over at 10,000 ft or more, not on the other field's runway");
 }
 
+Console.WriteLine("== Vectors to final without a zigzag (MCO GRNCH5 for 36L: DORII, a keep-clear point inside the downwind, then back out)");
+{
+    var apt = new AirportModel(TestAirport.Build(false));
+    var rwy = apt.Ends.First(e => e.Ident == "27");
+    var nm = Geo2.MPerNm;
+    var left = new V2(-rwy.Dir.Y, rwy.Dir.X);
+    V2 At(double along, double side) => rwy.Threshold + rwy.Dir * (along * nm) + left * (side * nm);
+    // The STAR's last fix beyond the airport 5.1 nm to the side; a keep-clear point 4.1 nm out abeam; then the approach.
+    var route = new List<V2> { At(20, 9), At(8.3, 5.1), At(-3.1, 4.1), At(-13, 0), At(-10, 0), At(-5, 0) };
+    var speeds = route.Select(_ => 0.0).ToList();
+    TrafficWorld.ShapeFinal(route, speeds, rwy, new VectorShape(7.6, 9, 5.2, 30));
+    var offs = route.Select(p => Math.Abs(rwy.Offset(p)) / nm).ToList();
+    Console.WriteLine("  route offsets from the final (nm): " + string.Join(", ", offs.Select(o => o.ToString("0.0"))));
+    var zig = false;
+    for (var i = 1; i + 1 < route.Count; i++)
+        if (offs[i] < offs[i - 1] - 0.3 && offs[i + 1] > offs[i] + 0.5) zig = true;
+    Check(!zig, "no cutting in towards the final and back out again");
+}
+
 Console.WriteLine("== Hybrid SIDs: RNAV to a fix, radar vectors, then RNAV again (MCO's runway → KAAPE → vectors → UKAYY)");
 {
     var nm = Geo2.MPerNm;
