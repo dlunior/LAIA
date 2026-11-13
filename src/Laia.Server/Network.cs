@@ -180,6 +180,20 @@ public sealed class NetworkStore(WorldAirports world, ILogger<NetworkStore> log)
     }
 
     /// <summary>Of these airports, those with at least this many scheduled flights a week, busiest first.</summary>
+    /// <summary>Weekly flights (departures plus arrivals) at each of these airports in the installed schedules.</summary>
+    public Dictionary<string, int> WeeklyCounts(IEnumerable<string> icaos)
+    {
+        var want = new HashSet<string>(icaos, StringComparer.OrdinalIgnoreCase);
+        var counts = want.ToDictionary(i => i, _ => 0, StringComparer.OrdinalIgnoreCase);
+        lock (_gate)
+            foreach (var l in _legs)
+            {
+                if (want.Contains(l.Dep)) counts[l.Dep]++;
+                if (want.Contains(l.Arr)) counts[l.Arr]++;
+            }
+        return counts;
+    }
+
     public List<string> BusyAmong(IEnumerable<string> icaos, int minWeekly)
     {
         var want = new HashSet<string>(icaos, StringComparer.OrdinalIgnoreCase);

@@ -2546,6 +2546,17 @@ public sealed partial class TrafficWorld
         {
             var star = PickStar(f, rwy, out var starLegs);
             var starPts = star is null ? new List<AirPoint>() : Apt.LegsToPoints(starLegs, entry ?? V2.FromBearing(Rng.Next(360), 40 * Geo2.MPerNm), 11000, out _);
+            // The chart's "expect" altitudes and speeds are restrictions too (user, 13 Nov), where the procedure data
+            // has none at that fix.
+            if (star is not null && StarExpects is { } se && se.TryGetValue(star.Name, out var exps))
+                for (var k = 0; k < starPts.Count; k++)
+                {
+                    var sp = starPts[k];
+                    if (sp.Fix.Length == 0 || exps.FirstOrDefault(e => e.fix.Equals(sp.Fix, StringComparison.OrdinalIgnoreCase)) is not { fix.Length: > 0 } ex) continue;
+                    if (sp.AltMinFt <= 0 && sp.AltMaxFt <= 0 && (ex.min > 0 || ex.max > 0)) sp = sp with { AltMinFt = ex.min, AltMaxFt = ex.max };
+                    if (sp.SpeedKt is <= 0 or >= 400 && ex.kt > 0) sp = sp with { SpeedKt = ex.kt };
+                    starPts[k] = sp;
+                }
             // Handed over from the whole sky: direct to the STAR, joining it at the first fix that isn't further out
             // than the aircraft already is.
             // The fix it's cleared direct to must be ahead: not behind it on the way in (heading away from the airport),
@@ -4030,6 +4041,9 @@ public sealed partial class TrafficWorld
 
     private int _climbStops, _losCount, _releases, _heldAtTop;
     private double _heldSec;
+
+    /// <summary>The "expect" restrictions from the FAA STAR charts, by STAR name: fix, at or above, at or below, speed.</summary>
+    public Dictionary<string, List<(string fix, double min, double max, double kt)>>? StarExpects { get; set; }
 
     /// <summary>The SID top altitudes from the FAA departure charts, by SID name (set by the server; null: none known).</summary>
     public Dictionary<string, int>? SidTops { get; set; }

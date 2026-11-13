@@ -14,6 +14,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     private readonly object _gate = new();
     private readonly List<TrafficWorld> _neighbours = new();
     private List<string> _neighbourWant = new();
+    private string _neighbourWhy = "";
     private string _neighbourHow = "";
     private DateTime _neighbourAt = DateTime.MinValue;
     private AtisReader? _atisReader;
@@ -80,6 +81,12 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     }
     private Prep? _prep;
 
+    /// <summary>Each STAR's fix names (for reading its chart).</summary>
+    private static Dictionary<string, HashSet<string>> StarFixes(AirportModel apt) =>
+        apt.Data.Arrivals.GroupBy(a => a.Name, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.SelectMany(a => a.Legs
+            .Concat(a.RunwayTransitions.SelectMany(t => t.Legs)).Concat(a.EnrouteTransitions.SelectMany(t => t.Legs)))
+            .Where(l => l.Fix.Length > 0).Select(l => l.Fix.ToUpperInvariant()).ToHashSet(), StringComparer.OrdinalIgnoreCase);
+
     /// <summary>Whether a field has airline passenger service: 14 or more passenger airline flights a week in its real
     /// schedule (not cargo); null until its schedule is known.</summary>
     private bool? PassengerService(string icao) =>
@@ -103,6 +110,8 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         Item("METAR wind", metarDone, metar.Wind(icao) is { } mw ? $"{(mw.dir is { } d ? $"{d:000}°" : "variable")} at {mw.kt:0} kt" : metarDone ? "not available, the sim's wind" : "asking…");
         var aaupDone = !us || Aaup.Get(icao) is not null || t > 180;
         Item("FAA runway rules (AAUP)", aaupDone, !us ? "none (not a US airport)" : w.Rules is { Charts.Length: > 0 } ru ? ru.Describe() : aaupDone ? "none published" : "downloading the charts…");
+        var expDone = !us || w.StarExpects is not null || t > 180;
+        Item("STAR \"expect\" restrictions (charts)", expDone, !us ? "none (not a US airport)" : w.StarExpects is { } se ? (se.Count == 0 ? "none on the charts" : $"{se.Sum(kv => kv.Value.Count)} on {se.Count} STARs") : expDone ? "charts not read" : "reading the arrival charts…");
         var topsDone = !us || w.SidTops is not null || t > 180;
         Item("SID top altitudes (charts)", topsDone, !us ? "from the STARs (not a US airport)" : w.SidTops is { Count: > 0 } st ? $"{st.Count} SIDs" : topsDone ? "none on the charts, from the STARs" : "reading the departure charts…");
         var pax = PassengerService(icao);
@@ -575,6 +584,21 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
             _neighbourWant = (family.Count > 0 ? network.BusyAmong(family, 14) : network.BusyAirportsNear(main.Apt.Data.Lat, main.Apt.Data.Lon, 40, 14, main.Apt.Icao))
                 .Where(i => !i.Equals(main.Apt.Icao, StringComparison.OrdinalIgnoreCase)).Take(6).ToList();
             _neighbourHow = family.Count > 0 ? $"{nasrDb.ApproachFacility(main.Apt.Icao)} approach control" : "within 40 nm";
+            // Say which fields were considered and why each is or isn't a neighbour (user, 13 Nov: "I don't see SFB").
+            if (family.Count > 0)
+            {
+                var counts = network.WeeklyCounts(family);
+                var why = family.Where(i => !i.Equals(main.Apt.Icao, StringComparison.OrdinalIgnoreCase)).Select(i =>
+                {
+                    var c = counts.GetValueOrDefault(i);
+                    var used = _neighbourWant.Contains(i, StringComparer.OrdinalIgnoreCase);
+                    var reason = used ? (airports.Model(i) is null ? "waiting for its layout from LAIA Sim" : "neighbour")
+                        : c < 14 ? "fewer than 14 airline flights a week in your installed AIG schedules" : "more than 6 busier fields";
+                    return $"{i} {c} a week ({reason})";
+                });
+                var sig = string.Join("; ", why);
+                if (sig != _neighbourWhy) { _neighbourWhy = sig; log.LogInformation("Neighbouring fields considered ({how}): {why}", _neighbourHow, sig); }
+            }
             // Learn the airport and its neighbours from real tracks (M6), once, in the background.
             // Only fields with airline passenger service (user, 13 Nov); the neighbours are chosen that way already.
             var learn = new List<AirportModel>();
@@ -697,6 +721,8 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                                 if (aaup.charts.Length > 0) log.LogInformation("{icao}: {rules}", w.Apt.Icao, w.Rules.Describe());
                             }
                             if (w.SidTops is not { Count: > 0 }) w.SidTops = Aaup.SidTops(w.Apt.Icao);
+                            if (w.StarExpects is null && Aaup.StarExpects(w.Apt.Icao, StarFixes(w.Apt)) is { } ex)
+                                w.StarExpects = ex.ToDictionary(kv => kv.Key, kv => kv.Value.Select(e => (e.Fix, e.MinFt, e.MaxFt, e.Kt)).ToList(), StringComparer.OrdinalIgnoreCase);
                             w.Routes = routesDb.Routes;
                             w.NavData = nasrDb.Nav;
                             w.Learned = history.Profile(w.Apt.Icao);
