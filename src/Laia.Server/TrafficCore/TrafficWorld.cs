@@ -1388,6 +1388,7 @@ public sealed partial class TrafficWorld
             {
                 _flow = t.Result;
                 Log($"{Apt.Icao}: taxi flow for {_flowKey}: {_flow.Summary}");
+                if (_flow.Details.Length > 0) Log($"{Apt.Icao}: taxi flow, every one-way stretch (real aircraft that way:the other): {_flow.Details}");
             }
             else if (t.IsFaulted) Log($"{Apt.Icao}: taxi flow couldn't be worked out: {t.Exception?.InnerException?.Message}");
         }
