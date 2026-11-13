@@ -23,9 +23,9 @@ public sealed class AirportProfile
     public List<SampleTrack> Samples { get; set; } = new();
     /// <summary>Real taxi tracks (ground positions off the runways), each with the runway it landed on or left from.</summary>
     public List<TaxiTrack> Taxi { get; set; } = new();
-    /// <summary>What the profile holds: 2 = with taxi tracks; 3 = airline passenger jets only. Older ones are learned again.</summary>
+    /// <summary>What the profile holds: 2 = with taxi tracks; 3 = airline passenger jets only; 4 = three days. Older ones are learned again.</summary>
     public int Version { get; set; }
-    public const int CurrentVersion = 3;
+    public const int CurrentVersion = 4;
 
     public sealed class TaxiTrack
     {
@@ -218,7 +218,7 @@ public static class TrackLearner
         // within 6 km of the airport and off the runways, in time order.
         void Taxi(string kind, string rw, IReadOnlyList<TrackPoint> tr, List<V2> xy, int at, int dir)
         {
-            if (taxi.Count >= 3000) return;
+            if (taxi.Count >= 8000) return;
             var pts = new List<double[]>();
             var started = false;
             V2? last = null;

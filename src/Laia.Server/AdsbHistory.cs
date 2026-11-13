@@ -7,7 +7,7 @@ using Laia.Server.TrafficCore;
 namespace Laia.Server;
 
 /// <summary>
-/// Learned airport profiles from real tracks (M6): one day of adsb.lol's open history (github.com/adsblol/
+/// Learned airport profiles from real tracks (M6): the last three days of adsb.lol's open history (github.com/adsblol/
 /// globe_history_YYYY, a daily release of every aircraft's trace, ODbL), streamed — never stored whole — and every
 /// track passing within 45 nm of the airports wanted, low enough to be arriving or departing, kept and learned from
 /// (<see cref="TrackLearner"/>). Each airport is learned once, then refreshed after 60 days; saved in data/learned.
@@ -68,59 +68,70 @@ public sealed class AdsbHistory(ILogger<AdsbHistory> log)
         {
             using var http = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
             http.DefaultRequestHeaders.UserAgent.ParseAdd("LAIA-Server");
-            // The newest full day: the year's repository, its latest "prod" release.
-            (string tag, List<(string name, string url, long size)> parts)? rel = null;
+            // The newest full days (user, 13 Nov: one day was thin for whichever flow was used less that day): the
+            // year's repository (and last year's), its latest "prod" releases — up to three days.
+            const int Days = 3;
+            var rels = new List<(string tag, List<(string name, string url, long size)> parts)>();
             foreach (var year in new[] { DateTime.UtcNow.Year, DateTime.UtcNow.Year - 1 })
             {
-                using var r = await http.GetAsync($"https://api.github.com/repos/adsblol/globe_history_{year}/releases?per_page=12", ct);
+                if (rels.Count >= Days) break;
+                using var r = await http.GetAsync($"https://api.github.com/repos/adsblol/globe_history_{year}/releases?per_page=20", ct);
                 if (!r.IsSuccessStatusCode) continue;
                 using var doc = JsonDocument.Parse(await r.Content.ReadAsStringAsync(ct));
                 foreach (var e in doc.RootElement.EnumerateArray())
                 {
+                    if (rels.Count >= Days) break;
                     var tag = e.GetProperty("tag_name").GetString() ?? "";
                     if (!tag.Contains("-prod-")) continue;
+                    var dayOf = tag.Replace("v", "").Split('-')[0];
+                    if (rels.Any(x => x.tag.Replace("v", "").Split('-')[0] == dayOf)) continue;
                     var parts = e.GetProperty("assets").EnumerateArray()
                         .Select(a => (name: a.GetProperty("name").GetString() ?? "", url: a.GetProperty("browser_download_url").GetString() ?? "", size: a.GetProperty("size").GetInt64()))
                         .Where(a => a.name.Contains(".tar")).OrderBy(a => a.name, StringComparer.Ordinal).ToList();
                     if (parts.Count == 0) continue;
-                    rel = (tag, parts); break;
+                    rels.Add((tag, parts));
                 }
-                if (rel is not null) break;
             }
-            if (rel is not { } rl) { Status = "couldn't find an adsb.lol history day"; log.LogWarning("adsb.lol history: no release found"); return; }
-            var total = rl.parts.Sum(p => p.size);
-            var day = rl.tag.Replace("v", "").Split('-')[0];
-            log.LogInformation("Learning {apts} from real tracks: adsb.lol {tag} ({gb:0.0} GB, streamed)", names, rl.tag, total / 1e9);
+            if (rels.Count == 0) { Status = "couldn't find an adsb.lol history day"; log.LogWarning("adsb.lol history: no release found"); return; }
+            var dayList = rels.Select(x => x.tag.Replace("v", "").Split('-')[0]).OrderBy(x => x, StringComparer.Ordinal).ToList();
+            var day = dayList.Count == 1 ? dayList[0] : $"{dayList[0]}–{dayList[^1].Split('.').Last()} ({dayList.Count} days)";
             var targets = apts.Select(a => (a, lat: a.Data.Lat, lon: a.Data.Lon, elev: a.ElevationFt)).ToList();
             var kept = targets.ToDictionary(t => t.a.Icao, _ => new List<IReadOnlyList<TrackPoint>>(), StringComparer.OrdinalIgnoreCase);
-            long done = 0; var files = 0;
-            log.LogInformation("adsb.lol parts: {parts}", string.Join(", ", rl.parts.Select(p => $"{p.name} ({p.size / 1e6:0} MB)")));
-            await using var stream = new PartsStream(http, rl.parts.Select(p => p.url).ToList(), n => { done = n; Status = $"learning {names} from real tracks: {done / 1e9:0.0} of {total / 1e9:0.0} GB read"; })
-            { Log = m => log.LogInformation("adsb.lol {m}", m) };
-            using var tar = new TarReader(stream);
-            TarEntry? entry;
-            while ((entry = await tar.GetNextEntryAsync(copyData: false, ct)) is not null)
+            var files = 0;
+            for (var di = 0; di < rels.Count; di++)
             {
-                if (entry.DataStream is null || !entry.Name.Contains("trace_full")) continue;
-                files++;
-                using var ms = new MemoryStream();
-                await entry.DataStream.CopyToAsync(ms, ct);
-                var bytes = ms.ToArray();
-                if (bytes.Length > 2 && bytes[0] == 0x1f && bytes[1] == 0x8b)
+                var rl = rels[di];
+                var total = rl.parts.Sum(p => p.size);
+                long done = 0;
+                log.LogInformation("Learning {apts} from real tracks: adsb.lol {tag} ({gb:0.0} GB, streamed), day {n} of {of}", names, rl.tag, total / 1e9, di + 1, rels.Count);
+                var dn = di + 1;
+                await using var stream = new PartsStream(http, rl.parts.Select(p => p.url).ToList(), n => { done = n; Status = $"learning {names} from real tracks: day {dn} of {rels.Count}, {done / 1e9:0.0} of {total / 1e9:0.0} GB read"; })
+                { Log = m => log.LogInformation("adsb.lol {m}", m) };
+                using var tar = new TarReader(stream);
+                TarEntry? entry;
+                while ((entry = await tar.GetNextEntryAsync(copyData: false, ct)) is not null)
                 {
-                    using var gz = new GZipStream(new MemoryStream(bytes), CompressionMode.Decompress);
-                    using var raw = new MemoryStream();
-                    gz.CopyTo(raw);
-                    bytes = raw.ToArray();
-                }
-                List<TrackPoint>? pts;
-                try { pts = AdsbTrace.Parse(bytes, passengerJetsOnly: true); } catch { continue; }
-                if (pts is null || pts.Count < 5) continue;
-                foreach (var t in targets)
-                {
-                    // Near this airport and low: a candidate arrival or departure (the rest of its day isn't kept).
-                    var near = pts.Where(p => (p.AltFt ?? 0) < t.elev + 18000 && Geo2.DistanceNm(t.lat, t.lon, p.Lat, p.Lon) < 45).ToList();
-                    if (near.Count >= 5) kept[t.a.Icao].Add(near);
+                    if (entry.DataStream is null || !entry.Name.Contains("trace_full")) continue;
+                    files++;
+                    using var ms = new MemoryStream();
+                    await entry.DataStream.CopyToAsync(ms, ct);
+                    var bytes = ms.ToArray();
+                    if (bytes.Length > 2 && bytes[0] == 0x1f && bytes[1] == 0x8b)
+                    {
+                        using var gz = new GZipStream(new MemoryStream(bytes), CompressionMode.Decompress);
+                        using var raw = new MemoryStream();
+                        gz.CopyTo(raw);
+                        bytes = raw.ToArray();
+                    }
+                    List<TrackPoint>? pts;
+                    try { pts = AdsbTrace.Parse(bytes, passengerJetsOnly: true); } catch { continue; }
+                    if (pts is null || pts.Count < 5) continue;
+                    foreach (var t in targets)
+                    {
+                        // Near this airport and low: a candidate arrival or departure (the rest of its day isn't kept).
+                        var near = pts.Where(p => (p.AltFt ?? 0) < t.elev + 18000 && Geo2.DistanceNm(t.lat, t.lon, p.Lat, p.Lon) < 45).ToList();
+                        if (near.Count >= 5) kept[t.a.Icao].Add(near);
+                    }
                 }
             }
             foreach (var t in targets)

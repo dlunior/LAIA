@@ -363,11 +363,18 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     {
         var w = _world;
         if (w is null || history.Profile(w.Apt.Icao) is not { } p) return null;
-        var rw = w.ArrRwys.Select(e => e.Ident).Concat(w.DepRwys.Select(e => e.Ident)).ToHashSet();
+        // Arrivals to the landing runways and departures from the departure runways (not either kind on any runway in
+        // use), and as many of each, spread over the day(s), so neither looks busier than it is.
+        var arrRw = w.ArrRwys.Select(e => e.Ident).ToHashSet();
+        var depRw = w.DepRwys.Select(e => e.Ident).ToHashSet();
+        var arr = p.Samples.Where(t => t.Kind == "arrival" && (arrRw.Count == 0 || arrRw.Contains(t.Runway))).ToList();
+        var dep = p.Samples.Where(t => t.Kind == "departure" && (depRw.Count == 0 || depRw.Contains(t.Runway))).ToList();
+        var n = Math.Min(arr.Count, dep.Count);
+        static List<T> Spread<T>(List<T> l, int n) => l.Count <= n || n <= 0 ? l : Enumerable.Range(0, n).Select(i => l[(int)((long)i * l.Count / n)]).ToList();
         return new
         {
             icao = p.Icao, day = p.Day, source = p.Source,
-            tracks = p.Samples.Where(t => rw.Count == 0 || rw.Contains(t.Runway)).Select(t => new { kind = t.Kind, runway = t.Runway, points = t.Points }),
+            tracks = Spread(arr, n).Concat(Spread(dep, n)).Select(t => new { kind = t.Kind, runway = t.Runway, points = t.Points }),
         };
     }
 
