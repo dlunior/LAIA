@@ -64,7 +64,8 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     /// speed"): the layout, the installed models, the real schedule, the live ATIS and METAR, the FAA AAUP rules and
     /// SID charts, the real-traffic learning (adsb.lol), then the runways in use (settled once, from all of that), the
     /// taxi flow for them and the pushback plans. Each item waits only so long; what doesn't come is noted and skipped.
-    /// Traffic (here and at the neighbouring fields) starts only when it's all done, or when the user says start now.
+    /// Traffic (here and at the neighbouring fields) starts only when it's all done (user, 13 Nov: "then and only then";
+    /// there's no "start now"). Picking a level while it's preparing shows a box on the control page with each item.
     /// </summary>
     private sealed class Prep(string icao)
     {
@@ -84,8 +85,6 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     private bool? PassengerService(string icao) =>
         schedules.Get(icao) is { } sd ? sd.Legs.Count(l => !TrafficWorld.IsCargo(l.Airline)) >= 14 : null;
 
-    /// <summary>Skip the rest of the preparation and start the traffic now.</summary>
-    public void StartNow() { lock (_gate) if (_prep is { Ready: false } p) p.Forced = true; }
 
     private void UpdatePrep(TrafficWorld w)
     {

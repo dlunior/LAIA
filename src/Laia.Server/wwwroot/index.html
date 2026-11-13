@@ -35,6 +35,15 @@
   button:disabled{opacity:.4;cursor:default}
   button.ghost{background:transparent;color:var(--text);border:1px solid var(--line);font-weight:500}
   .empty{color:var(--muted);font-style:italic}
+  /* The "waiting for data" box: shown when a traffic level is picked before everything is ready. */
+  #prepBox{position:fixed;inset:0;background:rgba(5,9,20,.72);display:none;align-items:center;justify-content:center;z-index:50;padding:16px}
+  #prepBox .panel{background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:16px;padding:22px 24px;max-width:620px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+  #prepBox h3{margin:0 0 4px;font-size:18px}
+  #prepBox ul{list-style:none;margin:14px 0 0;padding:0;display:grid;gap:8px}
+  #prepBox li{display:grid;grid-template-columns:22px 1fr;gap:8px;align-items:start}
+  #prepBox .tick{color:var(--ok);font-weight:700} #prepBox .wait{color:var(--warn);font-weight:700}
+  #prepBox .ready{color:var(--ok);font-weight:600;margin-top:14px}
+  #prepBox .row{display:flex;justify-content:space-between;align-items:center;gap:12px}
 </style>
 </head>
 <body>
@@ -70,6 +79,12 @@
     <h2>AI traffic</h2>
     <div class="muted">Traffic level: <span class="lvl"><button data-l="off" class="ghost">Off</button> <button data-l="light" class="ghost" title="About a third of the real schedule">Light</button> <button data-l="medium" class="ghost" title="About two thirds of the real schedule">Medium</button> <button data-l="busy" class="ghost" title="The whole real schedule, within limits that grow with the airport">Busy</button> <button data-l="real" class="ghost" title="The whole real schedule, no limits">Real world</button> <button data-l="peak" class="ghost" title="Stress test: this airport's busiest 3 hours from its real schedule, replayed now in full with no limits">Peak (stress test)</button></span></div>
     <div id="tPrep" style="margin-top:8px;display:none"></div>
+    <div id="prepBox" role="dialog" aria-modal="true" aria-labelledby="prepTitle"><div class="panel">
+      <div class="row"><h3 id="prepTitle">Getting the traffic ready</h3><button id="prepClose" class="ghost" type="button" aria-label="Hide">Hide</button></div>
+      <div class="muted" id="prepSub"></div>
+      <ul id="prepList"></ul>
+      <div id="prepDone" class="ready" style="display:none">All data ready — traffic is starting.</div>
+    </div></div>
     <div class="muted" id="tAirport" style="margin-top:8px"></div>
     <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap"><button id="tDep" class="ghost">Send a test departure</button><button id="tArr" class="ghost">Send a test arrival</button><button id="tClr" class="ghost">Remove traffic</button><a href="/map" target="_blank" style="text-decoration:none"><button class="ghost" type="button">Open the live map</button></a></div>
     <div class="muted" id="tMsg" style="margin-top:8px"></div>
@@ -133,7 +148,9 @@ async function traffic(path){$("tMsg").textContent="…";try{const r=await fetch
 $("tDep").addEventListener("click",()=>traffic("/api/traffic/test/departure"));
 $("tArr").addEventListener("click",()=>traffic("/api/traffic/test/arrival"));
 $("tClr").addEventListener("click",()=>traffic("/api/traffic/clear"));
-document.querySelectorAll(".lvl button").forEach(b=>b.addEventListener("click",()=>traffic("/api/traffic/level/"+b.dataset.l)));
+let prepWanted=false,prepHidden=false,prepShown=false;
+document.querySelectorAll(".lvl button").forEach(b=>b.addEventListener("click",()=>{if(b.dataset.l!=="off"){prepWanted=true;prepHidden=false;}traffic("/api/traffic/level/"+b.dataset.l);}));
+$("prepClose").addEventListener("click",()=>{prepHidden=true;prepShown=false;$("prepBox").style.display="none";});
 async function pollTraffic(){try{const r=await fetch("/api/traffic");const t=await r.json();const st=t.status||{};
   document.querySelectorAll(".lvl button").forEach(b=>{const on=b.dataset.l===st.level;b.classList.toggle("ghost",!on);});
   let a="";
@@ -153,9 +170,23 @@ async function pollTraffic(){try{const r=await fetch("/api/traffic");const t=awa
   if(st.learned)a+=" Learned from real tracks: "+esc(st.learned)+".";
   $("tAirport").innerHTML=a;
   const pr=st.preparing;
-  if(pr){$("tPrep").style.display="block";$("tPrep").innerHTML=`<b>Preparing ${esc(st.airport||"")} before any traffic (${pr.seconds} s)</b> <button id="tNow" class="ghost" type="button">Start now anyway</button><ul style="margin:6px 0 0 18px;padding:0">`+pr.items.map(i=>`<li>${i.done?"✓":"…"} ${esc(i.item)}: <span class="muted">${esc(i.note)}</span></li>`).join("")+"</ul>";
-    $("tNow").onclick=()=>traffic("/api/traffic/startnow");}
+  // Inline in the card while preparing (no "start now": traffic starts only when every item is ready).
+  if(pr){$("tPrep").style.display="block";$("tPrep").innerHTML=`<b>Preparing ${esc(st.airport||"")} before any traffic (${pr.seconds} s)</b> <span class="muted">— waiting on ${pr.items.filter(i=>!i.done).length} item(s)</span>`;}
   else $("tPrep").style.display="none";
+  // The box: shown after a traffic level is picked while data is still loading; closes itself once all is ready.
+  const waitingNoAirport=st.level&&st.level!=="off"&&!st.airport;
+  if(prepWanted&&!prepHidden&&(pr||waitingNoAirport)){
+    $("prepBox").style.display="flex";$("prepDone").style.display="none";prepShown=true;
+    if(pr){$("prepTitle").textContent=`Getting ${st.airport} ready (${pr.seconds} s)`;
+      $("prepSub").textContent=`Traffic starts when every item below is ready. ${pr.items.filter(i=>i.done).length} of ${pr.items.length} done.`;
+      $("prepList").innerHTML=pr.items.map(i=>`<li><span class="${i.done?"tick":"wait"}">${i.done?"✓":"…"}</span><span>${esc(i.item)}<br><span class="muted">${esc(i.note)}</span></span></li>`).join("");}
+    else{$("prepTitle").textContent="Waiting for an airport";$("prepSub").textContent="LAIA prepares the airport you're at once MSFS has a flight loaded and LAIA Sim has sent its layout.";$("prepList").innerHTML="";}
+  } else if(prepShown&&!pr&&st.airport){
+    // Everything's in: say so for a few seconds, then close.
+    prepShown=false;prepWanted=false;$("prepDone").style.display="block";$("prepSub").textContent="";
+    $("prepList").querySelectorAll(".wait").forEach(x=>{x.className="tick";x.textContent="✓";});
+    setTimeout(()=>{$("prepBox").style.display="none";},3000);
+  }
   $("tList").innerHTML=(st.flights||[]).map(f=>`<dt>${esc(f.callsign)} · ${esc(f.type)} · ${f.kind==="departure"?"to":"from"} ${esc(f.other||"?")}</dt><dd>${esc(f.phase)}${f.runway?" · runway "+esc(f.runway):""}${f.gate?" · "+esc(f.gate):""}${f.route?" · "+esc(f.route):""} · ${f.gs} kt${f.ground?"":" · "+f.alt.toLocaleString()+" ft"}</dd>`).join("");}catch(e){}}
 setInterval(pollTraffic,1000);
 $("reload").addEventListener("click",async()=>{$("planStatus").textContent="Loading…";try{const r=await fetch("/api/simbrief/reload",{method:"POST"});$("planStatus").textContent=(await r.json()).status;}catch(e){$("planStatus").textContent="Failed";}});
