@@ -1352,10 +1352,12 @@ Console.WriteLine("== Taken over mid-descent just before a high restriction (MCO
     var f = world.SpawnArrival(0, false, L(), entry: (midd + (farr - midd).Unit * (12 * nm), 17500, 37000))!;
     var fix = f.AltLimits.FirstOrDefault(c => c.Max == 14000);
     var startAlt = f.AltFt;
-    double crossed = double.NaN, crossedKt = double.NaN;
+    Console.WriteLine($"  limits: {string.Join("; ", f.AltLimits.Select(c => $"{c.S / nm:0.0} nm: {c.Min:0}-{c.Max:0}"))}; speed limits: {string.Join("; ", f.SpeedLimits.Select(c => $"{c.S / nm:0.0} nm {c.Kt:0}"))}; route {f.Route}");
+    double crossed = double.NaN, crossedKt = double.NaN, lastNm = -1;
     for (var t = 0.0; t < 1800 && double.IsNaN(crossed); t += 0.5)
     {
         world.Step(0.5);
+        if (f.S / nm - lastNm >= 1) { lastNm = Math.Floor(f.S / nm); Console.WriteLine($"    {f.S / nm:0.0} nm {f.Phase}: {f.AltFt:0} ft {f.Ias:0} kt vs {f.Vs:0}"); }
         if (fix.S > 0 && f.S >= fix.S) { crossed = f.AltFt; crossedKt = f.Ias; }
     }
     Console.WriteLine($"  starts at {startAlt:0} ft (was 17,500); crosses MIDDL at {crossed:0} ft, {crossedKt:0} kt");
