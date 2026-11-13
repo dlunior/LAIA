@@ -8,7 +8,7 @@ public sealed class PushPlan
     public required V2 End;
     public required double EndHeading;    // where the nose points at the end
     public int EndNode = -1;              // taxi node ahead of the nose, where the taxi route starts
-    public string Kind = "plain";         // plain | straight | fallback
+    public string Kind = "plain";         // plain | straight | lead-in | fallback
     public List<string> Problems = new(); // hard problems (empty = clean)
     public double Score;
     public double TurnStart;              // distance pushed straight back before the turn
@@ -84,6 +84,8 @@ public sealed class PushbackPlanner(AirportModel apt)
             }
         }
 
+        cands.AddRange(AlongLeadIn(spot, perf, roadDist, wingDist, rcomf, rmin));
+
         // Check the most promising ones for dead ends, facing the right way and staying on the pavement.
         var paved = Pavement(s0);
         var shortlist = cands.OrderBy(c => c.Problems.Count > 0 ? 1 : 0).ThenBy(c => c.Score).Take(8).ToList();
@@ -93,6 +95,62 @@ public sealed class PushbackPlanner(AirportModel apt)
         CheckPavement(fallback, perf, paved);
         if (best is null || (best.Problems.Count > 0 && fallback.Problems.Count < best.Problems.Count)) return fallback;
         return best;
+    }
+
+    /// <summary>
+    /// Pushes that follow the scenery's lines tail-first: back to the stand's lead-in point, along the lead-in (however
+    /// it bends) to where it meets the taxilane, then a turn onto the taxilane — so the nose ends pointing along it,
+    /// never back up the lead-in (MCO Gate 91: a single straight-then-turn push could only end on its angled lead-in,
+    /// facing the dead end at the gate). Up to 160 m of lead-in.
+    /// </summary>
+    private IEnumerable<PushPlan> AlongLeadIn(AirportModel.ParkingSpot spot, Perf perf, double roadDist, double wingDist, double rcomf, double rmin)
+    {
+        if (spot.Access < 0) yield break;
+        var s0 = spot.P;
+        var pts = new List<V2> { s0 };
+        var prev = -1; var n = spot.Access;
+        var walked = (apt.Nodes[n] - s0).Length;
+        var dir = (apt.Nodes[n] - s0).Length > 1 ? (apt.Nodes[n] - s0).Unit : V2.FromBearing(spot.Heading) * -1;
+        var seen = new HashSet<int>();
+        while (walked < 160 && seen.Add(n))
+        {
+            pts.Add(apt.Nodes[n]);
+            var next = apt.Adj[n].Where(e => e.B != prev && e.B < apt.TaxiPointCount && apt.NodeRunway[e.B] < 0 && e.Len > 0.5).ToList();
+            if (next.Count == 0) yield break;
+            if (next.Count == 1 && Math.Abs(Geo2.Diff(dir.Bearing, (apt.Nodes[next[0].B] - apt.Nodes[n]).Bearing)) < 50)
+            {
+                // Still the lead-in (a bend in it): keep pushing along it.
+                walked += next[0].Len; dir = (apt.Nodes[next[0].B] - apt.Nodes[n]).Unit; prev = n; n = next[0].B;
+                continue;
+            }
+            // A junction (or a sharp corner): the turn onto the taxilane.
+            var lastLeg = (apt.Nodes[n] - pts[^2]).Length;
+            foreach (var e2 in next)
+            {
+                var m1 = (apt.Nodes[e2.B] - apt.Nodes[n]).Unit;   // moving tail-first along the taxilane
+                var turn = Math.Abs(Geo2.Diff(dir.Bearing, m1.Bearing));
+                if (turn < 15 || turn > 120) continue;
+                foreach (var r in new[] { rcomf, rmin * 1.15 })
+                {
+                    var t = r * Math.Tan(turn * Math.PI / 360);
+                    if (t > lastLeg + 1) continue;
+                    var along = Math.Min(e2.Len, t + 15);
+                    if (along < t) continue;
+                    var end = apt.Nodes[n] + m1 * along;
+                    var p = new PushPlan
+                    {
+                        Points = pts.Append(end).ToList(), Radius = r, End = end, EndHeading = (m1 * -1).Bearing, EndNode = n,
+                        TurnStart = walked - t, Kind = "lead-in",
+                    };
+                    yield return Score(p, spot, perf, roadDist, wingDist, rcomf, rmin, turn, r * turn * Math.PI / 180 + (along - t));
+                    break;
+                }
+            }
+            // Straight through the junction too, for a turn at the next one (a lead-in crossing a service lane).
+            var straight = next.Where(e => Math.Abs(Geo2.Diff(dir.Bearing, (apt.Nodes[e.B] - apt.Nodes[n]).Bearing)) < 20).OrderBy(e => e.Len).FirstOrDefault();
+            if (straight is null) yield break;
+            walked += straight.Len; dir = (apt.Nodes[straight.B] - apt.Nodes[n]).Unit; prev = n; n = straight.B;
+        }
     }
 
     private static bool WithinLine(V2 p, V2 a, V2 b, V2 u, double tol)
