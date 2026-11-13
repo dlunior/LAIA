@@ -104,6 +104,9 @@ public sealed class Flight
     /// airport's traffic: not below this (NaN: free), and when it was last checked.</summary>
     public double DepSpeedCap = double.NaN, DescentFloor = double.NaN, DescentProbeAt = -99;
     public string? FloorFor;
+    /// <summary>A push then pull: the tow forward after the push (null when there is none).</summary>
+    public List<V2>? PullPath;
+    public double PullRadius;
     public bool ClimbReleased;
     public string TopSource = "";
     public double TakeoffAt = double.NaN, TakeoffPred10 = double.NaN, TakeoffPred5 = double.NaN, ReadyAt = double.NaN;
@@ -1360,6 +1363,7 @@ public sealed partial class TrafficWorld
         _pushPlanner ??= new PushbackPlanner(Apt);
         var plan = _pushPlanner.Plan(s, f.P, hold);
         f.Path = new PathGeom(plan.Points, _ => plan.Radius, 0.5);
+        f.PullPath = plan.Pull; f.PullRadius = plan.Radius;
         f.S = 0;
         f.Reverse = true;
         f.MaxKt = 3.5;                 // about 1.8 m/s, a real tug's pace
@@ -3625,7 +3629,12 @@ public sealed partial class TrafficWorld
             case "pushback":
                 f.Lights = Nav | Beacon | Logo;
                 if (f.Timer > 0) { f.Timer -= dt; break; }
-                if (MoveGround(f, dt)) { f.SetPhase("engine start", Time); f.Timer = 25 + Rng.NextDouble() * 20; f.Gs = 0; }
+                if (MoveGround(f, dt))
+                {
+                    // Push then pull: the tug now tows it forward onto the open side, a few seconds after stopping.
+                    if (f.PullPath is { } pull) { f.Path = new PathGeom(pull, _ => f.PullRadius, 0.5); f.PullPath = null; f.S = 0; f.Reverse = false; f.Gs = 0; f.Timer = 4; break; }
+                    f.SetPhase("engine start", Time); f.Timer = 25 + Rng.NextDouble() * 20; f.Gs = 0;
+                }
                 break;
             case "engine start":
                 f.Lights = Nav | Beacon | Logo;

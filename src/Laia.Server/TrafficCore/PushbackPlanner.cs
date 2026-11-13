@@ -8,11 +8,14 @@ public sealed class PushPlan
     public required V2 End;
     public required double EndHeading;    // where the nose points at the end
     public int EndNode = -1;              // taxi node ahead of the nose, where the taxi route starts
-    public string Kind = "plain";         // plain | straight | lead-in | fallback
+    public string Kind = "plain";         // plain | straight | lead-in | push-pull | fallback
+    /// <summary>A push then a pull forward (user, 13 Nov: "a plane can push then pull forward"): after the push, the
+    /// tug tows the aircraft forward along these points (null for a plain push).</summary>
+    public List<V2>? Pull;
     public List<string> Problems = new(); // hard problems (empty = clean)
     public double Score;
     public double TurnStart;              // distance pushed straight back before the turn
-    public string Describe() => $"{Kind}, back {TurnStart:0} m, turn r {Radius:0} m, ends facing {EndHeading:000}°" +
+    public string Describe() => $"{Kind}, back {TurnStart:0} m, turn r {Radius:0} m{(Pull is null ? "" : ", then pulled forward")}, ends facing {EndHeading:000}°" +
                                 (Problems.Count > 0 ? " — " + string.Join(", ", Problems) : "");
 }
 
@@ -88,8 +91,17 @@ public sealed class PushbackPlanner(AirportModel apt)
 
         // Check the most promising ones for dead ends, facing the right way and staying on the pavement.
         var paved = Pavement(s0);
-        var shortlist = cands.OrderBy(c => c.Problems.Count > 0 ? 1 : 0).ThenBy(c => c.Score).Take(8).ToList();
-        foreach (var c in shortlist) { CheckRoute(c, targetNode); CheckPavement(c, perf, paved); }
+        var shortlist = cands.OrderBy(c => c.Problems.Count > 0 ? 1 : 0).ThenBy(c => c.Score).Take(12).ToList();
+        foreach (var c in shortlist)
+        {
+            CheckRoute(c, targetNode); CheckPavement(c, perf, paved);
+            if (c.Pull is { } pl && c.Problems.Count == 0)
+            {
+                var tow = new PushPlan { Points = pl, Radius = c.Radius, End = c.End, EndHeading = c.EndHeading };
+                CheckPavement(tow, perf, paved);
+                c.Problems.AddRange(tow.Problems);
+            }
+        }
         var best = shortlist.OrderBy(c => c.Problems.Count > 0 ? 1 : 0).ThenBy(c => c.Score).FirstOrDefault();
         var fallback = Fallback(spot, perf, roadDist, wingDist, rcomf, targetNode);
         CheckPavement(fallback, perf, paved);
@@ -144,6 +156,40 @@ public sealed class PushbackPlanner(AirportModel apt)
                     };
                     yield return Score(p, spot, perf, roadDist, wingDist, rcomf, rmin, turn, r * turn * Math.PI / 180 + (along - t));
                     break;
+                }
+            }
+            // Push then pull: pushed tail-first past the junction onto one branch, then towed forward through it onto
+            // another, so the nose ends pointing the open way (a stand whose single push can only face a dead end).
+            foreach (var e2 in next)
+            {
+                var m2 = (apt.Nodes[e2.B] - apt.Nodes[n]).Unit;
+                var turn2 = Math.Abs(Geo2.Diff(dir.Bearing, m2.Bearing));
+                if (turn2 < 15 || turn2 > 120) continue;
+                var r = rcomf;
+                var t2 = r * Math.Tan(turn2 * Math.PI / 360);
+                if (t2 > lastLeg + 1) continue;
+                var back = t2 + perf.LengthM * 0.6 + 10;            // far enough past the junction to tow out of it
+                if (back > e2.Len) continue;
+                var stop = apt.Nodes[n] + m2 * back;
+                foreach (var e3 in next)
+                {
+                    if (e3 == e2) continue;
+                    var m3 = (apt.Nodes[e3.B] - apt.Nodes[n]).Unit;
+                    var turn3 = Math.Abs(Geo2.Diff((m2 * -1).Bearing, m3.Bearing));
+                    if (turn3 < 15 || turn3 > 120) continue;
+                    var t3 = r * Math.Tan(turn3 * Math.PI / 360);
+                    if (t3 > back - 5) continue;
+                    var ahead = Math.Min(e3.Len, t3 + 20);
+                    if (ahead < t3) continue;
+                    var end = apt.Nodes[n] + m3 * ahead;
+                    var p = new PushPlan
+                    {
+                        Points = pts.Append(stop).ToList(), Pull = new List<V2> { stop, apt.Nodes[n], end }, Radius = r, End = end,
+                        EndHeading = m3.Bearing, EndNode = e3.B, TurnStart = walked - t2, Kind = "push-pull",
+                    };
+                    var scored = Score(p, spot, perf, roadDist, wingDist, rcomf, rmin, turn2, r * turn2 * Math.PI / 180 + back + ahead);
+                    scored.Score += 150;   // slower than a single push: only when that can't work
+                    yield return scored;
                 }
             }
             // Straight through the junction too, for a turn at the next one (a lead-in crossing a service lane).
@@ -347,7 +393,7 @@ public sealed class PushbackPlanner(AirportModel apt)
     /// <summary>Plans a pushback at every stand (for the log): how many are clean, and the problems found.</summary>
     public string Survey(Perf perf, int targetNode, int examples = 40)
     {
-        int clean = 0, straight = 0, fallback = 0, total = 0;
+        int clean = 0, straight = 0, fallback = 0, total = 0, pushPull = 0;
         var problems = new Dictionary<string, int>();
         var bad = new List<string>();
         foreach (var spot in apt.Spots.Where(s => s.IsGate || s.RadiusM >= 17))
@@ -357,12 +403,13 @@ public sealed class PushbackPlanner(AirportModel apt)
             try { p = Plan(spot, perf, targetNode); }
             catch (Exception ex) { bad.Add($"{spot.Label}: error {ex.Message}"); continue; }
             if (p.Kind == "fallback") fallback++;
+            if (p.Kind == "push-pull") pushPull++;
             if (p.Problems.Count == 0) { clean++; if (p.Kind == "straight") straight++; }
             foreach (var pr in p.Problems.Select(x => x.StartsWith("passes through") ? "passes through a stand" : x))
                 problems[pr] = problems.GetValueOrDefault(pr) + 1;
             if ((p.Problems.Count > 0 || p.Kind == "fallback") && bad.Count < examples) bad.Add($"{spot.Label}: {p.Describe()}");
         }
-        return $"pushbacks planned at {total} stands: {clean} clean ({straight} straight back), {fallback} fallback" +
+        return $"pushbacks planned at {total} stands: {clean} clean ({straight} straight back, {pushPull} push then pull forward), {fallback} fallback" +
                (problems.Count > 0 ? "; problems: " + string.Join(", ", problems.Select(kv => $"{kv.Key} {kv.Value}")) : "") +
                (bad.Count > 0 ? "; e.g. " + string.Join(" | ", bad) : "");
     }
