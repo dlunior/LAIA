@@ -1242,7 +1242,7 @@ public sealed partial class TrafficWorld
     private static double Restricted(Flight f, double plan, double atS = double.NaN)
     {
         var s0 = double.IsNaN(atS) ? f.S : atS;
-        double hi = double.MaxValue, lo = double.MinValue;
+        double hi = double.MaxValue, lo = double.MinValue, hiS = double.MaxValue, loS = double.MaxValue;
         foreach (var c in f.AltLimits)
         {
             var ahead = (c.S - s0) / Geo2.MPerNm;
@@ -1256,11 +1256,15 @@ public sealed partial class TrafficWorld
             var high = c.Max > 10500 || (c.Max <= 0 && c.Min > 10500);
             var from = high ? (f.P.Family == "turboprop" ? 230 : 280) : 250;
             var slowNm = kt > 0 && kt < from ? (from - kt) / 10 + 1 : 0;
-            if (c.Max > 0) hi = Math.Min(hi, c.Max + Math.Max(0, ahead - slowNm) * 300);
-            if (c.Min > 0) lo = Math.Max(lo, c.Min);
+            if (c.Max > 0) { var h = c.Max + Math.Max(0, ahead - slowNm) * 300; if (h < hi) { hi = h; hiS = c.S; } }
+            if (c.Min > 0 && c.Min > lo) { lo = c.Min; loS = c.S; }
         }
         var t = Math.Min(plan, hi);
-        if (t < lo) t = Math.Min(lo, hi);
+        // A floor at a nearer fix wins over getting down early for a farther one: "at or above 9,000" at MIDDL, then
+        // "at 2,000" 18 nm on — it stays at 9,000 until MIDDL and descends more steeply after (it used to start down
+        // for the farther fix and cross MIDDL at 7,600 ft; MCO's DORII "at or above 8,000" before BRICE "at 5,000"
+        // is the same pattern). Only a ceiling at the same or a nearer fix can take it below a floor.
+        if (t < lo) t = hiS > loS + 50 ? lo : Math.Min(lo, hi);
         return t;
     }
 
