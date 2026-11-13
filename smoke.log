@@ -1,0 +1,235 @@
+
+=== Install LAIA Server silently
+exit 0 after 33s
+20:58:25 [5] Downloading the controller voice…
+20:58:25 == Downloading the controller voice
+20:58:25 Downloading https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin (attempt 1)
+20:58:26 Downloading https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx (attempt 1)
+20:58:26    31% 166 MB of about 337 MB
+20:58:27 [5] Ok Kokoro voice ready
+20:58:27 [6] Skipped Not needed on this PC
+20:58:27 [7] Downloading speech recognition…
+20:58:27 == Downloading speech recognition
+20:58:27    75% Whisper base.en (about 145 MB)
+20:58:27 > python.exe -u "C:\Program Files\LAIA Server\speech\worker.py" --config "C:\ProgramData\LAIA\config.json" --prefetch-whisper base.en
+20:58:31   20:58:31 downloading Whisper base.en to C:\ProgramData\LAIA\models\whisper
+20:58:32   Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+20:58:39   20:58:39 done: C:\ProgramData\LAIA\models\whisper\models--Systran--faster-whisper-base.en\snapshots\3d3d5dee26484f91867d81cb899cfcf72b96be6c
+20:58:39   exit 0
+20:58:39 [7] Ok Whisper base.en ready
+20:58:39    85% 
+20:58:39 [8] Configuring Windows…
+20:58:39 == Configuring Windows
+20:58:39 > sc.exe create LAIA binPath= "\"C:\Program Files\LAIA Server\app\Laia.Server.exe\"" start= delayed-auto DisplayName= "LAIA Server"
+20:58:39   [SC] CreateService SUCCESS
+20:58:39   exit 0
+20:58:39 > sc.exe description LAIA "LAIA - Local AI ATC: AI traffic and air traffic control for your flight simulator."
+20:58:39   [SC] ChangeServiceConfig2 SUCCESS
+20:58:39   exit 0
+20:58:39 > sc.exe failure LAIA reset= 86400 actions= restart/5000/restart/10000/restart/60000
+20:58:39   [SC] ChangeServiceConfig2 SUCCESS
+20:58:39   exit 0
+20:58:39 > netsh.exe advfirewall firewall delete rule name="LAIA Server"
+20:58:43   No rules match the specified criteria.
+20:58:43   exit 1
+20:58:43 > netsh.exe advfirewall firewall add rule name="LAIA Server" dir=in action=allow protocol=UDP localport=47800 remoteip=localsubnet profile=any
+20:58:43   Ok.
+20:58:43   exit 0
+20:58:43 > netsh.exe advfirewall firewall add rule name="LAIA Server" dir=in action=allow protocol=TCP localport=47801 remoteip=localsubnet profile=any
+20:58:44   Ok.
+20:58:44   exit 0
+20:58:44 > powercfg.exe /change standby-timeout-ac 0
+20:58:44   exit 0
+20:58:44 > powercfg.exe /change hibernate-timeout-ac 0
+20:58:44   exit 0
+20:58:44 [8] Ok 
+20:58:44 [9] Starting LAIA…
+20:58:44 == Starting LAIA
+20:58:44    94% Starting the LAIA service
+20:58:44 > sc.exe start LAIA
+20:58:44   SERVICE_NAME: LAIA 
+20:58:44           TYPE               : 10  WIN32_OWN_PROCESS  
+20:58:44           STATE              : 2  START_PENDING 
+20:58:44                                   (NOT_STOPPABLE, NOT_PAUSABLE, IGNORES_SHUTDOWN)
+20:58:44           WIN32_EXIT_CODE    : 0  (0x0)
+20:58:44           SERVICE_EXIT_CODE  : 0  (0x0)
+20:58:44           CHECKPOINT         : 0x0
+20:58:44           WAIT_HINT          : 0x7d0
+20:58:44           PID                : 2648
+20:58:44           FLAGS              : 
+20:58:44   exit 0
+20:58:51 [9] Ok Running and ready for your sim PC
+20:58:51    100% 
+20:58:51 SETUP OK
+
+=== C++ runtime step skipped when already installed
+20:58:25 [3] Ok Already installed (14.51.36247)
+
+=== Service and firewall
+
+SERVICE_NAME: LAIA 
+        TYPE               : 10  WIN32_OWN_PROCESS  
+        STATE              : 4  RUNNING 
+                                (STOPPABLE, NOT_PAUSABLE, ACCEPTS_SHUTDOWN)
+        WIN32_EXIT_CODE    : 0  (0x0)
+        SERVICE_EXIT_CODE  : 0  (0x0)
+        CHECKPOINT         : 0x0
+        WAIT_HINT          : 0x0
+
+Rule Name:                            LAIA Server
+----------------------------------------------------------------------
+Enabled:                              Yes
+Direction:                            In
+Profiles:                             Domain,Private,Public
+Grouping:                             
+LocalIP:                              Any
+RemoteIP:                             LocalSubnet
+Protocol:                             TCP
+LocalPort:                            47801
+RemotePort:                           Any
+Edge traversal:                       No
+Action:                               Allow
+
+Rule Name:                            LAIA Server
+----------------------------------------------------------------------
+Enabled:                              Yes
+Direction:                            In
+Profiles:                             Domain,Private,Public
+Grouping:                             
+LocalIP:                              Any
+RemoteIP:                             LocalSubnet
+Protocol:                             UDP
+LocalPort:                            47800
+RemotePort:                           Any
+Edge traversal:                       No
+Action:                               Allow
+Ok.
+
+
+=== Wait for speech engine
+  ready 
+{
+  "flight": {
+    "sim": null,
+    "where": null,
+    "radio": null,
+    "plan": null,
+    "planStatus": "No SimBrief username set",
+    "frequencies": "FAA cycle 2026-10-29: 19,950 frequencies",
+    "lastRadio": null
+  },
+  "app": "LAIA Server",
+  "version": "0.1.181",
+  "machine": "runnervmm7ud1",
+  "uptimeSeconds": 6,
+  "speech": {
+    "status": "ready",
+    "detail": null,
+    "health": {
+      "ready": true,
+      "failed": false,
+      "detail": null,
+      "whisper_model": "base.en",
+      "whisper_device": "cpu",
+      "tts": "Kokoro (am_michael) on this PC",
+      "last_ms": null
+    }
+  },
+  "sim": null,
+  "transcript": []
+}
+
+=== Discovery (what LAIA Sim does to find the server)
+reply from 127.0.0.1:47800 : {"App":"LAIA","Name":"LAIA Server on runnervmm7ud1","Machine":"runnervmm7ud1","Port":47801,"Version":"0.1.181"}
+
+=== Control page
+
+=== Voice round trip
+pilot call wav: 271020 bytes
+round trip: 5047 ms
+HEARD: LaGuardia Ground, Delta 1234, ready to taxi with information Bravo.
+REPLY: Delta twelve thirty-four, LaGuardia Ground, roger, hold position, I'll have your taxi instructions shortly.
+reply wav: 335532 bytes
+
+=== Stray key-up (silence) gets no reply
+silence -> HTTP 204
+
+=== No facility named: reply has no made-up station name
+REPLY: Delta twelve thirty-four, LaGuardia Ground, roger.
+
+=== Settings: save, read back masked, stored encrypted
+{
+  "simbrief_user": "smoketest",
+  "schedule_source": "airlabs",
+  "airlabs": {
+    "set": true,
+    "hint": "…3456"
+  },
+  "aeroapi": {
+    "set": false,
+    "hint": ""
+  },
+  "navigraph": {
+    "available": false,
+    "signed_in": false,
+    "note": "Navigraph sign-in arrives once Navigraph approves LAIA."
+  }
+}
+airlabs test with fake key: False AirLabs says: Unknown api_key
+
+=== FAA frequency data
+frequencies: FAA cycle 2026-10-29: 19,950 frequencies
+
+name                freqText kind      primary
+----                -------- ----      -------
+LaGuardia Tower     118.7    Tower        True
+LaGuardia Ground    121.7    Ground       True
+LaGuardia Ground    121.85   Ground      False
+LaGuardia Clearance 121.875  Clearance    True
+LaGuardia Traffic   122.95   Ctaf         True
+LaGuardia ATIS      125.95   Atis         True
+New York Approach   126.05   Approach     True
+New York Approach   126.05   Approach     True
+LaGuardia ATIS      127.05   Atis         True
+LaGuardia Ground    127.675  Ground      False
+LaGuardia Clearance 135.2    Clearance    True
+New York Approach   120.05   Approach    False
+New York Departure  120.4    Departure    True
+New York Approach   120.55   Approach    False
+New York Approach   120.8    Approach     True
+New York Departure  124.45   Departure   False
+New York Approach   124.95   Approach    False
+New York Approach   125.7    Approach     True
+New York Approach   126.4    Approach     True
+New York Departure  127.05   Departure   False
+New York Approach   127.3    Approach    False
+New York Approach   127.6    Approach     True
+New York Approach   128.125  Approach     True
+New York Approach   128.55   Approach     True
+New York Approach   128.8    Approach    False
+New York Approach   132.7    Approach    False
+
+
+LGA ground 121.7, clearance 121.875
+
+=== Simulated aircraft at LaGuardia on the ground frequency
+flight: {"sim":{"connected":true,"simulator":"MSFS 2024","lat":40.7769,"lon":-73.874,"altitudeFt":21,"aglFt":0,"headingTrue":0,"headingMag":40,"ias":0,"groundSpeed":0,"verticalSpeed":0,"onGround":true,"com1Active":121.7,"com1Standby":0,"com2Active":0,"com2Standby":0,"com1Transmit":true,"com2Transmit":false,"squawk":"","title":"Smoke Test A320","atcId":"","atcAirline":"","atcFlightNumber":"","windDirection":0,"windSpeed":0,"zuluWeekMinute":-1,"transmitFrequency":121.7},"where":{"airport":"LGA","nm":0.1},"radio":{"freq":"121.700","station":"LaGuardia Ground"},"plan":null,"planStatus":"Couldn't load SimBrief plan: Response status code does not indicate success: 400 (Bad Request).","frequencies":"FAA cycle 2026-10-29: 19,950 frequencies","lastRadio":"no sim position, answering by what was said"}
+HEARD: LaGuardia Ground. Delta 1196. Request IFR clearance to Orlando.
+REPLY: Delta eleven ninety-six, LaGuardia Ground, contact LaGuardia Clearance on one two one point eight seven five.
+
+=== AI traffic: test departure at LaGuardia
+runways: 6,760 airports with runways
+test departure: True ASA309 (B739) is lined up on runway 04, departing in about 15 seconds.
+sim/state reply traffic: {"id":"LGA001","callsign":"ASA309","airline":"ASA","type":"B739","model":"","lat":40.76962077573747,"lon":-73.8837424255748,"altFt":20.5,"aglFt":0,"onGround":true,"timeMs":1794603552270,"heading":32,"pitch":0,"bank":0,"groundSpeed":0,"verticalSpeed":0,"gearDown":true,"phase":"lined up","lights":63}
+lights while lined up: 63
+after 75 s: {"id":"LGA001","callsign":"ASA309","airline":"ASA","type":"B739","model":"","lat":40.79284936890255,"lon":-73.86465067509359,"altFt":661.7903532355713,"aglFt":641.2903532355713,"onGround":false,"timeMs":1794603627270,"heading":32,"pitch":13.083047645316164,"bank":0,"groundSpeed":175.28979462219507,"verticalSpeed":2500,"gearDown":false,"phase":"climbing","lights":47}
+
+=== Frequency with no controller
+HTTP 204 note: No ATC answers on 123.450 here.
+
+=== Install LAIA Sim silently
+installed C:\Users\runneradmin\AppData\Local\Programs\LAIA Sim\LaiaSim.exe
+
+=== Uninstall both
+
+SMOKE PASS

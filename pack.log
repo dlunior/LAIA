@@ -1,0 +1,38 @@
+== publish src\Laia.Server\Laia.Server.csproj
+  Determining projects to restore...
+  Restored D:\a\LAIA\LAIA\src\Laia.Common\Laia.Common.csproj (in 15.91 sec).
+  Restored D:\a\LAIA\LAIA\src\Laia.Server\Laia.Server.csproj (in 15.94 sec).
+  Laia.Common -> D:\a\LAIA\LAIA\src\Laia.Common\bin\Release\net8.0\Laia.Common.dll
+D:\a\LAIA\LAIA\src\Laia.Server\Traffic.cs(77,28): warning CS0649: Field 'TrafficEngine.Prep.Forced' is never assigned to, and will always have its default value false [D:\a\LAIA\LAIA\src\Laia.Server\Laia.Server.csproj]
+  Laia.Server -> D:\a\LAIA\LAIA\src\Laia.Server\bin\Release\net8.0-windows\win-x64\Laia.Server.dll
+  Laia.Server -> D:\a\LAIA\LAIA\out\server-payload\app\
+== publish src\Laia.Sim\Laia.Sim.csproj
+  Determining projects to restore...
+  Restored D:\a\LAIA\LAIA\src\Laia.Common\Laia.Common.csproj (in 2.11 sec).
+  Restored D:\a\LAIA\LAIA\src\Laia.Sim\Laia.Sim.csproj (in 2.63 sec).
+  Laia.Common -> D:\a\LAIA\LAIA\src\Laia.Common\bin\Release\net8.0\Laia.Common.dll
+D:\a\LAIA\LAIA\src\Laia.Sim\SettingsForm.cs(562,24): warning CS8600: Converting null literal or possible null value to non-nullable type. [D:\a\LAIA\LAIA\src\Laia.Sim\Laia.Sim.csproj]
+D:\a\LAIA\LAIA\src\Laia.Sim\SettingsForm.cs(563,47): warning CS8602: Dereference of a possibly null reference. [D:\a\LAIA\LAIA\src\Laia.Sim\Laia.Sim.csproj]
+  Laia.Sim -> D:\a\LAIA\LAIA\src\Laia.Sim\bin\Release\net8.0-windows\win-x64\LaiaSim.dll
+  Laia.Sim -> D:\a\LAIA\LAIA\out\sim-payload\
+== publish src\Laia.Setup.Server\Laia.Setup.Server.csproj
+  Determining projects to restore...
+  Restored D:\a\LAIA\LAIA\src\Laia.Common\Laia.Common.csproj (in 267 ms).
+  Restored D:\a\LAIA\LAIA\src\Laia.Setup.Server\Laia.Setup.Server.csproj (in 279 ms).
+  Restored D:\a\LAIA\LAIA\src\Laia.Setup.Common\Laia.Setup.Common.csproj (in 277 ms).
+  Laia.Common -> D:\a\LAIA\LAIA\src\Laia.Common\bin\Release\net8.0\Laia.Common.dll
+  Laia.Setup.Common -> D:\a\LAIA\LAIA\src\Laia.Setup.Common\bin\Release\net8.0-windows\Laia.Setup.Common.dll
+  Laia.Setup.Server -> D:\a\LAIA\LAIA\src\Laia.Setup.Server\bin\Release\net8.0-windows\win-x64\LAIA-Server-Setup.dll
+  Laia.Setup.Server -> D:\a\LAIA\LAIA\out\setup-server\
+== publish src\Laia.Setup.Sim\Laia.Setup.Sim.csproj
+  Determining projects to restore...
+  Restored D:\a\LAIA\LAIA\src\Laia.Setup.Sim\Laia.Setup.Sim.csproj (in 316 ms).
+  2 of 3 projects are up-to-date for restore.
+  Laia.Common -> D:\a\LAIA\LAIA\src\Laia.Common\bin\Release\net8.0\Laia.Common.dll
+  Laia.Setup.Common -> D:\a\LAIA\LAIA\src\Laia.Setup.Common\bin\Release\net8.0-windows\Laia.Setup.Common.dll
+  Laia.Setup.Sim -> D:\a\LAIA\LAIA\src\Laia.Setup.Sim\bin\Release\net8.0-windows\win-x64\LAIA-Sim-Setup.dll
+  Laia.Setup.Sim -> D:\a\LAIA\LAIA\out\setup-sim\
+== packing D:\a\LAIA\LAIA\out\dist\LAIA-Server-Setup.exe
+   313 MB
+== packing D:\a\LAIA\LAIA\out\dist\LAIA-Sim-Setup.exe
+   179 MB

@@ -1,0 +1,469 @@
+D:\a\LAIA\LAIA\src\Laia.Tests\Program.cs(1390,9): warning CS0219: The variable 'nm' is assigned but its value is never used [D:\a\LAIA\LAIA\src\Laia.Tests\Laia.Tests.csproj]
+== Path geometry
+  ok   path is continuous (largest step 1.00 m per metre)
+  ok   direction changes smoothly (largest 0.95° per metre)
+  ok   length is right (1448 m, expected 1448)
+== Eased taxi turns
+  plain: curvature jump 0.0250/m, eased: 0.0042/m; eased largest step 0.50 m
+  ok   eased path is continuous (largest step 0.50 m per 0.5 m)
+  ok   turns tighten and unwind gradually instead of all at once
+  ok   eased path still ends where it should
+  alley turn: tightest radius 40 m, furthest off the line on the straights 0.0 m
+  ok   a turn into an alley through short scenery pieces stays a proper curve (tightest 40 m radius)
+  ok   smoothing never strays more than a few metres off the taxi line
+== Wind
+  ok   crabs into a west wind when flying north (heading 354.3)
+  ok   ground speed with a crosswind (199.0 kt)
+  ok   headwind slows the ground speed (180.0 kt)
+  ok   headwind component on runway 27
+== Airport model (offsets as documented)
+  calibration: x east, z north (100% of runway taxi points on a runway)
+  ok   has a taxi network and parking
+  ok   16 gates found (16)
+  ok   runway taxi points recognised (11 of 11)
+  ok   gate position decoded (-600, -350)
+  ok   taxi route found (15 nodes)
+== Airport model (offsets with axes swapped)
+  calibration: z east, x north (100% of runway taxi points on a runway)
+  ok   has a taxi network and parking
+  ok   16 gates found (16)
+  ok   runway taxi points recognised (11 of 11)
+  ok   gate position decoded (-600, -350)
+  ok   taxi route found (15 nodes)
+== One hour of busy traffic, runway 27 in use (wind 270/12)
+    00:00:00 Runways in use at TEST: landing 27, departing 27 (wind 270 at 12 kt)
+    00:00:00 TEST: traffic started with 8 parked aircraft (16 usable parking spots)
+    00:00:03 Approach in use at TEST: ILS 27 for runway 27 (no ATIS approach known, so the standard choice)
+    00:00:03 TEST: taxi flow for landing 27, departing 27: 0 one-way stretches (); 0 stretches both ways; no real taxi tracks for these runways, so all from the layout; parallel taxiways: 0 inner (arrivals) and 0 outer (departures) segments; from 48 rehearsed taxi routes at 16 stands
+    00:01:56 SKW875: pushing back from Gate A16 (plain, back 50 m, turn r 21 m, ends facing 090°)
+    00:05:21 UAL939: landed runway 27, taxiing to Gate A15 (landing time as predicted 5 min out +2 s); restrictions 1 of 1 met
+    00:05:51 DAL131: pushing back from Gate A6 (plain, back 46 m, turn r 24 m, ends facing 090°)
+    00:06:09 SKW875: lining up runway 27 (next arrival 298 s)
+    00:07:38 SKW875: airborne from runway 27 on the TEST1 departure (take-off time as predicted 5 min out +38 s)
+    00:09:19 SKW875: climb above 5,000 ft (under the arrivals' lowest "at or above") given at 3,500 ft, 5.0 nm out, nothing in the way
+    00:11:08 SWA1376: pushing back from Gate A5 (plain, back 46 m, turn r 24 m, ends facing 090°)
+    00:11:14 DAL131: lining up runway 27 (next arrival 115 s)
+    00:12:44 DAL131: airborne from runway 27 on the TEST1 departure (take-off time as predicted 5 min out -23 s)
+    00:13:32 DAL134: landed runway 27, taxiing to Gate A1 (landing time as predicted 10 min out -6 s, 5 min out +3 s); restrictions 2 of 2 met; 492 s behind UAL925 (needed 94)
+    00:13:42 UAL925: pushing back from Gate A15 (plain, back 46 m, turn r 24 m, ends facing 090°)
+    00:14:24 DAL131: climb above 5,000 ft (under the arrivals' lowest "at or above") given at 3,505 ft, 5.3 nm out, nothing in the way
+    00:16:55 DAL2777: pushing back from Gate A11 (plain, back 46 m, turn r 24 m, ends facing 090°)
+    00:17:20 UAL2601: landed runway 27, taxiing to Gate A4 (landing time as predicted 10 min out -6 s, 5 min out +3 s); restrictions 2 of 2 met; 228 s behind DAL134 (needed 94)
+    00:18:08 SWA1376: lining up runway 27 (next arrival 142 s)
+    00:19:37 SWA1376: airborne from runway 27 on the TEST1 departure (take-off time as predicted 10 min out +42 s, 5 min out +51 s)
+    00:20:52 UAL2093: landed runway 27 (landing time as predicted 10 min out -4 s, 5 min out +2 s); restrictions 2 of 2 met; 212 s behind UAL2601 (needed 89)
+    00:21:17 SWA1376: climb above 5,000 ft (under the arrivals' lowest "at or above") given at 3,505 ft, 5.3 nm out, nothing in the way
+    00:21:35 UAL925: lining up runway 27 (next arrival 153 s)
+    00:22:43 DAL1543: pushing back from Gate A9 (plain, back 46 m, turn r 24 m, ends facing 090°)
+    00:23:06 UAL925: airborne from runway 27 on the TEST1 departure (take-off time as predicted 5 min out +185 s)
+    00:23:06 DAL2777: lining up runway 27 (next arrival 97 s)
+    00:24:34 DAL2777: airborne from runway 27 on the TEST1 departure (take-off time as predicted 5 min out +55 s)
+    00:24:46 UAL925: climb above 5,000 ft (under the arrivals' lowest "at or above") given at 3,505 ft, 5.3 nm out, nothing in the way
+    00:24:52 SWA360: landed runway 27, taxiing to Gate A8 (landing time as predicted 10 min out -6 s, 5 min out +3 s); restrictions 2 of 2 met; 240 s behind UAL2093 (needed 151)
+    00:26:14 DAL2777: climb above 5,000 ft (under the arrivals' lowest "at or above") given at 3,505 ft, 5.3 nm out, nothing in the way
+    00:27:24 UAL1751: pushing back from Gate A2 (plain, back 46 m, turn r 24 m, ends facing 090°)
+    00:29:53 UAL601: landed runway 27 (landing time as predicted 10 min out -4 s, 5 min out +2 s); restrictions 2 of 2 met; 302 s behind SWA360 (needed 89)
+    00:30:22 DAL888: pushing back from Gate A1 (lead-in, back 126 m, turn r 24 m, ends facing 090°)
+    00:30:37 DAL1543: lining up runway 27 (next arrival 200 s)
+    00:32:09 DAL1543: airborne from runway 27 on the TEST1 departure (take-off time as predicted 10 min out +41 s, 5 min out +49 s)
+    00:33:49 DAL1543: climb above 5,000 ft (under the arrivals' lowest "at or above") given at 3,505 ft, 5.3 nm out, nothing in the way
+    00:35:04 DAL1775: landed runway 27 (landing time as predicted 10 min out -4 s, 5 min out +3 s); restrictions 2 of 2 met; 311 s behind UAL601 (needed 93)
+    00:35:19 UAL288: pushing back from Gate A4 (plain, back 46 m, turn r 24 m, ends facing 090°)
+    00:35:51 UAL1751: lining up runway 27 (next arrival 144 s)
+    00:37:21 UAL1751: airborne from runway 27 on the TEST1 departure (take-off time as predicted 10 min out +20 s, 5 min out +14 s)
+    00:38:57 SKW2222: landed runway 27, taxiing to Gate A9 (landing time as predicted 10 min out -4 s, 5 min out +1 s); restrictions 2 of 2 met; 233 s behind DAL1775 (needed 159)
+    00:39:01 UAL1751: climb above 5,000 ft (under the arrivals' lowest "at or above") given at 3,505 ft, 5.3 nm out, nothing in the way
+    00:39:49 DAL888: lining up runway 27 (next arrival 163 s)
+    00:39:51 AAL1978: pushing back from Gate A3 (plain, back 46 m, turn r 24 m, ends facing 090°)
+    00:41:19 DAL888: airborne from runway 27 on the TEST1 departure (take-off time as predicted 10 min out +47 s, 5 min out +58 s)
+    00:41:19 UAL288: lining up runway 27 (next arrival 105 s)
+    00:42:50 UAL288: airborne from runway 27 on the TEST1 departure (take-off time as predicted 10 min out -119 s, 5 min out -117 s)
+    00:42:59 DAL888: climb above 5,000 ft (under the arrivals' lowest "at or above") given at 3,505 ft, 5.3 nm out, nothing in the way
+    00:43:16 SWA2058: landed runway 27, taxiing to Gate A5 (landing time as predicted 10 min out -6 s, 5 min out +3 s); restrictions 2 of 2 met; 259 s behind SKW1191 (needed 94)
+    00:43:24 SKW1191: pushing back from Gate A9 (plain, back 50 m, turn r 21 m, ends facing 090°)
+    00:44:30 UAL288: climb above 5,000 ft (under the arrivals' lowest "at or above") given at 3,505 ft, 5.3 nm out, nothing in the way
+    00:45:56 AAL1978: lining up runway 27 (next arrival 110 s)
+    00:47:08 SWA1612: pushing back from Gate A12 (plain, back 46 m, turn r 24 m, ends facing 090°)
+    00:47:25 AAL1978: airborne from runway 27 on the TEST1 departure (take-off time as predicted 10 min out -134 s, 5 min out -126 s)
+    00:48:05 SWA1887: landed runway 27, taxiing to Gate A7 (landing time as predicted 10 min out -6 s, 5 min out +3 s); restrictions 2 of 2 met; 288 s behind SWA2058 (needed 94)
+    00:49:05 AAL1978: climb above 5,000 ft (under the arrivals' lowest "at or above") given at 3,505 ft, 5.3 nm out, nothing in the way
+    00:49:11 SKW1191: lining up runway 27 (next arrival 118 s)
+    00:50:40 SKW1191: airborne from runway 27 on the TEST1 departure (take-off time as predicted 10 min out -50 s, 5 min out -51 s)
+    00:51:05 SWA1929: pushing back from Gate A5 (plain, back 46 m, turn r 24 m, ends facing 090°)
+    00:51:36 UAL1875: landed runway 27, taxiing to Gate A16 (landing time as predicted 10 min out -6 s, 5 min out +3 s); restrictions 2 of 2 met; 211 s behind SWA1887 (needed 94)
+    00:52:21 SKW1191: climb above 5,000 ft (under the arrivals' lowest "at or above") given at 3,500 ft, 5.0 nm out, nothing in the way
+    00:52:24 SWA1612: lining up runway 27 (next arrival 99 s)
+    00:53:55 SWA1612: airborne from runway 27 on the TEST1 departure (take-off time as predicted 10 min out -114 s, 5 min out -5 s)
+    00:54:13 DAL1067: landed runway 27 (landing time as predicted 10 min out +4 s, 5 min out +1 s); restrictions 2 of 2 met; 157 s behind UAL1875 (needed 93)
+    00:55:35 SWA1612: climb above 5,000 ft (under the arrivals' lowest "at or above") given at 3,505 ft, 5.3 nm out, nothing in the way
+    00:56:16 SWA2746: pushing back from Gate A7 (plain, back 46 m, turn r 24 m, ends facing 090°)
+    00:56:34 SWA1929: lining up runway 27 (next arrival 103 s)
+    00:58:03 SWA1929: airborne from runway 27 on the TEST1 departure (take-off time as predicted 10 min out -121 s, 5 min out -111 s)
+    00:58:23 SWA202: pushing back from Gate A8 (plain, back 46 m, turn r 24 m, ends facing 090°)
+    00:58:28 SWA1750: landed runway 27, taxiing to Gate A14 (landing time as predicted 10 min out -6 s, 5 min out +3 s); restrictions 2 of 2 met; 256 s behind DAL1067 (needed 151)
+    00:59:43 SWA1929: climb above 5,000 ft (under the arrivals' lowest "at or above") given at 3,505 ft, 5.3 nm out, nothing in the way
+  takeoffs 13, landings 13, go-arounds 0, landings with a gate 9
+  phases seen: approach, arriving, at gate, boarding, climbing, engine start, final, flare, holding short, landing roll, lined up, lining up, parked, pushback, takeoff roll, taxi, taxi in
+  closest moving aircraft on the ground: 60 m; fastest ground turn 17°/s; fastest bank change 5°/s
+  ok   departures take off (13)
+  ok   arrivals land (13)
+  ok   arrivals taxi to gates (9)
+  ok   few go-arounds (0)
+  ok   every arrival is stable by 1,000 ft (AIM 5-4)
+  ok   no jet slowed below 210 kt beyond 20 miles (7110.65 5-7-3) (0)
+  ok   no jet slowed below 170 kt between 5 and 20 miles (7110.65 5-7-3) (0)
+  ok   no arrival slows while diving clean (energy: descend OR slow) (0)
+  ok   no speed changes upward inside 5 miles (7110.65 5-7-2) (0)
+  ok   departures stay at or below 250 kt below 10,000 ft (91.117) (0)
+  ok   departures spaced for wake turbulence and the runway (7110.65 3-9-6) (0)
+  ok   never two aircraft on the runway (0 moments)
+  ok   no jumps in movement (0)
+  ok   aircraft keep their distance on the ground (0 moments closer than 12 m)
+  ok   no aircraft stuck for 15 minutes (0)
+  ok   no sudden turns on the ground (0, fastest 17°/s)
+  ok   turns into the gates are gentle, like a lead-in line (fastest 13°/s, UAL939 at 8 kt)
+  ok   bank changes gently (5.0°/s)
+  ok   no errors in the traffic logic
+  ok   all phases happen (pushback, line-up, flare, gate)
+== Rules: wake categories and crossing runways
+  ok   aircraft get their CWT wake categories (777 B, 737 F, E175 G, 757 E, A380 A)
+  ok   spacing on final follows the CWT table (heavy→large 5 nm, A380→small 8, large→large 3)
+  ok   departure wake times follow 7110.65 3-9-6 (2 min behind a heavy, 3 behind an A380)
+  ok   91.117(b) 200-knot area: Class C/D airports in the US, not Class B
+  Runways in use at TEST: landing 27, departing 36 (wind 300 at 15 kt)
+  ok   busy: land 27, depart the crossing runway 36 (27/36)
+  ok   no takeoff on the crossing runway with an arrival 1.5 nm from its threshold
+  ok   no lining up to wait on the runway either
+  ok   takeoff on the crossing runway allowed with the next arrival 7 nm out
+  ok   lining up allowed too when the takeoff can follow it
+  ok   turning traffic down re-picks the runways: one runway for both (27)
+  ok   turning traffic up re-picks the runways: the crossing runway again (36)
+  ok   wind change: landing runway turns into the wind (09)
+== Runway-only airport (test buttons without a layout)
+  UAL2016 (A320) is lined up on runway 04, departing in about 15 seconds.
+  ok   test departure accepted
+  ok   test departure airborne within 70 s (58 s)
+  SWA2579 (B737) is on a 5-mile final for runway 04.
+  ok   test arrival lands (142 s after starting)
+== Pushback plans at every gate of the test airport
+  pushbacks planned at 16 stands: 16 clean (0 straight back, 0 push then pull forward), 0 fallback
+  ok   a clean pushback at every gate
+  gate 6: plain, back 46 m, turn r 24 m, ends facing 090°
+  ok   pushes straight back before turning (46 m)
+  ok   ends lined up on the taxilane
+== Traffic from a real schedule
+      0.0 min TEST: following the real AIG schedule (20 departures and 10 arrivals a week at Busy; up to 34 aircraft, 11 moving, airport size x1.0); 10 aircraft at the gates waiting for their next flight
+  arrivals landed: 10 of 10, off schedule by +1, -2, -2, -2, -2, -2, -2, -2, -2, -2 min
+  departures airborne: 20 of 20, minutes after the scheduled time: 6, 6, 6, 11, 6, 6, 8, 7, 7, 7, 7, 7, 7, 6, 7, 8, 7, 9, 6, 8
+  ok   scheduled arrivals land
+  ok   arrivals land close to their scheduled time
+  ok   scheduled departures leave (including the arrived aircraft turning around)
+  ok   nobody leaves before their scheduled time
+  ok   arrived airframes leave again on their next flight (10 of 10)
+== Real gates override the scenery's gate assignments
+  7 of 8 real airline gates found in the scenery (DAL Gate A2,Gate A3,Gate A4,Gate A15; UAL Gate A10,Gate A11,Gate A12); not in this scenery: C 99
+  ok   terminal letter + gate number finds the stand
+  ok   gate with its own letter finds the stand
+  ok   a gate in another terminal isn't matched to the wrong letter
+  ok   gates not in the scenery are reported
+  parked: DAL150 Gate A15, UAL300 Gate A10, DAL151 Gate A4, UAL301 Gate A12, DAL152 Gate A2, UAL302 Gate A11, DAL153 Gate A3, UAL303 Gate A9, DAL154 Gate A16, UAL304 Gate A13, DAL901 Gate A1
+  ok   a flight with a known real gate parks at exactly that gate
+  ok   Delta parks at its real gates (or next to them), not the scenery's
+  ok   United parks at its real gates (or next to them)
+  ok   the real-gate plan is logged
+  ok   an aircraft that landed earlier waits at its gate overnight for its morning flight
+  ok   two arrivals due at the same time start at least 4 nm apart
+== A STAR that ends over the airport is vectored off it, not flown across the field
+  route: OVRHD1 → vectors to the ILS 27
+  ok   arrivals don't cross the airport on the way to final (0 points over the field)
+  ok   the arrival is vectored to the approach, as controllers do
+== Vectored to an approach's own first fix, not a straight-in final through a neighbour
+  with a transition: WEST1 → RNAV 27 Y via FEDXM
+  ok   the published approach transition nearest the end of the STAR is flown
+  ok   the transition keeps it out of the neighbour's airspace too
+  route: WEST1 → vectors to GEMKX for the RNAV 27 Y
+  ok   vectored to the approach's first fix, then flies the approach
+  ok   never on a long straight-in through the neighbour's airspace (0 points)
+  ok   doesn't cross the field on the way (0 points)
+== One approach at a time: the ATIS's, or a fixed choice — never a mix (LGA RNAV X vs Y 31)
+  ok   reads the approach in use from the ATIS, not the out-of-service one ((RNAV, X, 31))
+  ok   "ILS or LOC runway 4" is the ILS to 04 ((ILS, , 04))
+  standard choice: RNAV Y 27; ARRVL1 → vectors to GEMKY for the RNAV 27 Y
+  ok   without an ATIS, every arrival flies the same approach (the one with the most transitions)
+  ATIS says RNAV X: ARRVL1 → RNAV 27 X via VARAX
+  ok   with the ATIS saying RNAV X, every arrival flies the X
+  ok   the X is flown along its curved final, not replaced by a straight-in (0.00 nm from its fix)
+== The real ATIS decides the runways; the wind is only the fallback
+  ok   LaGuardia: departing 13, landing 22
+  ok   Denver: departing 08,17L,25, landing 34L,35R
+  ok   Boston: departing 04R, landing 04L
+  ok   Charlotte: departing 01R,36, landing 
+  ok   Cleveland: departing 24L, landing 24R
+  ok   Atlanta: departing , landing 08L,09R,10
+  ok   San Francisco: departing , landing 28L,28R, closed 01L,19R
+  ok   lists: departing 04L,31L, landing 04L,04R
+  ok   both: departing 31, landing 31
+  ok   arrival and departure broadcasts combine (landing 23L, departing 23R, info K/L)
+  ok   a combined ATIS naming only arrivals uses them for departures too
+  ok   the ATIS's runway is used even against the wind, and the wind decides without an ATIS (27 → 09 → 27)
+== Several runways from the ATIS, and STARs/SIDs chosen by where the flight comes from or goes
+  ok   both landing runways the ATIS names are used (27, 27R)
+  from the north: 27R NORTH1 | 27R NORTH1 | 27R NORTH1 | 27R NORTH1
+  from the south: 27 SOUTH1 → vectors to IF27 for the ILS 27 | 27 SOUTH1 → vectors to IF27 for the ILS 27 | 27 SOUTH1 → vectors to IF27 for the ILS 27 | 27 SOUTH1 → vectors to IF27 for the ILS 27
+  ok   each arrival gets the STAR from its own direction
+  ok   arrivals land on the runway on their side, shared out between the two
+  ok   an approach for each landing runway (ILS 27, vectors 27R)
+  departures from the south ramp: DAL300 27, DAL301 27, DAL302 27
+  ok   a ramp outside the runways departs from the runway on its own side
+== Vectors to final: downwind, base, a 20–30° intercept 8–10 nm out (no hairpins, no needless long finals)
+  hooking transition: WEST1 → ILS 27 via HOOKX; joins 9.2 nm out at 28°
+  ok   hooking transition: joins the final 8–10 nm out (9.2 nm)
+  ok   hooking transition: intercepts the final at no more than 30° (28°)
+  vectors: EAST1 → vectors to IF27 for the ILS 27; joins 9.2 nm out at 28°
+  ok   vectors: joins the final 8–10 nm out (9.2 nm)
+  ok   vectors: intercepts the final at no more than 30° (28°)
+== Airport rules read from the FAA's AAUP text (any airport, no airport-specific code)
+  2 runway rules from RNAV DEPARTURE AAUP: DDANY/MZULO/JEEMY/FATHE → 35L 35R 17L 17R (0700–2300 local); RDSOX/OSPRY/FSHUN → 36L 36R 18L 18R (0700–2300 local)
+  ok   Orlando: JEEMY/FATHE/DDANY/MZULO → the east runways, RDSOX/OSPRY/FSHUN → the west (read from the AAUP text)
+  ok   the rules apply 0700-2300 local only (at midnight the general logic and ATIS decide)
+  out of order: 2 runway rules from RNAV DEPARTURE AAUP: DDANY/MZULO/JEEMY/FATHE → 35L 35R 17L 17R (0700–2300 local); RDSOX/OSPRY/FSHUN → 36L 36R 18L 18R (0700–2300 local)
+  ok   out of reading order it still finds each rule's runway group (both flows) and the hours
+  ok   the FAA chart cycle is worked out from the date (29 OCT 2026 = 2611)
+== Whole sky: descending flights are never above a 3:1 path to their destination
+  Toronto–Orlando: at 52 nm to go 16920 ft
+  ok   at or below about 300 ft per nm to go (no more 26,000 ft at 52 nm)
+== Hand-over: a scheduled arrival taken over from the whole sky ~200 nm out, descending from cruise to land
+  ok   the whole sky has the arrival about 180 nm out
+  taken over 175 nm out at 36000 ft, 183 track nm to go: ARRVL1 → ILS 27
+  ok   it starts exactly where the whole sky had it, at its level
+  landed after 32 min; steepest descent 3000 ft/min, highest climb 0 ft/min
+  ok   it flies all the way in and lands
+  ok   250 kt or less below 10,000 ft (0 kt)
+  ok   it only descends, at airliner rates
+  ok   no holding far out on its own
+  landing time predicted 10 min out: -4 s off; 5 min out: +2 s off; first prediction 30 min out: +12 s off
+  ok   the landing time is predicted within 45 s from 10 minutes out and 30 s from 5 minutes out (no other traffic)
+  predictions: landings 30 min out ±12 s (n=1), 10 min out ±4 s (n=1), 5 min out ±2 s (n=1); times at the STAR/approach fixes 10 min out ±7 s (n=3)
+  ok   times at the STAR and approach fixes are predicted and measured
+== Hand-over of a short flight: one departing a field inside the 200 nm ring is taken over once climbed, not at take-off
+  taken over at 9810 ft
+  ok   taken over at 10,000 ft or more, not on the other field's runway
+== Vectors to final without a zigzag (MCO GRNCH5 for 36L: DORII, a keep-clear point inside the downwind, then back out)
+  route offsets from the final (nm): 9.0, 5.1, 5.2, 5.2, 0.8, 0.0, 0.0
+  ok   no cutting in towards the final and back out again
+== Heading to intercept (VI) then a course to a fix (CF): the turn comes where the heading meets the course (MCO FATHE4 off 35L)
+  turn point at (0.00, 1.25) nm, then JWOLF — was 3 nm straight ahead, then direct
+  ok   it turns where the heading meets the 037 course, about 1.25 nm out
+  ok   and then flies the course to JWOLF
+== Hybrid SIDs: RNAV to a fix, radar vectors, then RNAV again (MCO's runway → KAAPE → vectors → UKAYY)
+  flown: KAAPE → (heading) → UKAYY → DDANY
+  ok   after the vectors it rejoins at UKAYY and flies on to DDANY
+  ok   the vector leg is flown on its published heading first
+  ok   (an arrival or approach still ends at a vector leg)
+== Hand-over spacing: two arrivals the whole sky has on top of each other close in are sequenced, not held
+  ok   the whole sky has an arrival about 30 nm out
+  first 34.9 track nm out, second 39.9 (5.0 nm behind)
+  DAL2: taken over from the whole sky, sequenced: starts 40 track nm out (it was 35, too close to the traffic ahead), ARRVL1 → ILS 27 for runway 27
+  ok   the second starts at least 5 nm behind the first
+  ok   both land with no hold, 360 or go-around (0)
+== Take-off times are predicted (taxi, queue, arrivals on the same runway) and measured
+  20 take-offs with a prediction; landings 10 min out ±7 s (n=21), 5 min out ±1 s (n=22); times at the STAR/approach fixes 10 min out ±12 s (n=22); take-offs 10 min out ±43 s (n=11), 5 min out ±61 s (n=20)
+  SKW1787: airborne from runway 27 on the TEST1 departure (take-off time as predicted 5 min out +28 s)
+  SKW2081: airborne from runway 27 on the TEST1 departure (take-off time as predicted 5 min out -25 s)
+  AAL1394: airborne from runway 27 on the TEST1 departure (take-off time as predicted 5 min out +36 s)
+  ok   departures get a predicted take-off time
+  5 min out: average miss 61 s over 20
+  ok   predicted within about 2 minutes on average from 5 minutes out
+== Filed routes in the whole sky: an arrival is already flying to its STAR when it's taken over
+  ok   the whole sky has the arrival 60–80 nm out
+  at 60 nm, 22650 ft, heading 254; FARRR bears 254
+  ok   it is heading for its STAR's first fix (FARRR), not straight at the airport
+  taken over: ARRVL1 → ILS 27, turning 0° in its first 20 nm
+  ok   the hand-over just carries on along the route (no turn to join)
+== FAA NASR navigation data: fixes, navaids and airways, and route strings expanded point by point
+  5 fixes, 1 navaids, 1 airways; ODF J99 CCCCC DUPLI → ODF AAAAA BBBBB CCCCC DUPLI; FIX_BASE.csv: id=FIX_ID, lat=LAT_DECIMAL, lon=LONG_DECIMAL | NAV_BASE.csv: id=NAV_ID, lat=LAT_DECIMAL, lon=LONG_DECIMAL | AWY_BASE.csv: id=AWY_ID, string=AIRWAY_STRING, seq=-, point=-
+  ok   the airway is expanded between its fixes, a repeated name resolves to the nearest one, SID/STAR names are skipped
+  ok   airways given point by point work too, flown either way
+== The whole sky flies the filed route string (airways), then the STAR
+  ok   the whole sky has the flight about halfway
+  halfway at (126, -81) nm, 0.1 nm off the filed route; 19 filed route(s)
+  ok   it is on the airway route (well south of the great circle)
+== Taken over beside its STAR's first fix: direct to the next fix ahead, no flying back and looping round
+  ARRVL1 → ILS 27; closest to FARRR 16.2 nm, turning 0° in the first 20 nm
+  ok   it goes direct to MIDDL rather than back to FARRR and round
+== Departures never climb into arrivals; freighters park on cargo ramps
+  0 departure climbs stopped below traffic; 0 neighbouring-field descents stopped above the main airport's; 0 losses of separation involving departures; 0 between airports
+  ok   no departure comes within 3 nm and 1,000 ft of other traffic
+  ok   a climb is never stopped below 2,000 ft above the field
+  ok   UPS and FedEx are known as cargo airlines
+== SID top altitude: departures level under the arrivals, the climb given once clear (MCO: 7,000 under 8,000)
+  13 departures given the climb above their top altitude, 0 after waiting level for arrivals (average 0 s)
+  SKW2319: climb above 5,000 ft (TEST1 top altitude, chart) given at 3,514 ft, 5.1 nm out, nothing in the way
+  DAL2770: climb above 5,000 ft (TEST1 top altitude, chart) given at 3,512 ft, 5.3 nm out, nothing in the way
+  SKW1491: climb above 5,000 ft (TEST1 top altitude, chart) given at 3,514 ft, 5.1 nm out, nothing in the way
+  ok   departures are given the climb above their top altitude
+  ok   never above the top altitude before the climb is given
+  ok   no departure comes within 3 nm and 1,000 ft of other traffic
+== Between airports: departures level under another airport's traffic in their way
+  26 climb stops for the other airport's aircraft; 26 departure climbs stopped below traffic; 0 neighbouring-field descents stopped above the main airport's; 0 losses of separation involving departures; 0 between airports
+  SKW2319: climb stopped at 3,000 ft for NBR1 (KNBR) (4,000 ft, 6.1 nm)
+  SKW2319: climb stopped at 3,011 ft for NBR1 (KNBR) (4,000 ft, 3.1 nm)
+  ok   departures are stopped below the other airport's aircraft
+  ok   none comes within 3 nm and 900 ft of it (0 samples)
+== M6: learning an airport from real tracks (synthetic adsb.lol-style traces), and flying what was learned
+  test 2026-11-10: 27: 12 arrivals, final joined at 9.9 nm (9.7–10.1), 30° intercept, downwind 4.0 nm out, base at 14 nm; 27: 10 departures in 1 directions
+  ok   arrivals: joins at ~10 nm, 30° intercept, downwind 4 nm out, base at ~14 nm
+  ok   departures: a typical path to the north off 27
+  ok   the profile saves and loads
+  ok   a readsb trace file is read (ground and altitude points)
+  vectored arrivals join the final at 9.6, 9.6, 9.4, 9.7, 9.6, 9.6 nm
+  ok   vectored arrivals join where the real ones do (about 9.4–10.6 nm, not the generic 9.5 every time)
+== No ATIS: real traffic picks the runways before the wind (live first, then the learned day)
+  wind 100/6: by wind 09; learned day (27 most used) 27; live traffic on 09 09
+  Runways in use at TEST: landing 27, departing 27 (as real traffic used them on 2026-11-11 in a wind like today's (adsb.lol); wind 100 at 6 kt)
+  Runways in use at TEST: landing 09, departing 09 (from live traffic, adsb.lol; wind 100 at 6 kt)
+  ok   the learned day beats a light wind; live traffic beats both
+== M8 Smart traffic notices: the user's place in the sequence (generous gap) and runway notices on the ground
+  notice: Number 2 for 27, between DAL71 (A321) and DAL72 (A321) — DAL71 is at your 11 o'clock, 10 nm, 4,200 ft
+  DAL72: vectors for spacing (4.7 nm behind N123AB, 45 s short at the runway): turn right heading 014, back on course in 17 nm (+60 s)
+  DAL72: breaking off the approach for spacing (4.0 nm behind N123AB, 47 s short at the runway): turn left heading 135, vectors back around
+  N123AB (you): new sequence — number 2 for 27, between DAL72 and nobody
+  N123AB (you): new sequence — number 2 for 27, between DAL72 and nobody
+  landings: DAL71 379, you 601, DAL72 758; behind you: DAL72, 157 s after you
+  ok   the user is told their number and the aircraft either side
+  ok   LAIA's arrival planned behind the user leaves the generous gap (about 140 s, 5–6 nm)
+  on the ground: Traffic on 4.0 nm final for 27: DAL73 (A321) — don't line up or take off
+  ok   holding short with traffic on final: a notice, not an instruction to the AI
+== The user's runway: never changed below 10,000 ft, at most once; live-traffic flicker waits 10 minutes
+  Runways in use at TEST: landing 27, departing 27 (from live traffic, adsb.lol; wind 270 at 2 kt)
+  ACA1196 (you): new sequence — number 1 for 27, between nobody and nobody
+  ACA1196 (you): new sequence — number 1 for 27, between nobody and nobody
+  ACA1196 (you): new sequence — number 1 for 27, between nobody and nobody
+  ACA1196 (you): new sequence — number 1 for 27, between nobody and nobody
+  ACA1196 (you): new sequence — number 1 for 27, between nobody and nobody
+  ACA1196 (you): new sequence — number 1 for 27, between nobody and nobody
+  ACA1196 (you): new sequence — number 1 for 27, between nobody and nobody
+  ACA1196 (you): new sequence — number 1 for 27, between nobody and nobody
+  ACA1196 (you): new sequence — number 1 for 27, between nobody and nobody
+  ACA1196 (you): new sequence — number 1 for 27, between nobody and nobody
+  Runway change at TEST to landing 09 waits: you're landing 27 below 10,000 ft
+  ACA1196 (you): new sequence — number 1 for 27, between nobody and nobody
+  ACA1196 (you): new sequence — number 1 for 27, between nobody and nobody
+  ACA1196 (you): new sequence — number 1 for 27, between nobody and nobody
+  Runways in use at TEST: landing 09, departing 09 (from live traffic, adsb.lol; wind 270 at 2 kt)
+  ACA1196 (you): runway changed from 27 to 09 (the only change; none below 10,000 ft)
+  ACA1196 (you): new sequence — number 1 for 09, between nobody and nobody
+  ACA1196 (you): new sequence — number 1 for 09, between nobody and nobody
+  ACA1196 (you): new sequence — number 1 for 09, between nobody and nobody
+  ACA1196 (you): new sequence — number 1 for 09, between nobody and nobody
+  ACA1196 (you): new sequence — number 1 for 09, between nobody and nobody
+  ACA1196 (you): new sequence — number 1 for 09, between nobody and nobody
+  ACA1196 (you): new sequence — number 1 for 09, between nobody and nobody
+  ACA1196 (you): new sequence — number 1 for 09, between nobody and nobody
+  ACA1196 (you): new sequence — number 1 for 09, between nobody and nobody
+  ACA1196 (you): new sequence — number 1 for 09, between nobody and nobody
+  Runways in use at TEST: landing 27, departing 27 (from live traffic, adsb.lol; wind 270 at 2 kt)
+  ACA1196 (you): new sequence — number 1 for 09, between nobody and nobody
+  ACA1196 (you): new sequence — number 1 for 09, between nobody and nobody
+  ACA1196 (you): new sequence — number 1 for 09, between nobody and nobody
+  ACA1196 (you): new sequence — number 1 for 09, between nobody and nobody
+  user's runway: 27 → 09 → 09; airport while the user was low: 27; airport at the end: 27
+  ok   below 10,000 ft the user's landing runway isn't taken away (the change waits)
+  ok   above 10,000 ft the user's runway follows the airport's change, once
+  ok   no second change for the user: they keep their runway
+== Neighbouring fields: runway traffic only, on the main airport's clock; satellite STARs are a last resort
+  ok   a neighbour's departure appears lined up on the runway (no gate, no taxi)
+  ok   it takes off and climbs away into the whole sky
+  from the south-east: ARRVL1 → ILS 27  |  with ARRVL1 also published at a neighbour: OWNED2 → ILS 27 via MIDDL
+  ok   a STAR a neighbouring field also publishes is only used when nothing else fits
+== FAA preferred routes: the STAR and SID a flight would file, by airport pair and flow
+  ACY→MCO north flow SNFLD3 via LPERD; south flow GTOUT1; ATL→MCO GRNCH5 via ZJAYX; ATL departs SMLTZ3.WALET
+  from Seattle (not listed): GRNCH5 via ZJAYX
+  ok   an origin not in the database gets the STAR used by listed origins in the same direction
+  ok   the database tells an airport's own STARs (GRNCH → MCO) from a nearby airport's (JAFAR → ORL)
+  ok   a STAR only routed for turboprops is never given to a jet
+  ok   the right STAR for the flow (not the oceanic/weather ALYNA4 option), its entry fix, and the SID with its exit
+== Arrival manager: two arrivals bunched far out are spaced with speed, not a hold
+  landed 90 s apart; holds 0; go-arounds no
+  ok   both land, properly spaced, with no hold and no go-around
+== Arrival manager: too close for speed alone, 25 nm out — vectors (path stretch), not a hold
+  DAL44: vectors for spacing (1.2 nm behind DAL33, 77 s short at the runway): turn right heading 024, back on course in 17 nm (+92 s)
+  DAL44: landed runway 27, taxiing to Gate A1 (landing time as predicted 10 min out -11 s, 5 min out +3 s); restrictions 1 of 1 met; 98 s behind DAL33 (needed 93)
+  landed 98 s apart; landings +4 s on average beyond the gap needed (0 short); 1 speed reductions, 1 vectors, 0 360s, 0 holds, 0 break-offs
+  ok   it's vectored off the route and back, not held
+  ok   both land properly spaced, no go-around
+== Runway change: arrivals far out and departures not yet lined up get the new runways
+  Runway change at TEST: landing 09, departing 09 — 1 arrival and 0 departures given the new runways; arrivals within 25 nm finish on their runway; far one 27 → 09, near one 27
+  ok   the far arrival is given the new runway; the one 15 nm out finishes on the old one
+  ok   and lands on the new runway
+== Published altitude restrictions on the STAR are met at their fixes
+  at or above 6,000, max 230 kt at MIDDL: crossed at 6165 ft, 230 kt (ARRVL1 → ILS 27); checked: 1 of 1 met (100%)
+  ok   the arrival crosses MIDDL at or above 6,000
+  ok   and at or below its 230 kt speed limit
+  ok   the crossing is checked and counted as met
+  at or below 4,000, max 230 kt at MIDDL: crossed at 3928 ft, 230 kt (ARRVL1 → ILS 27); checked: 1 of 1 met (100%)
+  ok   the arrival crosses MIDDL at or below 4,000
+  ok   and at or below its 230 kt speed limit
+  ok   the crossing is checked and counted as met
+  at 6,000, max 230 kt at MIDDL: crossed at 5927 ft, 230 kt (ARRVL1 → ILS 27); checked: 1 of 1 met (100%)
+  ok   the arrival crosses MIDDL at 6,000
+  ok   and at or below its 230 kt speed limit
+  ok   the crossing is checked and counted as met
+== Taken over mid-descent just before a high restriction (MCO WHOVL: 9,000–14,000 ft, max 250 kt) — still met
+  limits: 12.0 nm: 9000-14000; 30.3 nm: 2000-2000; speed limits: 12.0 nm 250; route ARRVL1 → ILS 27
+    0.0 nm arriving: 11094 ft 250 kt vs -250
+    1.0 nm arriving: 10609 ft 250 kt vs -3000
+    2.0 nm arriving: 10200 ft 250 kt vs -1500
+    3.0 nm arriving: 9904 ft 250 kt vs -1373
+    4.0 nm arriving: 9660 ft 250 kt vs -1003
+    5.0 nm arriving: 9482 ft 250 kt vs -732
+    6.0 nm arriving: 9356 ft 250 kt vs -541
+    7.0 nm arriving: 9260 ft 250 kt vs -395
+    8.0 nm arriving: 9190 ft 250 kt vs -289
+    9.0 nm arriving: 9139 ft 250 kt vs -211
+    10.0 nm arriving: 9103 ft 250 kt vs -156
+    11.0 nm arriving: 9075 ft 250 kt vs -114
+    12.0 nm arriving: 9055 ft 250 kt vs -83
+  starts at 11096 ft (was 17,500); crosses MIDDL at 9055 ft, 250 kt
+  ok   it crosses between 9,000 and 14,000 ft
+  ok   at or below 250 kt
+== After a go-around, the aircraft comes back around and lands normally
+  go-around 37.7 nm 270 ft 141 kt | go-around 34.9 nm 2165 ft 185 kt | arriving 31.6 nm 3033 ft 200 kt | arriving 28.0 nm 3033 ft 200 kt | arriving 24.3 nm 3033 ft 200 kt | arriving 20.6 nm 3033 ft 200 kt | arriving 16.8 nm 3033 ft 200 kt | arriving 13.2 nm 2881 ft 200 kt | approach 9.9 nm 2629 ft 180 kt | approach 7.0 nm 2000 ft 180 kt | final 4.3 nm 1443 ft 149 kt | final 2.1 nm 736 ft 140 kt | flare -0.1 nm 49 ft 139 kt
+    01:32 SWA552: going around (test)
+    13:37 SWA552: landed runway 27, taxiing to Gate A1
+  ok   no second go-around (0)
+  ok   it lands after coming back around
+== Peak-hour test setting replays the busiest hours now
+  Peak test: replaying TEST's busiest 3 hours (Friday 15:00 UTC, 8 movements), not the real time; 4 departures in 40 min
+  ok   the peak test finds the busiest hours and says so
+  ok   the rush is replayed now, at night (4 departures in 40 min)
+== Taxi flow: the inner parallel for arrivals, the outer for departures, one-way stretches
+  landing 27, departing 27: 4 one-way stretches (B eastbound (departures, 3.0 km), J southbound (arrivals, 0.4 km), J northbound (departures, 0.2 km)); 4 stretches both ways; no real taxi tracks for these runways, so all from the layout; parallel taxiways: 10 inner (arrivals) and 10 outer (departures) segments; from 48 rehearsed taxi routes at 16 stands
+  ok   taxiway A is found as the inner parallel and B as the outer (10 / 10)
+  ok   one-way stretches found (4)
+  arrival taxi in: 600 m on A, 300 m on B; departure taxi out: 0 m on A, 900 m on B
+  ok   the arrival taxis in mostly on the inner taxiway A
+  ok   the departure taxis out mostly on the outer taxiway B
+== Taxi flow: real taxi tracks decide a stretch over the layout
+  3 one-way stretches (B westbound (departures, 3.0 km, real: 4 aircraft that way, 0 the other), J southbound (arrivals, 0.4 km)); 5 stretches both ways; 1 stretches decided by 4 real taxi tracks (test day), 2 one-way from the layout; parallel taxiways: 10 inner (arrivals) and 0 outer (departures) segments; from 32 rehearsed taxi routes at 16 stands
+  ok   real tracks decide some stretches (1)
+  ok   B flows west as the real aircraft did (eastbound is against the flow)
+== Traffic starts even when no installed model fits the small gates
+  ok   no crash
+  ok   aircraft were created (9)
+== The whole sky: scheduled flights fly logically between their airports
+  ok   flights between known airports are placed, the rest left out (4 of 5)
+  ok   callsign from operator and flight number (DAL123)
+  ok   great-circle midpoint is right
+  ok   not in the sky before departure or after arrival
+  ok   taxiing out first, not airborne at the gate time
+  ok   cruise levels on the right semicircle (westbound FL360, eastbound FL370)
+  ok   turboprop on a short hop cruises low (FL190)
+  ok   mid-flight: cruising at FL360, 356 kt
+  ok   no jumps along the route (largest 1.48 nm in 15 s)
+  ok   climbs and descends at airliner rates (steepest 3200 ft/min)
+  ok   takes off from JFK (10 ft) and lands at LAX (0.0 nm out at the end)
+  ok   a flight leaving late Sunday is still flying after the week rolls over
+  ok   reading the schedule file leaves the upload open (it's saved afterwards)
+  ok   the schedule file reads back the same (5 flights)
+TRAFFIC CHECKS PASSED

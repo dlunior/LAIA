@@ -1,0 +1,194 @@
+20:58:00 LAIA Server Setup 0.1.181 (install) args: /screenshots D:\a\LAIA\LAIA\out\screenshots
+20:58:02 Detected: Windows Server 2025 Datacenter 24H2; AMD EPYC 9V74 80-Core Processor; 16 GB RAM; GPU Microsoft Hyper-V Video 0 MB driver 10.0.26100.1150; free 27 GB; internet True; whisper base.en
+20:58:07 LAIA Sim Setup 0.1.181 (install) args: /screenshots D:\a\LAIA\LAIA\out\screenshots
+20:58:09 Sims: 
+20:58:09 AI Manager: False; AIG packages: 0; conflicts: 
+20:58:12 Servers: 
+20:58:18 LAIA Server Setup 0.1.181 (install) args: /silent
+20:58:18 Detected: Windows Server 2025 Datacenter 24H2; AMD EPYC 9V74 80-Core Processor; 16 GB RAM; GPU Microsoft Hyper-V Video 0 MB driver 10.0.26100.1150; free 27 GB; internet True; whisper base.en
+20:58:18 [1] Getting ready…
+20:58:18 == Getting ready
+20:58:18 > sc.exe query LAIA
+20:58:18   [SC] EnumQueryServicesStatus:OpenService FAILED 1060:
+20:58:18   The specified service does not exist as an installed service.
+20:58:18   exit 1060
+20:58:19 [1] Ok 
+20:58:19 [2] Copying LAIA files…
+20:58:19 == Copying LAIA files
+20:58:20    10% libopus-0-278e2dd25a2793d306204c9d966fe0de.dll
+20:58:25 [2] Ok 
+20:58:25 [3] Installing Microsoft runtime…
+20:58:25 == Installing Microsoft runtime
+20:58:25 [3] Ok Already installed (14.51.36247)
+20:58:25    23% 
+20:58:25 [4] Saving settings…
+20:58:25 == Saving settings
+20:58:25 [4] Ok Speech recognition: Whisper base.en on processor
+20:58:25 [5] Downloading the controller voice…
+20:58:25 == Downloading the controller voice
+20:58:25 Downloading https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin (attempt 1)
+20:58:26 Downloading https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx (attempt 1)
+20:58:26    31% 166 MB of about 337 MB
+20:58:27 [5] Ok Kokoro voice ready
+20:58:27 [6] Skipped Not needed on this PC
+20:58:27 [7] Downloading speech recognition…
+20:58:27 == Downloading speech recognition
+20:58:27    75% Whisper base.en (about 145 MB)
+20:58:27 > python.exe -u "C:\Program Files\LAIA Server\speech\worker.py" --config "C:\ProgramData\LAIA\config.json" --prefetch-whisper base.en
+20:58:31   20:58:31 downloading Whisper base.en to C:\ProgramData\LAIA\models\whisper
+20:58:32   Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+20:58:39   20:58:39 done: C:\ProgramData\LAIA\models\whisper\models--Systran--faster-whisper-base.en\snapshots\3d3d5dee26484f91867d81cb899cfcf72b96be6c
+20:58:39   exit 0
+20:58:39 [7] Ok Whisper base.en ready
+20:58:39    85% 
+20:58:39 [8] Configuring Windows…
+20:58:39 == Configuring Windows
+20:58:39 > sc.exe create LAIA binPath= "\"C:\Program Files\LAIA Server\app\Laia.Server.exe\"" start= delayed-auto DisplayName= "LAIA Server"
+20:58:39   [SC] CreateService SUCCESS
+20:58:39   exit 0
+20:58:39 > sc.exe description LAIA "LAIA - Local AI ATC: AI traffic and air traffic control for your flight simulator."
+20:58:39   [SC] ChangeServiceConfig2 SUCCESS
+20:58:39   exit 0
+20:58:39 > sc.exe failure LAIA reset= 86400 actions= restart/5000/restart/10000/restart/60000
+20:58:39   [SC] ChangeServiceConfig2 SUCCESS
+20:58:39   exit 0
+20:58:39 > netsh.exe advfirewall firewall delete rule name="LAIA Server"
+20:58:43   No rules match the specified criteria.
+20:58:43   exit 1
+20:58:43 > netsh.exe advfirewall firewall add rule name="LAIA Server" dir=in action=allow protocol=UDP localport=47800 remoteip=localsubnet profile=any
+20:58:43   Ok.
+20:58:43   exit 0
+20:58:43 > netsh.exe advfirewall firewall add rule name="LAIA Server" dir=in action=allow protocol=TCP localport=47801 remoteip=localsubnet profile=any
+20:58:44   Ok.
+20:58:44   exit 0
+20:58:44 > powercfg.exe /change standby-timeout-ac 0
+20:58:44   exit 0
+20:58:44 > powercfg.exe /change hibernate-timeout-ac 0
+20:58:44   exit 0
+20:58:44 [8] Ok 
+20:58:44 [9] Starting LAIA…
+20:58:44 == Starting LAIA
+20:58:44    94% Starting the LAIA service
+20:58:44 > sc.exe start LAIA
+20:58:44   SERVICE_NAME: LAIA 
+20:58:44           TYPE               : 10  WIN32_OWN_PROCESS  
+20:58:44           STATE              : 2  START_PENDING 
+20:58:44                                   (NOT_STOPPABLE, NOT_PAUSABLE, IGNORES_SHUTDOWN)
+20:58:44           WIN32_EXIT_CODE    : 0  (0x0)
+20:58:44           SERVICE_EXIT_CODE  : 0  (0x0)
+20:58:44           CHECKPOINT         : 0x0
+20:58:44           WAIT_HINT          : 0x7d0
+20:58:44           PID                : 2648
+20:58:44           FLAGS              : 
+20:58:44   exit 0
+20:58:51 [9] Ok Running and ready for your sim PC
+20:58:51    100% 
+20:58:51 SETUP OK
+21:00:28 LAIA Sim Setup 0.1.181 (install) args: /silent
+21:00:28 Sims: 
+21:00:28 AI Manager: False; AIG packages: 0; conflicts: 
+21:00:28 [1] Closing LAIA Sim if it's open…
+21:00:28 == Closing LAIA Sim if it's open
+21:00:29 [1] Ok 
+21:00:29 [2] Copying LAIA Sim…
+21:00:29 == Copying LAIA Sim
+21:00:29    45% LaiaSim.exe
+21:00:30    82% uninstall.exe
+21:00:30 [2] Ok 
+21:00:30 [3] Saving what we found on this PC…
+21:00:30 == Saving what we found on this PC
+21:00:30 [3] Ok 
+21:00:30 [4] Adding to Start menu and starting with Windows…
+21:00:30 == Adding to Start menu and starting with Windows
+21:00:30 [4] Ok 
+21:00:30    100% 
+21:00:30 SETUP OK
+21:00:30 LAIA Sim Setup 0.1.181 (uninstall) args: /silent
+21:00:30 [1] Closing LAIA Sim…
+21:00:30 == Closing LAIA Sim
+21:00:31 [1] Ok 
+21:00:31    20% 
+21:00:31 [2] Removing from Start menu and startup…
+21:00:31 == Removing from Start menu and startup
+21:00:31 [2] Ok 
+21:00:31    40% 
+21:00:31 [3] Deleting program files…
+21:00:31 == Deleting program files
+21:00:36 Could not fully remove C:\Users\runneradmin\AppData\Local\Programs\LAIA Sim
+21:00:36 [3] Ok 
+21:00:36    60% 
+21:00:36 [4] Skipped Not needed on this PC
+21:00:36 [5] Removing from Settings > Apps…
+21:00:36 == Removing from Settings > Apps
+21:00:36 [5] Ok 
+21:00:36    100% 
+21:00:36 SETUP OK
+21:00:39 LAIA Server Setup 0.1.181 (uninstall) args: /silent /purge
+21:00:39 [1] Stopping LAIA…
+21:00:39 == Stopping LAIA
+21:00:39 > sc.exe query LAIA
+21:00:39   SERVICE_NAME: LAIA 
+21:00:39           TYPE               : 10  WIN32_OWN_PROCESS  
+21:00:39           STATE              : 4  RUNNING 
+21:00:39                                   (STOPPABLE, NOT_PAUSABLE, ACCEPTS_SHUTDOWN)
+21:00:39           WIN32_EXIT_CODE    : 0  (0x0)
+21:00:39           SERVICE_EXIT_CODE  : 0  (0x0)
+21:00:39           CHECKPOINT         : 0x0
+21:00:39           WAIT_HINT          : 0x0
+21:00:39   exit 0
+21:00:39 > sc.exe stop LAIA
+21:00:39   SERVICE_NAME: LAIA 
+21:00:39           TYPE               : 10  WIN32_OWN_PROCESS  
+21:00:39           STATE              : 3  STOP_PENDING 
+21:00:39                                   (STOPPABLE, NOT_PAUSABLE, ACCEPTS_SHUTDOWN)
+21:00:39           WIN32_EXIT_CODE    : 0  (0x0)
+21:00:39           SERVICE_EXIT_CODE  : 0  (0x0)
+21:00:39           CHECKPOINT         : 0x0
+21:00:39           WAIT_HINT          : 0x0
+21:00:39   exit 0
+21:00:39 > sc.exe query LAIA
+21:00:39   SERVICE_NAME: LAIA 
+21:00:39           TYPE               : 10  WIN32_OWN_PROCESS  
+21:00:39           STATE              : 3  STOP_PENDING 
+21:00:39                                   (STOPPABLE, NOT_PAUSABLE, ACCEPTS_SHUTDOWN)
+21:00:39           WIN32_EXIT_CODE    : 0  (0x0)
+21:00:39           SERVICE_EXIT_CODE  : 0  (0x0)
+21:00:39           CHECKPOINT         : 0x0
+21:00:39           WAIT_HINT          : 0x0
+21:00:39   exit 0
+21:00:40 > sc.exe query LAIA
+21:00:40   SERVICE_NAME: LAIA 
+21:00:40           TYPE               : 10  WIN32_OWN_PROCESS  
+21:00:40           STATE              : 1  STOPPED 
+21:00:40           WIN32_EXIT_CODE    : 0  (0x0)
+21:00:40           SERVICE_EXIT_CODE  : 0  (0x0)
+21:00:40           CHECKPOINT         : 0x0
+21:00:40           WAIT_HINT          : 0x0
+21:00:40   exit 0
+21:00:41 [1] Ok 
+21:00:41    20% 
+21:00:41 [2] Removing the background service…
+21:00:41 == Removing the background service
+21:00:41 > sc.exe delete LAIA
+21:00:41   [SC] DeleteService SUCCESS
+21:00:41   exit 0
+21:00:41 > netsh.exe advfirewall firewall delete rule name="LAIA Server"
+21:00:41   Deleted 2 rule(s).
+21:00:41   Ok.
+21:00:41   exit 0
+21:00:41 [2] Ok 
+21:00:41    40% 
+21:00:41 [3] Deleting program files…
+21:00:41 == Deleting program files
+21:00:48 Could not fully remove C:\Program Files\LAIA Server
+21:00:48 [3] Ok 
+21:00:48    60% 
+21:00:48 [4] Deleting downloaded speech models and settings…
+21:00:48 == Deleting downloaded speech models and settings
+21:00:48 [4] Ok 
+21:00:48    80% 
+21:00:48 [5] Removing from Settings > Apps…
+21:00:48 == Removing from Settings > Apps
+21:00:48 [5] Ok 
+21:00:48    100% 
+21:00:48 SETUP OK
