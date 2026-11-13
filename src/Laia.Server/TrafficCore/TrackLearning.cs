@@ -23,9 +23,9 @@ public sealed class AirportProfile
     public List<SampleTrack> Samples { get; set; } = new();
     /// <summary>Real taxi tracks (ground positions off the runways), each with the runway it landed on or left from.</summary>
     public List<TaxiTrack> Taxi { get; set; } = new();
-    /// <summary>What the profile holds: 2 = with taxi tracks. Older ones are learned again.</summary>
+    /// <summary>What the profile holds: 2 = with taxi tracks; 3 = airline passenger jets only. Older ones are learned again.</summary>
     public int Version { get; set; }
-    public const int CurrentVersion = 2;
+    public const int CurrentVersion = 3;
 
     public sealed class TaxiTrack
     {
@@ -348,16 +348,57 @@ public static class TrackLearner
 /// <summary>adsb.lol / readsb trace files, and how profiles are saved.</summary>
 public static class AdsbTrace
 {
+    /// <summary>A jet airliner type code (A220–A380, 717–787, MD-80/90/11, the E-jets and CRJs).</summary>
+    public static bool IsAirlinerJet(string? type)
+    {
+        var t = (type ?? "").Trim().ToUpperInvariant();
+        if (t.Length < 3) return false;
+        return t.StartsWith("A3") || t.StartsWith("A2") || t.StartsWith("A19") || t.StartsWith("A20") || t.StartsWith("A21")
+            || t.StartsWith("B37") || t.StartsWith("B38") || t.StartsWith("B39") || t.StartsWith("B3X") || t.StartsWith("B73") || t.StartsWith("B71")
+            || t.StartsWith("B74") || t.StartsWith("B75") || t.StartsWith("B76") || t.StartsWith("B77") || t.StartsWith("B78")
+            || t.StartsWith("MD8") || t.StartsWith("MD9") || t == "MD11" || t.StartsWith("BCS") || t.StartsWith("CRJ")
+            || t.StartsWith("E17") || t.StartsWith("E19") || t.StartsWith("E29") || t.StartsWith("E75") || t is "E135" or "E145" or "E140" or "E35L";
+    }
+
+    /// <summary>An airline callsign: three letters, then a number (DAL1234, JBU22A), not a registration (N123AB).</summary>
+    public static bool IsAirlineCallsign(string cs) =>
+        cs.Length >= 4 && char.IsLetter(cs[0]) && char.IsLetter(cs[1]) && char.IsLetter(cs[2]) && char.IsDigit(cs[3]);
+
     public static readonly JsonSerializerOptions Json = new() { NumberHandling = JsonNumberHandling.AllowNamedFloatingPointLiterals };
 
     /// <summary>
     /// A readsb trace file: {"icao":…, "timestamp": t0, "trace": [[dt, lat, lon, alt|"ground", gs, track, flags, vrate, …], …]}.
     /// </summary>
-    public static List<TrackPoint>? Parse(byte[] json)
+    public static List<TrackPoint>? Parse(byte[] json) => Parse(json, passengerJetsOnly: false);
+
+    /// <summary>
+    /// As above; with passengerJetsOnly, only airline passenger jets are kept (user, 13 Nov: "only include air passenger
+    /// jets"): the trace's type code must be a jet airliner, and its callsign (when it has one) an airline's — three
+    /// letters and a number — that isn't a cargo airline. Light aircraft, business jets, turboprops, helicopters and
+    /// freighters are skipped before their points are read.
+    /// </summary>
+    public static List<TrackPoint>? Parse(byte[] json, bool passengerJetsOnly)
     {
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
+        if (passengerJetsOnly)
+        {
+            var type = root.TryGetProperty("t", out var tt) && tt.ValueKind == JsonValueKind.String ? tt.GetString() : null;
+            if (!IsAirlinerJet(type)) return null;
+        }
         if (!root.TryGetProperty("trace", out var trace) || trace.ValueKind != JsonValueKind.Array) return null;
+        if (passengerJetsOnly)
+        {
+            foreach (var p in trace.EnumerateArray())
+            {
+                if (p.ValueKind != JsonValueKind.Array || p.GetArrayLength() < 9 || p[8].ValueKind != JsonValueKind.Object) continue;
+                if (!p[8].TryGetProperty("flight", out var fl) || fl.ValueKind != JsonValueKind.String) continue;
+                var cs = (fl.GetString() ?? "").Trim().ToUpperInvariant();
+                if (cs.Length == 0) continue;
+                if (!IsAirlineCallsign(cs) || TrafficWorld.IsCargo(cs[..3])) return null;
+                break;
+            }
+        }
         var t0 = root.TryGetProperty("timestamp", out var ts) && ts.ValueKind == JsonValueKind.Number ? ts.GetDouble() : 0;
         var res = new List<TrackPoint>(trace.GetArrayLength());
         double lastTrack = 0;

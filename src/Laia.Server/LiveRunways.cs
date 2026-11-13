@@ -16,6 +16,10 @@ public sealed class LiveRunways(ILogger<LiveRunways> log)
     private readonly Dictionary<string, DateTime> _asked = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _busy = new(StringComparer.OrdinalIgnoreCase);
     public int Calls { get; private set; }
+    private readonly Dictionary<string, int> _polls = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>How many looks at this airport's live traffic have come back (answered or failed).</summary>
+    public int Polls(string icao) { lock (_seen) return _polls.GetValueOrDefault(icao); }
 
     private static HttpClient MakeClient()
     {
@@ -90,6 +94,6 @@ public sealed class LiveRunways(ILogger<LiveRunways> log)
             }
         }
         catch (Exception ex) { log.LogInformation("{icao} live traffic (adsb.lol) not available: {msg}", apt.Icao, ex.Message); }
-        finally { lock (_seen) _busy.Remove(apt.Icao); }
+        finally { lock (_seen) { _busy.Remove(apt.Icao); _polls[apt.Icao] = _polls.GetValueOrDefault(apt.Icao) + 1; } }
     }
 }

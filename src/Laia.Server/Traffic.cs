@@ -71,12 +71,18 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         public readonly string Icao = icao;
         public readonly DateTime Started = DateTime.UtcNow;
         public Task? Survey;
-        public bool Ready, Forced, RunwaysSettled;
+        public Task<(string summary, List<string> lines)>? RouteCheck;
+        public bool Ready, Forced, RunwaysSettled, RouteLogged;
         public DateTime? SettledAt;
         public readonly List<(string item, bool done, string note)> Items = new();
         public double Secs => (DateTime.UtcNow - Started).TotalSeconds;
     }
     private Prep? _prep;
+
+    /// <summary>Whether a field has airline passenger service: 14 or more passenger airline flights a week in its real
+    /// schedule (not cargo); null until its schedule is known.</summary>
+    private bool? PassengerService(string icao) =>
+        schedules.Get(icao) is { } sd ? sd.Legs.Count(l => !TrafficWorld.IsCargo(l.Airline)) >= 14 : null;
 
     /// <summary>Skip the rest of the preparation and start the traffic now.</summary>
     public void StartNow() { lock (_gate) if (_prep is { Ready: false } p) p.Forced = true; }
@@ -100,16 +106,46 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         Item("FAA runway rules (AAUP)", aaupDone, !us ? "none (not a US airport)" : w.Rules is { Charts.Length: > 0 } ru ? ru.Describe() : aaupDone ? "none published" : "downloading the charts…");
         var topsDone = !us || w.SidTops is not null || t > 180;
         Item("SID top altitudes (charts)", topsDone, !us ? "from the STARs (not a US airport)" : w.SidTops is { Count: > 0 } st ? $"{st.Count} SIDs" : topsDone ? "none on the charts, from the STARs" : "reading the departure charts…");
-        var learnDone = history.Current(icao) || history.Gave(icao) || t > 900 || (!history.Learning(icao) && t > 60 && history.Profile(icao) is null && !history.Status.StartsWith("learning"));
-        Item("Real traffic (adsb.lol)", learnDone, history.Current(icao) ? $"learned from {history.Profile(icao)!.Day}" : learnDone ? "not available" : history.Learning(icao) ? history.Status : "starting…");
+        var pax = PassengerService(icao);
+        var learnDone = pax == false || (pax is null && t > 90) || history.Current(icao) || history.Gave(icao) || t > 900
+                        || (!history.Learning(icao) && t > 60 && history.Profile(icao) is null && !history.Status.StartsWith("learning"));
+        Item("Real traffic (adsb.lol, passenger jets)", learnDone, pax == false ? "no airline passenger service, not needed" : history.Current(icao) ? $"learned from {history.Profile(icao)!.Day}"
+            : learnDone ? "not available" : history.Learning(icao) ? history.Status : "starting…");
+        // The neighbouring fields' runway use, learned in the same download.
+        var nbs = _neighbours.Select(n => n.Apt.Icao).ToList();
+        var nbDone = nbs.All(n => history.Current(n) || history.Gave(n)) || t > 900;
+        Item("Neighbouring fields (adsb.lol)", nbDone, nbs.Count == 0 ? "none with airline service" : string.Join(", ", nbs.Select(n => n + (history.Current(n) ? " ✓" : history.Gave(n) ? " (not available)" : " …"))));
         // The runways: once everything they're decided from is in, settled once.
-        var inputs = atisDone && metarDone && aaupDone && learnDone;
+        // No ATIS here: the runways real traffic is using right now (adsb.lol live positions) rank above the wind — wait
+        // for them too (until some are seen, or two looks have come back).
+        var noAtis = atisDone && w.AtisLanding.Count == 0;
+        var lr = noAtis ? liveRunways.Get(w.Apt) : (new List<string>(), new List<string>());
+        var liveDone = !noAtis || lr.Item1.Count > 0 || liveRunways.Polls(icao) >= 2 || t > 300;
+        Item("Live runway use (adsb.lol)", liveDone, !noAtis ? "not needed (the ATIS says)" : lr.Item1.Count > 0 ? $"landing {string.Join("/", lr.Item1)}{(lr.Item2.Count > 0 ? $", departing {string.Join("/", lr.Item2)}" : "")}"
+            : liveDone ? "none seen, from the wind and what was learned" : $"watching live traffic ({liveRunways.Polls(icao)} looks)…");
+        if (noAtis) { w.LiveLanding = lr.Item1; w.LiveDeparting = lr.Item2; }
+        var inputs = atisDone && metarDone && aaupDone && learnDone && liveDone;
         if (inputs && !p.RunwaysSettled) { w.HoldRunways = false; w.SelectRunways(true); p.RunwaysSettled = true; p.SettledAt = DateTime.UtcNow; }
         Item("Runways in use", p.RunwaysSettled, p.RunwaysSettled ? $"landing {string.Join("/", w.ArrRwys.Select(e => e.Ident))}, departing {string.Join("/", w.DepRwys.Select(e => e.Ident))}" : "waiting for the ATIS, wind and rules…");
         var flowDone = p.RunwaysSettled && (w.FlowReady || (DateTime.UtcNow - p.SettledAt!.Value).TotalSeconds > 60);
         Item("Taxi flow", flowDone, w.Flow is { Full: true } fl ? $"{fl.OneWay} one-way stretches{(fl.RealStretches > 0 ? $", {fl.RealStretches} from real taxi tracks" : "")}" : flowDone ? "not worked out" : p.RunwaysSettled ? "rehearsing the taxi routes…" : "after the runways");
         var pushDone = p.Survey is null || p.Survey.IsCompleted || t > 120;
         Item("Pushback plans", pushDone, pushDone ? "planned" : "planning every stand…");
+        // Every SID and STAR as LAIA will fly it, compared with the real tracks (the check that found the FATHE4 35L
+        // intercept 0.9 nm off), once the runways are settled and the real tracks are in.
+        if (p.RunwaysSettled && learnDone && p.RouteCheck is null)
+        {
+            // Once, here on the traffic thread (it reads the runways in use; well under a second).
+            try { p.RouteCheck = Task.FromResult(w.RouteCheck()); }
+            catch (Exception ex) { p.RouteCheck = Task.FromResult(("couldn't compare: " + ex.Message, new List<string>())); }
+        }
+        var rcDone = p.RouteCheck is { IsCompleted: true } || (p.RouteCheck is not null && (DateTime.UtcNow - p.SettledAt!.Value).TotalSeconds > 60) || (learnDone && w.Learned is null && p.RunwaysSettled);
+        if (p.RouteCheck is { IsCompletedSuccessfully: true } rc && !p.RouteLogged)
+        {
+            p.RouteLogged = true;
+            foreach (var line in rc.Result.lines) log.LogInformation("{icao} route check: {line}", icao, line);
+        }
+        Item("Routes vs real tracks", rcDone, p.RouteCheck is { IsCompletedSuccessfully: true } rc2 ? rc2.Result.summary : rcDone ? "no real tracks to compare" : p.RunwaysSettled ? "comparing…" : "after the runways");
         if (p.Items.All(i => i.done) || p.Forced)
         {
             if (!p.RunwaysSettled) { w.HoldRunways = false; w.SelectRunways(true); }
@@ -534,9 +570,11 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 .Where(i => !i.Equals(main.Apt.Icao, StringComparison.OrdinalIgnoreCase)).Take(6).ToList();
             _neighbourHow = family.Count > 0 ? $"{nasrDb.ApproachFacility(main.Apt.Icao)} approach control" : "within 40 nm";
             // Learn the airport and its neighbours from real tracks (M6), once, in the background.
-            var learn = new List<AirportModel> { main.Apt };
+            // Only fields with airline passenger service (user, 13 Nov); the neighbours are chosen that way already.
+            var learn = new List<AirportModel>();
+            if (PassengerService(main.Apt.Icao) == true) learn.Add(main.Apt);
             foreach (var icao in _neighbourWant) if (airports.Model(icao) is { } m) learn.Add(m);
-            history.Want(learn);
+            if (learn.Count > 0) history.Want(learn);
         }
         foreach (var n in _neighbours.Where(n => !_neighbourWant.Contains(n.Apt.Icao) || n.ClockOwner != main).ToList())
         {

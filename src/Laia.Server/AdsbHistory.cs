@@ -11,6 +11,7 @@ namespace Laia.Server;
 /// globe_history_YYYY, a daily release of every aircraft's trace, ODbL), streamed — never stored whole — and every
 /// track passing within 45 nm of the airports wanted, low enough to be arriving or departing, kept and learned from
 /// (<see cref="TrackLearner"/>). Each airport is learned once, then refreshed after 60 days; saved in data/learned.
+/// Only airline passenger jets are kept (user, 13 Nov), and only airports with airline passenger service are learned.
 /// </summary>
 public sealed class AdsbHistory(ILogger<AdsbHistory> log)
 {
@@ -113,7 +114,7 @@ public sealed class AdsbHistory(ILogger<AdsbHistory> log)
                     bytes = raw.ToArray();
                 }
                 List<TrackPoint>? pts;
-                try { pts = AdsbTrace.Parse(bytes); } catch { continue; }
+                try { pts = AdsbTrace.Parse(bytes, passengerJetsOnly: true); } catch { continue; }
                 if (pts is null || pts.Count < 5) continue;
                 foreach (var t in targets)
                 {

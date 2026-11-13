@@ -2847,6 +2847,123 @@ public sealed partial class TrafficWorld
         while (pts.Count > 0 && rwy.Along(pts[^1].P) > -200) pts.RemoveAt(pts.Count - 1);
     }
 
+    /// <summary>
+    /// Each SID and STAR for the runways in use, as LAIA will fly it, against the real tracks learned for the airport
+    /// (airline passenger jets only). Departures: every real take-off from the runway is matched to the SID whose path it
+    /// stays closest to (on average within 2 nm, over its first 25 nm); then, every half mile along LAIA's path, the
+    /// median distance to those real tracks — the largest is how far LAIA's version is from what's really flown
+    /// (flagged over 0.5 nm: MCO's FATHE4 off 35L was 0.9 nm west of the real tracks 3–4 nm out, a "heading to intercept"
+    /// leg flown as 3 nm straight ahead). Arrivals: for each STAR fix, the median distance real arrivals to that runway
+    /// pass from it (more than 2 nm: real traffic is usually vectored off by there). A report, nothing is changed.
+    /// </summary>
+    public (string summary, List<string> lines) RouteCheck()
+    {
+        var lines = new List<string>();
+        var prof = Learned;
+        if (prof is null || prof.Samples.Count == 0) return ("no real tracks to compare", lines);
+        var nm = Geo2.MPerNm;
+        int checkedN = 0, differ = 0;
+        var worst = "";
+        double worstNm = 0;
+        List<V2> Track(AirportProfile.SampleTrack x) => x.Points.Where(q => q.Length >= 2).Select(q => Apt.Map.ToXY(q[0], q[1])).ToList();
+        static double ToLine(V2 p, List<V2> line)
+        {
+            var d = double.MaxValue;
+            for (var i = 0; i + 1 < line.Count; i++) d = Math.Min(d, DistToSegment(p, line[i], line[i + 1]));
+            return line.Count == 1 ? (p - line[0]).Length : d;
+        }
+        static List<V2> Dense(List<V2> pts, double step, double maxFromOrigin)
+        {
+            var res = new List<V2>();
+            for (var i = 0; i + 1 < pts.Count; i++)
+            {
+                var a = pts[i]; var b = pts[i + 1]; var len = (b - a).Length;
+                for (double s = 0; s < len; s += step)
+                {
+                    var q = a + (b - a) * (s / len);
+                    if (q.Length > maxFromOrigin) return res;
+                    res.Add(q);
+                }
+            }
+            return res;
+        }
+        static double Median(List<double> v) { v.Sort(); return v.Count == 0 ? double.NaN : v[v.Count / 2]; }
+
+        // ---- departures
+        foreach (var rwy in DepRwys.DistinctBy(r => r.Ident))
+        {
+            var real = prof.Samples.Where(x => x.Kind == "departure" && x.Runway == rwy.Ident).Select(Track).Where(l => l.Count >= 4).ToList();
+            if (real.Count < 3) continue;
+            var paths = new List<(string name, List<V2> pts)>();
+            foreach (var sid in Apt.Data.Departures)
+            {
+                var rt = sid.RunwayTransitions.FirstOrDefault(t => t.Name == rwy.Ident);
+                if (rt is null && sid.RunwayTransitions.Count > 0) continue;
+                var legs = new List<ProcedureLeg>();
+                if (rt is not null) legs.AddRange(rt.Legs);
+                legs.AddRange(sid.Legs);
+                var sp = Apt.LegsToPoints(legs, rwy.FarEnd, rwy.ElevationFt + 400, out _, hybrid: true).Select(q => q.P).ToList();
+                sp.RemoveAll(q => rwy.Along(q) < rwy.LengthM - 50 && Math.Abs(rwy.Offset(q)) < 200);   // points behind the runway end
+                sp.Insert(0, rwy.FarEnd);
+                var dense = Dense(sp, 0.5 * nm, 25 * nm);
+                if (dense.Count >= 4) paths.Add((sid.Name, dense));
+            }
+            if (paths.Count == 0) continue;
+            var mine = paths.ToDictionary(x => x.name, _ => new List<List<V2>>());
+            foreach (var tr in real)
+            {
+                var near = tr.Where(q => q.Length < 25 * nm).ToList();
+                if (near.Count < 3) continue;
+                var best = paths.Select(x => (x.name, avg: near.Average(q => ToLine(q, x.pts)))).OrderBy(x => x.avg).First();
+                if (best.avg < 2 * nm) mine[best.name].Add(near);
+            }
+            foreach (var (name, pts) in paths)
+            {
+                var trs = mine[name];
+                if (trs.Count < 3) continue;
+                checkedN++;
+                double maxDev = 0, at = 0, along = 0;
+                for (var i = 0; i < pts.Count; i++)
+                {
+                    if (i > 0) along += (pts[i] - pts[i - 1]).Length;
+                    var dev = Median(trs.Select(t => ToLine(pts[i], t)).ToList());
+                    if (dev > maxDev) { maxDev = dev; at = along; }
+                }
+                var ok = maxDev <= 0.5 * nm;
+                if (!ok) differ++;
+                if (!ok && maxDev > worstNm) { worstNm = maxDev; worst = $"{name} {rwy.Ident} up to {maxDev / nm:0.0} nm off {at / nm:0.0} nm after the runway"; }
+                lines.Add($"{name} off {rwy.Ident}: {(ok ? "matches" : "DIFFERS from")} {trs.Count} real departures — LAIA's path is at most {maxDev / nm:0.0} nm from them ({at / nm:0.0} nm after the runway)");
+            }
+        }
+
+        // ---- arrivals: where real traffic leaves each STAR
+        foreach (var rwy in ArrRwys.DistinctBy(r => r.Ident))
+        {
+            var real = prof.Samples.Where(x => x.Kind == "arrival" && x.Runway == rwy.Ident).Select(Track).Where(l => l.Count >= 4).ToList();
+            if (real.Count < 3) continue;
+            foreach (var star in Apt.Data.Arrivals)
+            {
+                var rt = star.RunwayTransitions.FirstOrDefault(t => t.Name == rwy.Ident);
+                if (rt is null && star.RunwayTransitions.Count > 0) continue;
+                var fixes = star.Legs.Concat(rt?.Legs ?? new List<ProcedureLeg>())
+                    .Where(l => l.Fix.Length > 0 && (Math.Abs(l.Lat) > 0.0001 || Math.Abs(l.Lon) > 0.0001))
+                    .Select(l => (l.Fix, p: Apt.Map.ToXY(l.Lat, l.Lon))).Where(x => x.p.Length < 60 * nm).DistinctBy(x => x.Fix).ToList();
+                if (fixes.Count < 2) continue;
+                // Real arrivals that came this way: within 2 nm of at least two of its fixes.
+                var trs = real.Where(t => fixes.Count(f => ToLine(f.p, t) < 2 * nm) >= 2).ToList();
+                if (trs.Count < 3) continue;
+                checkedN++;
+                var devs = fixes.Select(f => (f.Fix, d: Median(trs.Select(t => ToLine(f.p, t)).ToList()))).ToList();
+                var off = devs.FirstOrDefault(x => x.d > 2 * nm);
+                lines.Add($"{star.Name} to {rwy.Ident}: {trs.Count} real arrivals — " + string.Join(", ", devs.Select(x => $"{x.Fix} {x.d / nm:0.0}")) + " nm"
+                    + (off.Fix is { } of ? $"; real traffic is vectored off before {of}" : "; flown as published"));
+            }
+        }
+        var summary = checkedN == 0 ? "not enough real tracks for the runways in use"
+            : $"{checkedN} SIDs/STARs checked; {differ} SID{(differ == 1 ? "" : "s")} more than 0.5 nm from the real tracks" + (worst.Length > 0 ? $" (worst: {worst})" : "");
+        return (summary, lines);
+    }
+
     private static double DistToSegment(V2 p, V2 a, V2 b)
     {
         var ab = b - a;
