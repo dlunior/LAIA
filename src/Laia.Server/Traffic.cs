@@ -234,6 +234,34 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     private double _drawBudget = 1;
     private DateTime _drawBudgetAt = DateTime.UtcNow;
 
+    private double _othersAt = -99;
+
+    /// <summary>
+    /// Each airport's airborne traffic shown to the others (in their own frame), so they keep clear of each other:
+    /// MCO's departures level under MLB's arrivals, MLB's arrivals stay above MCO's traffic, and losses between
+    /// airports are logged (user, 13 Nov).
+    /// </summary>
+    private void ShareTraffic()
+    {
+        var worlds = Worlds().ToList();
+        foreach (var w in worlds)
+        {
+            var list = new List<TrafficWorld.Foreign>();
+            foreach (var o in worlds)
+            {
+                if (o == w) continue;
+                foreach (var f in o.Flights)
+                {
+                    if (f.Done || f.OnGround) continue;
+                    var (la, lo) = o.Apt.Map.ToLatLon(f.Pos);
+                    if (Geo2.DistanceNm(la, lo, w.Apt.Data.Lat, w.Apt.Data.Lon) > 80) continue;
+                    list.Add(new TrafficWorld.Foreign(f.Callsign, o.Apt.Icao, f.Kind, w.Apt.Map.ToXY(la, lo), f.AltFt, f.Vs, f.Gs, f.Heading, f.Phase, o == _world));
+                }
+            }
+            w.Others = list;
+        }
+    }
+
     private IEnumerable<TrafficWorld> Worlds()
     {
         if (_world is not null) yield return _world;
@@ -694,6 +722,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 lock (_gate)
                 {
                     if (live && now - lastWorldCheck > 5) { UpdateWorld(sim!); lastWorldCheck = now; }
+                    if (now - _othersAt > 1) { _othersAt = now; ShareTraffic(); }
                     foreach (var w in Worlds().ToList())
                     {
                         if (live)

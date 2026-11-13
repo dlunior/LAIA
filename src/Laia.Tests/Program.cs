@@ -1038,6 +1038,29 @@ Console.WriteLine("== SID top altitude: departures level under the arrivals, the
     Check(los.Count == 0, "no departure comes within 3 nm and 1,000 ft of other traffic");
 }
 
+Console.WriteLine("== Between airports: departures level under another airport's traffic in their way");
+{
+    var nm = Geo2.MPerNm;
+    var apt = new AirportModel(TestAirport.Build(false));
+    var world = new TrafficWorld(apt, new TestSource(), seed: 31) { Automatic = true, Level = TrafficLevel.Busy, Wind = new Wind(270, 10) };
+    var log = new List<string>(); world.Log = s2 => log.Add(s2);
+    world.SelectRunways(true);
+    // A neighbour's arrival holding still 6 nm west at 4,000 ft, right over the departures off 27.
+    var obstacle = new V2(-6 * nm, 0);
+    var bad = 0;
+    for (var t = 0.0; t < 3600; t += 0.5)
+    {
+        world.Others = new() { new TrafficWorld.Foreign("NBR1", "KNBR", "arrival", obstacle, 4000, 0, 0, 90, "arriving", false) };
+        world.Step(0.5);
+        bad += world.Flights.Count(f => f.Kind == "departure" && !f.OnGround && !f.Done && (f.Pos - obstacle).Length < 3 * nm && Math.Abs(f.AltFt - 4000) < 900);
+    }
+    var stops = log.Where(x => x.Contains("NBR1 (KNBR)")).ToList();
+    Console.WriteLine($"  {stops.Count} climb stops for the other airport's aircraft; {world.SeparationSummary}");
+    foreach (var x in stops.Take(2)) Console.WriteLine("  " + x);
+    Check(stops.Count > 0, "departures are stopped below the other airport's aircraft");
+    Check(bad == 0, $"none comes within 3 nm and 900 ft of it ({bad} samples)");
+}
+
 Console.WriteLine("== M6: learning an airport from real tracks (synthetic adsb.lol-style traces), and flying what was learned");
 {
     var nm = Geo2.MPerNm;

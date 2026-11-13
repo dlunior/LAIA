@@ -100,6 +100,10 @@ public sealed class Flight
     public string? StoppedFor;
     /// <summary>The SID's top altitude (the chart's "maintain 7,000", NaN: none) and whether the climb above it was given.</summary>
     public double TopAltFt = double.NaN, ReleaseAt = -99, TopReachedAt = double.NaN;
+    /// <summary>A departure closing in behind another: no faster than it (NaN: free). An arrival kept above another
+    /// airport's traffic: not below this (NaN: free), and when it was last checked.</summary>
+    public double DepSpeedCap = double.NaN, DescentFloor = double.NaN, DescentProbeAt = -99;
+    public string? FloorFor;
     public bool ClimbReleased;
     public string TopSource = "";
     public double TakeoffAt = double.NaN, TakeoffPred10 = double.NaN, TakeoffPred5 = double.NaN, ReadyAt = double.NaN;
@@ -599,10 +603,13 @@ public sealed partial class TrafficWorld
             if (LocalMinuteOverride is { } o) return o;
             var lon = Apt.Data.Lon;
             var id = lon > -87.6 ? "America/New_York" : lon > -101 ? "America/Chicago" : lon > -114.5 ? "America/Denver" : lon > -130 ? "America/Los_Angeles" : lon > -150 ? "America/Anchorage" : "Pacific/Honolulu";
-            DateTime local;
-            try { local = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, TimeZoneInfo.FindSystemTimeZoneById(id)); }
-            catch { local = DateTime.UtcNow.AddHours(Math.Round(lon / 15)); }
-            return local.Hour * 60 + local.Minute;
+            double offMin;
+            try { offMin = TimeZoneInfo.FindSystemTimeZoneById(id).GetUtcOffset(DateTime.UtcNow).TotalMinutes; }
+            catch { offMin = Math.Round(lon / 15) * 60; }
+            // Peak replays the busiest hours now: the airport's rules for those hours apply, not the real clock's
+            // (user, MCO: the 17:00 rush replayed after 23:00 local got the night rules — FATHE off 36R/36L).
+            var utcMin = Level == TrafficLevel.Peak && (_peakSet || ClockFrom is not null) ? ((SchedNow % 1440) + 1440) % 1440 : DateTime.UtcNow.Hour * 60 + DateTime.UtcNow.Minute;
+            return (int)(((utcMin + offMin) % 1440 + 1440) % 1440);
         }
     }
 
@@ -3910,6 +3917,44 @@ public sealed partial class TrafficWorld
 
     private static bool tooCloseNow(double gapNm, double needNm) => gapNm < needNm - 0.5;
 
+    /// <summary>
+    /// A neighbouring field's arrival over the main airport's traffic (user, 13 Nov: MLB's arrivals on BITHO7 cross
+    /// MCO's east side): the satellite's traffic is kept clear of the primary's, as an approach control would — where,
+    /// in the next 2 minutes, descending would bring it within 3.5 nm and 1,000 ft of the main airport's traffic below,
+    /// it stops 1,000 ft above the highest that traffic gets while near (in whole thousands). NaN when nothing's there.
+    /// </summary>
+    private double ProbeDescent(Flight f)
+    {
+        if (f.Path is null || f.Phase is "final" or "flare" or "landing roll" or "go-around" || (f.ThrS - f.S) / Geo2.MPerNm < 8) return double.NaN;
+        double floor = double.NaN; string? who = null;
+        foreach (var o in Others)
+        {
+            if (!o.Main || o.AltFt > f.AltFt + 500 || (o.Pos - f.Pos).Length > 20 * Geo2.MPerNm) continue;
+            double highest = double.MinValue; var conflict = false;
+            for (var t = 0.0; t <= 120; t += 10)
+            {
+                var fp = f.Path.At(Math.Min(f.Path.Length, f.S + f.Gs * 0.5144 * t)).p;
+                var op = Ahead(o, t);
+                var oAlt = o.AltFt + (o.Kind == "departure" ? Math.Max(0, o.Vs) : Math.Min(0, o.Vs)) * t / 60;
+                var fAlt = f.AltFt + Math.Min(0, f.Vs) * t / 60;
+                var lat = (fp - op).Length;
+                if (lat < 5 * Geo2.MPerNm) highest = Math.Max(highest, Math.Max(o.AltFt, oAlt));
+                if (lat < 3.5 * Geo2.MPerNm && Math.Abs(fAlt - oAlt) < 1000) conflict = true;
+            }
+            if (!conflict || highest == double.MinValue) continue;
+            var level = Math.Ceiling((highest + 1000) / 1000) * 1000;
+            if (level > f.AltFt + 200) continue;   // it's below already: the other side's rules keep them apart
+            if (double.IsNaN(floor) || level > floor) { floor = level; who = $"{o.Callsign} ({o.Airport})"; }
+        }
+        if (who is not null && f.FloorFor != who)
+        {
+            f.FloorFor = who; _descentStops++;
+            Log($"{f.Callsign}: descent stopped at {floor:N0} ft for {who} below");
+        }
+        if (who is null) f.FloorFor = null;
+        return floor;
+    }
+
     /// <summary>The ring of ground aircraft each waiting for the next, back to this one (null if there's no ring).</summary>
     private static List<Flight>? Ring(Flight f)
     {
@@ -3955,6 +4000,7 @@ public sealed partial class TrafficWorld
         f.Lights = Nav | Beacon | Logo | Strobes | (f.AltFt < 10000 ? Landing : 0);
         if (agl > 100 && Time - f.LiftoffTime > 3) f.Gear = false;
         double targetIas = agl < 1500 ? f.P.V2 + 15 : f.AltFt < 10000 ? 250 : 290;
+        if (!double.IsNaN(f.DepSpeedCap) && agl > 1500) targetIas = Math.Min(targetIas, Math.Max(f.P.V2 + 20, f.DepSpeedCap));
         // 91.117(b): 200 knots at or below 2,500 ft within 4 nm of a Class C or D airport.
         if (agl <= 2500 && f.Pos.Length < 4 * Geo2.MPerNm && Airspace.Has200KnotArea(Apt.Icao)) targetIas = Math.Min(targetIas, 200);
         // The SID's published speed limits.
@@ -4010,7 +4056,12 @@ public sealed partial class TrafficWorld
     private double ProbeArrivals(Flight d, double climbFpm)
     {
         if (d.Path is null) return double.NaN;
-        double stop = double.NaN; Flight? who = null;
+        double stop = double.NaN; string? who = null; double whoAlt = 0, whoNm = 0;
+        void Stop(double level, string name, double alt, V2 pos)
+        {
+            if (level < Apt.ElevationFt + 2000) return;
+            if (double.IsNaN(stop) || level < stop) { stop = level; who = name; whoAlt = alt; whoNm = (pos - d.Pos).Length / Geo2.MPerNm; }
+        }
         foreach (var a in Flights)
         {
             // Arrivals on the approach or final are the runway's business (landing behind a departure is normal),
@@ -4041,23 +4092,69 @@ public sealed partial class TrafficWorld
                     if (d.StoppedFor == a.Callsign && !double.IsNaN(d.ClimbStop)) level = Math.Min(level, d.ClimbStop);
                     // Never stopped below 2,000 ft above the field (departure control's lowest level-off); below that
                     // it's the arrival that must be kept clear.
-                    if (level < Apt.ElevationFt + 2000) break;
-                    if (double.IsNaN(stop) || level < stop) { stop = level; who = a; }
+                    Stop(level, a.Callsign, a.AltFt, a.Pos);
                     break;
                 }
             }
         }
-        if (who is not null && d.StoppedFor != who.Callsign)
+        // The departure ahead (same airport, earlier take-off), along both routes: a follower climbing faster or
+        // flying faster stays 1,000 ft below it, and no faster than it while closing in behind (FATHE4 from 36L and
+        // 36R, 25 s apart, came within 1.7 nm and 900 ft).
+        d.DepSpeedCap = double.NaN;
+        foreach (var o in Flights)
         {
-            d.StoppedFor = who.Callsign;
+            if (o == d || o.Kind != "departure" || o.OnGround || o.Done || o.Path is null || o.LiftoffTime < 0 || o.LiftoffTime > d.LiftoffTime) continue;
+            if ((o.Pos - d.Pos).Length > 15 * Geo2.MPerNm || d.AltFt > o.AltFt + 500) continue;
+            var oClimb = Math.Max(0, o.Vs);
+            double lowest = double.MaxValue; var conflict = false; double minLat = double.MaxValue;
+            for (var t = 0.0; t <= 120; t += 10)
+            {
+                var dp = d.Path.At(Math.Min(d.Path.Length, d.S + d.Gs * 0.5144 * t)).p;
+                var op = o.Path.At(Math.Min(o.Path.Length, o.S + o.Gs * 0.5144 * t)).p;
+                var lat = (dp - op).Length;
+                minLat = Math.Min(minLat, lat);
+                var oAlt = Math.Min(o.CruiseFt > 0 ? o.CruiseFt : 40000, o.AltFt + oClimb * t / 60);
+                if (lat < 5 * Geo2.MPerNm) lowest = Math.Min(lowest, Math.Min(o.AltFt, oAlt));
+                if (lat < 3.5 * Geo2.MPerNm && Math.Abs(d.AltFt + climbFpm * t / 60 - oAlt) < 1000) conflict = true;
+            }
+            if (conflict && lowest < double.MaxValue) Stop(Math.Floor((lowest - 1000) / 1000) * 1000, o.Callsign, o.AltFt, o.Pos);
+            // Closing in behind on the same way out: no faster than the one ahead.
+            if (minLat < 5 * Geo2.MPerNm && Math.Abs(Geo2.Diff(o.Heading, d.Heading)) < 60 && (o.Pos - d.Pos).Length < 6 * Geo2.MPerNm)
+                d.DepSpeedCap = double.IsNaN(d.DepSpeedCap) ? o.Ias : Math.Min(d.DepSpeedCap, o.Ias);
+        }
+        // Another airport's traffic (MCO's arrivals for an MLB departure, MLB's for MCO's): projected straight ahead.
+        foreach (var o in Others)
+        {
+            if (o.AltFt < d.AltFt - 1500 || (o.Pos - d.Pos).Length > 20 * Geo2.MPerNm || o.Phase is "flare" or "landing roll") continue;
+            double lowest = double.MaxValue; var conflict = false;
+            for (var t = 0.0; t <= 120; t += 10)
+            {
+                var dp = d.Path.At(Math.Min(d.Path.Length, d.S + d.Gs * 0.5144 * t)).p;
+                var op = Ahead(o, t);
+                var oAlt = Math.Max(o.AltFt + (o.Kind == "arrival" ? Math.Min(0, o.Vs) : Math.Max(0, o.Vs)) * t / 60, 0);
+                var lat = (dp - op).Length;
+                if (lat < 5 * Geo2.MPerNm) lowest = Math.Min(lowest, Math.Min(o.AltFt, oAlt));
+                if (lat < 3.5 * Geo2.MPerNm && Math.Abs(d.AltFt + climbFpm * t / 60 - oAlt) < 1000 && d.AltFt < oAlt) conflict = true;
+            }
+            if (conflict && lowest < double.MaxValue) Stop(Math.Floor((lowest - 1000) / 1000) * 1000, $"{o.Callsign} ({o.Airport})", o.AltFt, o.Pos);
+        }
+        if (who is not null && d.StoppedFor != who)
+        {
+            d.StoppedFor = who;
             _climbStops++;
-            Log($"{d.Callsign}: climb stopped at {Math.Max(stop, d.AltFt):N0} ft for {who.Callsign} ({who.AltFt:N0} ft, {(who.Pos - d.Pos).Length / Geo2.MPerNm:0.0} nm)");
+            Log($"{d.Callsign}: climb stopped at {Math.Max(stop, d.AltFt):N0} ft for {who} ({whoAlt:N0} ft, {whoNm:0.0} nm)");
         }
         if (who is null) d.StoppedFor = null;
         return stop;
     }
 
-    private int _climbStops, _losCount, _releases, _heldAtTop;
+    /// <summary>Another airport's airborne traffic, in this airport's frame (set by the server every second): the main
+    /// airport's for a neighbour, a neighbour's for the main airport. Projected on a straight line.</summary>
+    public sealed record Foreign(string Callsign, string Airport, string Kind, V2 Pos, double AltFt, double Vs, double GsKt, double Track, string Phase, bool Main);
+    public List<Foreign> Others { get; set; } = new();
+    private static V2 Ahead(Foreign o, double t) => o.Pos + V2.FromBearing(o.Track) * (o.GsKt * 0.5144 * t);
+
+    private int _climbStops, _losCount, _releases, _heldAtTop, _descentStops, _losBetween;
     private double _heldSec;
 
     /// <summary>For a neighbouring field: the main airport's STARs, whose restrictions apply to a shared STAR's fixes.</summary>
@@ -4104,6 +4201,30 @@ public sealed partial class TrafficWorld
     private bool ClearToClimb(Flight d, double climbFpm)
     {
         if (d.Path is null) return true;
+        // Another airport's traffic too (straight ahead), and the departure ahead of it on its way out.
+        foreach (var o in Others)
+        {
+            if ((o.Pos - d.Pos).Length > 30 * Geo2.MPerNm || o.AltFt < d.AltFt - 500 || o.Phase is "flare" or "landing roll") continue;
+            var below0 = d.AltFt < o.AltFt;
+            for (var t = 0.0; t <= 240; t += 10)
+            {
+                var dp = d.Path.At(Math.Min(d.Path.Length, d.S + d.Gs * 0.5144 * t)).p;
+                var oAlt = o.AltFt + o.Vs * t / 60;
+                var dAlt = d.AltFt + climbFpm * t / 60;
+                if ((dp - Ahead(o, t)).Length < 5 * Geo2.MPerNm && (Math.Abs(dAlt - oAlt) < 1000 || (below0 && dAlt > oAlt))) return false;
+                below0 = dAlt < oAlt;
+            }
+        }
+        foreach (var o in Flights)
+        {
+            if (o == d || o.Kind != "departure" || o.OnGround || o.Done || o.Path is null || o.LiftoffTime > d.LiftoffTime || d.AltFt > o.AltFt + 500) continue;
+            for (var t = 0.0; t <= 240; t += 10)
+            {
+                var dp = d.Path.At(Math.Min(d.Path.Length, d.S + d.Gs * 0.5144 * t)).p;
+                var op = o.Path.At(Math.Min(o.Path.Length, o.S + o.Gs * 0.5144 * t)).p;
+                if ((dp - op).Length < 5 * Geo2.MPerNm && Math.Abs(d.AltFt + climbFpm * t / 60 - (o.AltFt + Math.Max(0, o.Vs) * t / 60)) < 1000) return false;
+            }
+        }
         foreach (var a in Flights)
         {
             if (a.Kind != "arrival" || a.OnGround || a.Done || a.Path is null || a.Phase is "flare" or "landing roll" or "final" or "approach" or "go-around") continue;
@@ -4150,10 +4271,23 @@ public sealed partial class TrafficWorld
                 _losSeen[key] = Time; _losCount++;
                 Log($"SEPARATION: {d.Callsign} ({d.AltFt:N0} ft) and {o.Callsign} ({o.AltFt:N0} ft) {(o.Pos - d.Pos).Length / Geo2.MPerNm:0.0} nm apart");
             }
+        // Between airports (logged by the one whose name comes first, so once): any of this airport's airborne traffic
+        // against another's, outside the last few miles of either's final.
+        foreach (var f in air)
+            foreach (var o in Others)
+            {
+                if (string.CompareOrdinal(Apt.Icao, o.Airport) > 0 || o.AltFt < 800 || o.Phase is "final" or "flare" or "landing roll") continue;
+                if (f.Phase is "final" or "flare") continue;
+                if ((o.Pos - f.Pos).Length >= 3 * Geo2.MPerNm || Math.Abs(o.AltFt - f.AltFt) >= 900) continue;
+                var key = (f.Callsign, o.Callsign);
+                if (_losSeen.TryGetValue(key, out var at) && Time - at < 120) continue;
+                _losSeen[key] = Time; _losBetween++;
+                Log($"SEPARATION (between airports): {f.Callsign} {Apt.Icao} ({f.AltFt:N0} ft) and {o.Callsign} {o.Airport} ({o.AltFt:N0} ft) {(o.Pos - f.Pos).Length / Geo2.MPerNm:0.0} nm apart");
+            }
     }
 
     /// <summary>For the control page.</summary>
-    public string SeparationSummary => $"{_climbStops} departure climb{(_climbStops == 1 ? "" : "s")} stopped below arrivals; {_losCount} loss{(_losCount == 1 ? "" : "es")} of separation involving departures";
+    public string SeparationSummary => $"{_climbStops} departure climb{(_climbStops == 1 ? "" : "s")} stopped below traffic; {_descentStops} neighbouring-field descent{(_descentStops == 1 ? "" : "s")} stopped above the main airport's; {_losCount} loss{(_losCount == 1 ? "" : "es")} of separation involving departures; {_losBetween} between airports";
 
     private double _lastSepWatch = -99;
 
@@ -4253,6 +4387,7 @@ public sealed partial class TrafficWorld
             {
                 var plan = f.CruiseFt > 0 ? Math.Min(Profile(rwy, dth), f.CruiseFt) : Profile(rwy, dth);
                 var want = Restricted(f, plan);
+                if (RunwayOnly && Time - f.DescentProbeAt >= 2) { f.DescentProbeAt = Time; f.DescentFloor = ProbeDescent(f); }
                 // Follow the slope of the wanted altitude itself (the descent path bent by the restrictions), not
                 // always the 3° path: level where a restriction holds it ("at 7,000" at BANYA), 300 ft/nm towards an
                 // "at or below". Following the 3° slope while held at a level let it sink ~600 ft below "at" fixes.
@@ -4272,6 +4407,9 @@ public sealed partial class TrafficWorld
                 // ("descend OR slow down"); it catches up with the path afterwards.
                 // Not when an "at or below" restriction ahead is what's bringing it down: that has to be met too.
                 if (f.Ias - target > 5 && dth > 6.5 && !f.Gear && want >= plan - 50 && err < 2000) vsTarget = Math.Max(vsTarget, -400);   // well above the path: get down first
+                // Kept above the main airport's traffic (a satellite's arrival crossing the big airport's flows): level
+                // at the floor until clear.
+                if (!double.IsNaN(f.DescentFloor) && f.AltFt > f.DescentFloor - 100) vsTarget = Math.Max(vsTarget, Math.Min(0, (f.DescentFloor - f.AltFt) * 2));
                 // Not below 10,000 ft until slowed to 250 kt (14 CFR 91.117(a)): level off at 10,000 if need be.
                 if (f.Ias > 252 && f.AltFt > 9900 && f.AltFt < 12000) vsTarget = Math.Max(vsTarget, Math.Clamp((10000 - f.AltFt) * 1.5, -1500, 0));
                 f.Vs += Math.Clamp(vsTarget - f.Vs, -500 * dt, 500 * dt);
