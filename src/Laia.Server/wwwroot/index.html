@@ -145,6 +145,7 @@ async function pollTraffic(){try{const r=await fetch("/api/traffic");const t=awa
   if(st.prediction)a+=" Landing-time predictions: "+esc(st.prediction)+".";
   if(st.restrictions)a+=" STAR/SID/approach restrictions: "+esc(st.restrictions)+".";
   if(st.separation)a+=" Separation: "+esc(st.separation)+".";
+  if(st.topAltitude)a+=" Top altitudes: "+esc(st.topAltitude)+".";
   if(st.arrivalManager)a+=" Arrival manager: "+esc(st.arrivalManager)+".";
   if(st.routes)a+=" Filed routes: "+esc(st.routes)+".";
   if(st.navdata)a+=" En-route navigation data: "+esc(st.navdata)+".";

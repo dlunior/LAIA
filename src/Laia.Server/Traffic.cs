@@ -337,6 +337,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 prediction = w?.PredictionSummary,
                 restrictions = w?.RestrictionSummary,
                 separation = w?.SeparationSummary,
+                topAltitude = w?.TopAltitudeSummary,
                 arrivalManager = w?.ArrivalManagerSummary,
                 navdata = nasrDb.Status,
                 routes = $"{routesDb.Status}{(w is null ? "" : $"; {w.RoutesUsed} SIDs/STARs from them so far; {w.FiledRoutesFlown} whole-sky flights on their filed airways")}",
@@ -566,6 +567,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                                 w.Rules = AaupReader.Rules(aaup.text, aaup.charts, w.Apt.Data);
                                 if (aaup.charts.Length > 0) log.LogInformation("{icao}: {rules}", w.Apt.Icao, w.Rules.Describe());
                             }
+                            if (w.SidTops is not { Count: > 0 }) w.SidTops = Aaup.SidTops(w.Apt.Icao);
                             w.Routes = routesDb.Routes;
                             w.NavData = nasrDb.Nav;
                             w.Learned = history.Profile(w.Apt.Icao);

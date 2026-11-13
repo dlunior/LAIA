@@ -98,6 +98,10 @@ public sealed class Flight
     /// <summary>A departure's climb stopped below crossing traffic (NaN: none), and when that was last checked.</summary>
     public double ClimbStop = double.NaN, ProbeAt = -99;
     public string? StoppedFor;
+    /// <summary>The SID's top altitude (the chart's "maintain 7,000", NaN: none) and whether the climb above it was given.</summary>
+    public double TopAltFt = double.NaN, ReleaseAt = -99, TopReachedAt = double.NaN;
+    public bool ClimbReleased;
+    public string TopSource = "";
     public double TakeoffAt = double.NaN, TakeoffPred10 = double.NaN, TakeoffPred5 = double.NaN, ReadyAt = double.NaN;
     /// <summary>The planned departure route (planned when lining up, so the spacing can look at where it goes).</summary>
     public List<AirPoint>? DepPlan;
@@ -1916,6 +1920,8 @@ public sealed partial class TrafficWorld
         var pts = new List<AirPoint> { new(f.Pos, "") };
         pts.AddRange(f.DepPlan!);
         f.Route = f.DepRoute;
+        (f.TopAltFt, f.TopSource) = TopAltitude(f.DepRoute);
+        f.ClimbReleased = double.IsNaN(f.TopAltFt);
         // Keep going 30 nm past the last point so the path never runs out before the aircraft is removed.
         var last = pts[^1].P; var prev = pts[^2].P;
         pts.Add(new AirPoint(last + (last - prev).Unit * (30 * Geo2.MPerNm), ""));
@@ -3787,6 +3793,27 @@ public sealed partial class TrafficWorld
         // Departure control: stop the climb below an arrival it would otherwise climb into (radar vectors or not).
         if (Time - f.ProbeAt >= 2) { f.ProbeAt = Time; f.ClimbStop = ProbeArrivals(f, f.P.ClimbFpm * 0.8); }
         if (!double.IsNaN(f.ClimbStop)) cap = Math.Min(cap, Math.Max(f.ClimbStop, Math.Min(f.AltFt, cap)));
+        // The SID's top altitude (MCO: 7,000 ft, under the arrivals' "at or above 8,000"): level there; the climb is
+        // given early once it's clear of the arrivals, and in any case 10 minutes after take-off.
+        if (!f.ClimbReleased)
+        {
+            if (f.AltFt > f.TopAltFt - 1500 && Time - f.ReleaseAt >= 4)
+            {
+                f.ReleaseAt = Time;
+                if (double.IsNaN(f.TopReachedAt) && f.AltFt > f.TopAltFt - 100) f.TopReachedAt = Time;
+                var clear = ClearToClimb(f, f.P.ClimbFpm * 0.8);
+                if (clear || Time - f.LiftoffTime > 600)
+                {
+                    f.ClimbReleased = true;
+                    _releases++;
+                    var held = double.IsNaN(f.TopReachedAt) ? 0 : Time - f.TopReachedAt;
+                    if (held > 20) { _heldAtTop++; _heldSec += held; }
+                    Log($"{f.Callsign}: climb above {f.TopAltFt:N0} ft ({f.TopSource}) given at {f.AltFt:N0} ft, {f.Pos.Length / Geo2.MPerNm:0.0} nm out" +
+                        (clear ? held > 20 ? $", clear of the arrivals after {held:0} s level" : ", nothing in the way" : ", 10 minutes after take-off"));
+                }
+            }
+            if (!f.ClimbReleased) cap = Math.Min(cap, f.TopAltFt);
+        }
         if (cap < double.MaxValue) targetVs = Math.Min(targetVs, Math.Max(0, (cap - f.AltFt) * 3));
         f.Vs += Math.Clamp(targetVs - f.Vs, -500 * dt, 600 * dt);
         f.AltFt += f.Vs / 60 * dt;
@@ -3857,7 +3884,69 @@ public sealed partial class TrafficWorld
         return stop;
     }
 
-    private int _climbStops, _losCount;
+    private int _climbStops, _losCount, _releases, _heldAtTop;
+    private double _heldSec;
+
+    /// <summary>The SID top altitudes from the FAA departure charts, by SID name (set by the server; null: none known).</summary>
+    public Dictionary<string, int>? SidTops { get; set; }
+    private double? _corridor;
+
+    /// <summary>
+    /// A departure's top altitude: its SID chart's ("maintain 7,000"), else 1,000 ft below the lowest "at or above"
+    /// on the airport's STARs within 35 nm (the arrivals' floor over the departure corridor: MCO's DORII "at or above
+    /// 8,000" → 7,000). NaN when neither is known.
+    /// </summary>
+    private (double ft, string source) TopAltitude(string route)
+    {
+        var sid = route.Split('.')[0];
+        if (SidTops is { } t && t.TryGetValue(sid, out var ft)) return (ft, $"{sid} top altitude, chart");
+        _corridor ??= CorridorTop();
+        return double.IsNaN(_corridor.Value) ? (double.NaN, "") : (_corridor.Value, "under the arrivals' lowest \"at or above\"");
+    }
+
+    private double CorridorTop()
+    {
+        var lowest = double.MaxValue;
+        foreach (var star in Apt.Data.Arrivals)
+            foreach (var l in star.Legs.Concat(star.RunwayTransitions.SelectMany(x => x.Legs)).Concat(star.EnrouteTransitions.SelectMany(x => x.Legs)))
+            {
+                var floor = l.AltDesc == 2 ? l.Alt1Ft : l.AltDesc == 4 ? Math.Min(l.Alt1Ft, l.Alt2Ft) : 0;
+                if (floor < Apt.ElevationFt + 3000 || floor > 12000 || (l.Lat == 0 && l.Lon == 0)) continue;
+                if (Apt.Map.ToXY(l.Lat, l.Lon).Length > 35 * Geo2.MPerNm) continue;
+                lowest = Math.Min(lowest, floor);
+            }
+        return lowest == double.MaxValue ? double.NaN : Math.Floor((lowest - 1000) / 1000) * 1000;
+    }
+
+    /// <summary>
+    /// Can a departure levelled at its top altitude be given its climb now? It must not come within 5 nm and 1,000 ft
+    /// of an arrival, nor climb through one within 5 nm, in the next 4 minutes (both projected along their routes).
+    /// </summary>
+    private bool ClearToClimb(Flight d, double climbFpm)
+    {
+        if (d.Path is null) return true;
+        foreach (var a in Flights)
+        {
+            if (a.Kind != "arrival" || a.OnGround || a.Done || a.Path is null || a.Phase is "flare" or "landing roll" or "final" or "approach" or "go-around") continue;
+            if ((a.Pos - d.Pos).Length > 30 * Geo2.MPerNm || a.AltFt < d.AltFt - 500) continue;
+            var below = d.AltFt < a.AltFt;
+            for (var t = 0.0; t <= 240; t += 10)
+            {
+                var dp = d.Path.At(Math.Min(d.Path.Length, d.S + d.Gs * 0.5144 * t)).p;
+                var ap = a.Path.At(Math.Min(a.Path.Length, a.S + a.Gs * 0.5144 * t)).p;
+                var dAlt = d.AltFt + climbFpm * t / 60;
+                var aAlt = Math.Max(a.AltFt + Math.Min(0, a.Vs) * t / 60, a.Rwy?.ElevationFt ?? 0);
+                var near = (dp - ap).Length < 5 * Geo2.MPerNm;
+                if (near && (Math.Abs(dAlt - aAlt) < 1000 || (below && dAlt > aAlt))) return false;
+                below = dAlt < aAlt;
+            }
+        }
+        return true;
+    }
+
+    /// <summary>Departures held at their top altitude and given the climb (for the status page).</summary>
+    public string TopAltitudeSummary => _releases == 0 ? "" :
+        $"{_releases} departures given the climb above their top altitude, {_heldAtTop} after waiting level for arrivals (average {(_heldAtTop == 0 ? 0 : _heldSec / _heldAtTop):0} s)";
     private readonly Dictionary<(string, string), double> _losSeen = new();
 
     /// <summary>

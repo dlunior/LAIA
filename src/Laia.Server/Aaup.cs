@@ -103,6 +103,88 @@ public sealed class AaupReader(ILogger log)
         lock (_cache) { _cache[icao] = (DateTime.UtcNow, text, charts); _busy.Remove(icao); }
     }
 
+    // ------------------------------------------------------------------ SID top altitudes (the departure charts)
+    private readonly Dictionary<string, (DateTime at, Dictionary<string, int> tops)> _tops = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _topsBusy = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Each SID's top altitude from its FAA chart ("TOP ALTITUDE: 7000", "… MAINTAIN 7000"), by SID name ("RDSOX1");
+    /// empty until fetched (in the background, once a cycle) or for an airport without such charts.
+    /// </summary>
+    public Dictionary<string, int>? SidTops(string icao)
+    {
+        if (icao.Length != 4 || icao[0] != 'K') return null;
+        lock (_tops)
+        {
+            if (_tops.TryGetValue(icao, out var c) && DateTime.UtcNow - c.at < TimeSpan.FromHours(12)) return c.tops;
+            if (_topsBusy.Add(icao)) _ = Task.Run(() => FetchTopsAsync(icao));
+            return _tops.TryGetValue(icao, out c) ? c.tops : null;
+        }
+    }
+
+    private static readonly string[] Numbers = { "ZERO", "ONE", "TWO", "THREE", "FOUR", "FIVE", "SIX", "SEVEN", "EIGHT", "NINE", "TEN" };
+
+    /// <summary>"RDSOX ONE (RNAV)" → "RDSOX1".</summary>
+    public static string? SidName(string chartName)
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(chartName.ToUpperInvariant(), @"^\s*([A-Z]{2,6})\s+(ZERO|ONE|TWO|THREE|FOUR|FIVE|SIX|SEVEN|EIGHT|NINE|TEN|\d{1,2})\b");
+        if (!m.Success) return null;
+        var n = Array.IndexOf(Numbers, m.Groups[2].Value);
+        return m.Groups[1].Value + (n >= 0 ? n.ToString() : m.Groups[2].Value);
+    }
+
+    /// <summary>A departure chart's top altitude: "TOP ALTITUDE: 7000", else the first "MAINTAIN 7000" (2,000–20,000 ft).</summary>
+    public static int? TopAltitude(string text)
+    {
+        var t = System.Text.RegularExpressions.Regex.Replace(text.ToUpperInvariant(), @"\s+", " ");
+        foreach (var pat in new[] { @"TOP ALTITUDE\s*:?\s*(\d{1,2},?\d{3})", @"MAINTAIN\s+(\d{1,2},?\d{3})(?!\d)" })
+        {
+            foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(t, pat))
+                if (int.TryParse(m.Groups[1].Value.Replace(",", ""), out var ft) && ft is >= 2000 and <= 20000) return ft;
+        }
+        return null;
+    }
+
+    private async Task FetchTopsAsync(string icao)
+    {
+        var tops = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            var (cycle, _) = Cycle(DateTime.UtcNow);
+            var dir = Path.Combine(Paths.DataDir, "aaup", cycle);
+            Directory.CreateDirectory(dir);
+            var file = Path.Combine(dir, icao + ".sidtops.txt");
+            if (File.Exists(file))
+            {
+                foreach (var l in await File.ReadAllLinesAsync(file))
+                    if (l.Split('=') is [var n, var v] && int.TryParse(v, out var ft)) tops[n] = ft;
+            }
+            else
+            {
+                var meta = await MetafileAsync(cycle, dir);
+                var apt = meta?.Descendants("airport_name").FirstOrDefault(a => (string?)a.Attribute("icao_ident") == icao
+                    || "K" + (string?)a.Attribute("apt_ident") == icao);
+                var recs = apt?.Elements("record").Where(r => ((string?)r.Element("chart_code") ?? "") == "DP").ToList() ?? new();
+                foreach (var r in recs)
+                {
+                    var pdf = (string?)r.Element("pdf_name");
+                    var name = SidName((string?)r.Element("chart_name") ?? "");
+                    if (string.IsNullOrEmpty(pdf) || name is null || tops.ContainsKey(name)) continue;
+                    var bytes = await Http.GetByteArrayAsync($"https://aeronav.faa.gov/d-tpp/{cycle}/{pdf}");
+                    using var doc = PdfDocument.Open(bytes);
+                    var sb = new StringBuilder();
+                    foreach (var page in doc.GetPages()) sb.AppendLine(ContentOrderTextExtractor.GetText(page));
+                    if (TopAltitude(sb.ToString()) is { } ft) tops[name] = ft;
+                }
+                await File.WriteAllLinesAsync(file, tops.Select(kv => $"{kv.Key}={kv.Value}"));
+            }
+            log.LogInformation("{icao} SID top altitudes (d-TPP {cycle} charts): {what}", icao, cycle,
+                tops.Count == 0 ? "none found" : string.Join(", ", tops.OrderBy(kv => kv.Key).Select(kv => $"{kv.Key} {kv.Value:N0} ft")));
+        }
+        catch (Exception ex) { log.LogInformation("{icao} SID charts not available: {msg}", icao, ex.Message); }
+        lock (_tops) { _tops[icao] = (DateTime.UtcNow, tops); _topsBusy.Remove(icao); }
+    }
+
     /// <summary>The cycle's chart list (about 30 MB), downloaded once a cycle and kept.</summary>
     private async Task<XDocument?> MetafileAsync(string cycle, string dir)
     {

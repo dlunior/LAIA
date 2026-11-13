@@ -999,6 +999,26 @@ Console.WriteLine("== Departures never climb into arrivals; freighters park on c
     Check(TrafficWorld.IsCargo("UPS") && TrafficWorld.IsCargo("FDX") && !TrafficWorld.IsCargo("SWA"), "UPS and FedEx are known as cargo airlines");
 }
 
+Console.WriteLine("== SID top altitude: departures level under the arrivals, the climb given once clear (MCO: 7,000 under 8,000)");
+{
+    var apt = new AirportModel(TestAirport.Build(false));
+    var world = new TrafficWorld(apt, new TestSource(), seed: 31) { Automatic = true, Level = TrafficLevel.Busy, Wind = new Wind(270, 10) };
+    // Every SID tops out at 5,000 ft in this test.
+    world.SidTops = apt.Data.Departures.ToDictionary(d => d.Name, _ => 5000, StringComparer.OrdinalIgnoreCase);
+    var log = new List<string>(); world.Log = s2 => log.Add(s2);
+    world.SelectRunways(true);
+    for (var t = 0.0; t < 3600; t += 0.5) world.Step(0.5);
+    var given = log.Where(x => x.Contains("climb above")).ToList();
+    Console.WriteLine($"  {world.TopAltitudeSummary}");
+    foreach (var x in given.Take(3)) Console.WriteLine("  " + x);
+    Check(given.Count > 0, "departures are given the climb above their top altitude");
+    Check(given.All(x => !x.Contains("given at") || double.Parse(System.Text.RegularExpressions.Regex.Match(x, @"given at ([0-9,]+) ft").Groups[1].Value.Replace(",", "")) <= 5100),
+        "never above the top altitude before the climb is given");
+    var los = log.Where(x => x.StartsWith("SEPARATION")).ToList();
+    foreach (var x in los.Take(3)) Console.WriteLine("  " + x);
+    Check(los.Count == 0, "no departure comes within 3 nm and 1,000 ft of other traffic");
+}
+
 Console.WriteLine("== M6: learning an airport from real tracks (synthetic adsb.lol-style traces), and flying what was learned");
 {
     var nm = Geo2.MPerNm;
