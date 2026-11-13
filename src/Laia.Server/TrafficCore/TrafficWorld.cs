@@ -376,6 +376,18 @@ public sealed partial class TrafficWorld
         // positions), then what it did on the learned day in this wind (real tracks, M6); the wind rule is the last resort.
         if (RealConfig(usable) is { } rc)
         {
+            var differs = !ArrRwys.SequenceEqual(rc.arr) || !DepRwys.SequenceEqual(rc.dep);
+            if (differs && ArrRwys.Count > 0 && rc.why.StartsWith("from live traffic"))
+            {
+                // Live traffic flickers between configurations (CYYC, 13 Nov: 17R → 17R+17L → 17L → 17L+17R in 4 minutes,
+                // as the last few arrivals happened to use one or the other). A change from it must be seen for 10
+                // minutes running, and at most one every 20 minutes.
+                var sig = string.Join(",", rc.arr.Select(e => e.Ident)) + "/" + string.Join(",", rc.dep.Select(e => e.Ident));
+                if (sig != _livePendingSig) { _livePendingSig = sig; _livePendingSince = Time; }
+                if (!force && (Time - _livePendingSince < 600 || Time - _lastRunwayChange < 1200)) return;
+            }
+            if (differs && !force && UserRunwayHeld(rc.arr)) return;
+            if (differs) { _lastRunwayChange = Time; _livePendingSig = ""; }
             if (!ArrRwys.SequenceEqual(rc.arr) || !DepRwys.SequenceEqual(rc.dep))
                 Log($"Runways in use at {Apt.Icao}: landing {string.Join(", ", rc.arr.Select(e => e.Ident))}, departing {string.Join(", ", rc.dep.Select(e => e.Ident))} ({rc.why}; wind {Wind.FromDeg:000} at {Wind.Kt:0} kt)");
             ArrRwys = rc.arr; DepRwys = rc.dep; ArrRwy = rc.arr[0]; DepRwy = rc.dep[0];
@@ -412,12 +424,28 @@ public sealed partial class TrafficWorld
                 .OrderByDescending(e => Math.Round(Wind.Headwind(e.Heading) / 3)).ThenByDescending(e => e.LengthM).FirstOrDefault();
         }
         dep ??= arr;
+        if (ArrRwy != arr && !force && UserRunwayHeld(new() { arr })) return;
         if (ArrRwy != arr || DepRwy != dep) Log($"Runways in use at {Apt.Icao}: landing {arr.Ident}, departing {dep.Ident} (wind {Wind.FromDeg:000} at {Wind.Kt:0} kt)");
         ArrRwy = arr;
         DepRwy = dep;
         ArrRwys = new() { arr };
         DepRwys = new() { dep };
     }
+
+    private string _livePendingSig = "";
+    private double _livePendingSince, _lastRunwayChange = double.NegativeInfinity;
+
+    /// <summary>
+    /// The user's landing runway isn't taken away below 10,000 ft (user, 13 Nov: "never below 10,000 ft"): a new
+    /// configuration without it waits until the user has landed (or climbs back above 10,000 ft).
+    /// </summary>
+    private bool UserRunwayHeld(List<RunwayEnd> newArrs)
+    {
+        if (UserArr is not { Rwy: { } ur } || UserAltFt >= 10000 || newArrs.Contains(ur)) return false;
+        if (!_userHoldLogged) { _userHoldLogged = true; Log($"Runway change at {Apt.Icao} to landing {string.Join("/", newArrs.Select(e => e.Ident))} waits: you're landing {ur.Ident} below 10,000 ft"); }
+        return true;
+    }
+    private bool _userHoldLogged;
 
     /// <summary>Runways real traffic is landing on and departing from right now (live adsb.lol positions), set by the server.</summary>
     public List<string> LiveLanding { get; set; } = new();
@@ -2100,7 +2128,9 @@ public sealed partial class TrafficWorld
                 f.ReadyAt = Time + toGo + (f.Phase is "boarding" or "pushback" or "engine start" or "taxi" ? _depBias : 0);
             }
             var arrs = Flights.Where(a => a.Kind == "arrival" && !a.OnGround && !a.Done && a.Rwy?.Runway == g.Key && !double.IsNaN(a.EtaSec))
-                .Select(a => Time + a.EtaSec - (Time - a.EtaAt)).OrderBy(x => x).ToList();
+                .Select(a => Time + a.EtaSec - (Time - a.EtaAt))
+                .Concat(UserArr is { Rwy: { } ur } me && ur.Runway == g.Key && !double.IsNaN(me.EtaSec) ? new[] { Time + me.EtaSec } : Array.Empty<double>())
+                .OrderBy(x => x).ToList();
             var occ = _rotSeen.TryGetValue(g.First().Rwy!, out var seen) ? seen : 55;
             double prev = double.NegativeInfinity; Flight? prevF = null;
             foreach (var f in g.OrderBy(x => x.Phase is "lined up" or "lining up" ? 0 : x.Phase == "holding short" ? 1 : 2).ThenBy(x => x.ReadyAt))
@@ -3563,7 +3593,20 @@ public sealed partial class TrafficWorld
 
 
     private bool RunwayBusy(int runway, Flight self) =>
-        Flights.Any(o => o != self && !o.Done && (o.Reserve == runway || (o.OnRunway == runway && !(o.Kind == "departure" && !o.OnGround))));
+        UserOnRunway(runway) || Flights.Any(o => o != self && !o.Done && (o.Reserve == runway || (o.OnRunway == runway && !(o.Kind == "departure" && !o.OnGround))));
+
+    /// <summary>The user is on this runway (on the ground, on the strip): nobody lines up, takes off or lands on it.</summary>
+    private bool UserOnRunway(int runway)
+    {
+        if (!UserOnGround || UserPos is not { } u) return false;
+        foreach (var r in Apt.Ends)
+        {
+            if (r.Runway != runway) continue;
+            var along = r.Along(u);
+            if (Math.Abs(r.Offset(u)) < 45 && along > -60 && along < r.LengthM + 60) return true;
+        }
+        return false;
+    }
 
     /// <summary>Seconds until the next arrival reaches this runway (infinity if none).</summary>
     private double ArrivalEta(int runway)
@@ -3576,6 +3619,8 @@ public sealed partial class TrafficWorld
             if (d < -300) continue;
             best = Math.Min(best, Math.Max(0, d) / Math.Max(30, o.Gs * Kt));
         }
+        // The user, landing on this runway (user, 13 Nov: LAIA "sent a plane right at me like I wasn't there").
+        if (UserArr is { Rwy: { } ur } me && ur.Runway == runway && !double.IsNaN(me.EtaSec)) best = Math.Min(best, Math.Max(0, me.EtaSec));
         return best;
     }
 

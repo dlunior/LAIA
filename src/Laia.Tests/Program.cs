@@ -1216,6 +1216,38 @@ Console.WriteLine("== M8 Smart traffic notices: the user's place in the sequence
     Check(fin is not null && fin.Contains("DAL73") && fin.Contains("don't line up"), "holding short with traffic on final: a notice, not an instruction to the AI");
 }
 
+Console.WriteLine("== The user's runway: never changed below 10,000 ft, at most once; live-traffic flicker waits 10 minutes");
+{
+    var nm = Geo2.MPerNm;
+    var w = new TrafficWorld(new AirportModel(TestAirport.Build(false)), new TestSource(), seed: 21) { Automatic = false, Wind = new Wind(270, 2) };
+    var log = new List<string>(); w.Log = s2 => log.Add(s2);
+    w.LiveLanding = new() { "27" };
+    w.SelectRunways(true);
+    var r27 = w.ArrRwy!;
+    w.UserCallsign = "ACA1196"; w.UserType = "A320"; w.UserDestination = "TEST";
+    w.UserOnGround = false; w.UserTrack = r27.Heading; w.UserGs = 0; w.UserAltFt = 6000;
+    w.UserPos = r27.Threshold - r27.Dir * (20 * nm);
+    for (var t = 0.0; t < 30; t += 0.5) w.Step(0.5);
+    var first = w.Sequence?.Runway;
+    // Real traffic flips to the other way: below 10,000 ft the user's runway isn't taken away.
+    w.LiveLanding = new() { "09" };
+    for (var t = 0.0; t < 1400; t += 0.5) w.Step(0.5);
+    var held = w.ArrRwy?.Ident;
+    // Above 10,000 ft: the one change happens.
+    w.UserAltFt = 12000;
+    for (var t = 0.0; t < 300; t += 0.5) w.Step(0.5);
+    var second = w.Sequence?.Runway;
+    // And back again: the airport changes, the user doesn't (no more than one change).
+    w.LiveLanding = new() { "27" };
+    for (var t = 0.0; t < 1300; t += 0.5) w.Step(0.5);
+    var third = w.Sequence?.Runway;
+    foreach (var x in log.Where(x => x.Contains("Runways in use") || x.Contains("(you)") || x.Contains("waits"))) Console.WriteLine("  " + x);
+    Console.WriteLine($"  user's runway: {first} → {second} → {third}; airport while the user was low: {held}; airport at the end: {w.ArrRwy?.Ident}");
+    Check(first == "27" && held == "27", "below 10,000 ft the user's landing runway isn't taken away (the change waits)");
+    Check(second == "09", "above 10,000 ft the user's runway follows the airport's change, once");
+    Check(third == "09" && w.ArrRwy?.Ident == "27", "no second change for the user: they keep their runway");
+}
+
 Console.WriteLine("== Neighbouring fields: runway traffic only, on the main airport's clock; satellite STARs are a last resort");
 {
     var nm = Geo2.MPerNm;

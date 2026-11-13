@@ -30,6 +30,7 @@ public sealed partial class TrafficWorld
     public Flight? UserArr { get; private set; }
     private double _userSlot = double.NaN, _userOffSince = double.NaN;
     private bool _userReplanned;
+    private int _userRwyChanges;
     private string _seqSig = "";
     private double _seqSince, _seqNewUntil = double.MinValue;
     public UserSequence? Sequence { get; private set; }
@@ -78,7 +79,7 @@ public sealed partial class TrafficWorld
     {
         if (!UserArriving() || UserPos is not { } u)
         {
-            UserArr = null; Sequence = null; _userSlot = double.NaN; _seqSig = ""; return;
+            UserArr = null; Sequence = null; _userSlot = double.NaN; _seqSig = ""; _userRwyChanges = 0; _userHoldLogged = false; return;
         }
         var arrs = ArrRwys.Count > 0 ? ArrRwys : ArrRwy is null ? new List<RunwayEnd>() : new() { ArrRwy };
         if (arrs.Count == 0) return;
@@ -87,9 +88,18 @@ public sealed partial class TrafficWorld
             Id = "user", Callsign = UserCallsign.Length > 0 ? UserCallsign : "you", Airline = "", Type = UserType.Length > 0 ? UserType : "A320",
             Kind = "arrival", P = Perf.For(UserType.Length > 0 ? UserType : "A320"),
         };
-        // The runway: the one it already has while it's still in use, else the one on the user's side of the field.
-        if (f.Rwy is null || !arrs.Contains(f.Rwy))
+        // The runway: given once, on the user's side of the field. Changed at most once, and never below 10,000 ft
+        // (user, 13 Nov: changed "at the last moment … no more than one runway change and never below 10000ft"):
+        // otherwise the user keeps it even if the airport has stopped landing there, and LAIA's traffic works around them.
+        if (f.Rwy is null) f.Rwy = arrs.OrderBy(r => UserTrackNm(r, u)).First();
+        else if (!arrs.Contains(f.Rwy) && UserAltFt >= 10000 && _userRwyChanges < 1)
+        {
+            var old = f.Rwy;
             f.Rwy = arrs.OrderBy(r => UserTrackNm(r, u)).First();
+            _userRwyChanges++;
+            _userSlot = double.NaN;
+            Log($"{f.Callsign} (you): runway changed from {old.Ident} to {f.Rwy.Ident} (the only change; none below 10,000 ft)");
+        }
         f.OnGround = false; f.Gear = false;
         f.Pos = u; f.AltFt = UserAltFt; f.Gs = UserGs; f.Ias = Math.Min(UserGs, 250); f.Heading = UserTrack;
         f.SetPhase("arriving", Time);
@@ -127,16 +137,28 @@ public sealed partial class TrafficWorld
         }
         // A new sequence when the plan was re-made for the user, or their number or neighbours changed (once settled:
         // the first 10 s after they join are the sequence taking shape).
-        var sig = $"{me.Rwy!.Ident}|{me.Seq}|{ahead?.Id}|{behind?.Id}";
-        var changed = _userReplanned || (_seqSig.Length > 0 && sig != _seqSig && Time - _seqSince > 10);
+        // Moving up because the aircraft ahead landed isn't a new sequence (user, 13 Nov: "re-sequenced me several
+        // times" — it was mostly 5, 4, 3, 2, 1 as the ones ahead landed): only a different runway, or someone put in
+        // ahead of or behind the user while the one before is still coming in.
+        var parts = _seqSig.Split('|');
+        var changed = _userReplanned;
+        if (_seqSig.Length > 0 && Time - _seqSince > 10)
+        {
+            bool StillThere(string id) => id.Length > 0 && ordered.Any(o => o.Id == id);
+            if (parts[0] != me.Rwy!.Ident) changed = true;
+            // Someone put in ahead (the one that was ahead is still coming in, or the user was number 1), or behind.
+            if (parts[1] != (ahead?.Id ?? "") && (StillThere(parts[1]) || (parts[1].Length == 0 && ahead is not null))) changed = true;
+            if (parts[2] != (behind?.Id ?? "") && StillThere(parts[2])) changed = true;
+        }
         if (_seqSig.Length == 0) _seqSince = Time;
-        _seqSig = sig;
+        _seqSig = $"{me.Rwy!.Ident}|{ahead?.Id}|{behind?.Id}";
         _userReplanned = false;
+        var logNow = changed && Time >= _seqNewUntil;
         if (changed) _seqNewUntil = Time + 30;
         changed |= Time < _seqNewUntil;
         Sequence = new UserSequence(me.Rwy!.Ident, me.Seq, ahead?.Callsign, ahead?.Type, ahead is null ? null : Where(ahead),
             behind?.Callsign, behind?.Type, changed, me.EtaSec);
-        if (changed && Time >= _seqNewUntil - 0.6) Log($"{me.Callsign} (you): new sequence — number {me.Seq} for {me.Rwy.Ident}, between {ahead?.Callsign ?? "nobody"} and {behind?.Callsign ?? "nobody"}");
+        if (logNow) Log($"{me.Callsign} (you): new sequence — number {me.Seq} for {me.Rwy.Ident}, between {ahead?.Callsign ?? "nobody"} and {behind?.Callsign ?? "nobody"}");
     }
 
     /// <summary>The notices that matter now (rebuilt every step, shown while true).</summary>
