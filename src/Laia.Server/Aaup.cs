@@ -271,7 +271,7 @@ public sealed class AaupReader(ILogger log)
             var (cycle, _) = Cycle(DateTime.UtcNow);
             var dir = Path.Combine(Paths.DataDir, "aaup", cycle);
             Directory.CreateDirectory(dir);
-            var file = Path.Combine(dir, icao + ".starexpect.txt");
+            var file = Path.Combine(dir, icao + ".starexpect2.txt");
             if (File.Exists(file))
             {
                 foreach (var l in await File.ReadAllLinesAsync(file))
@@ -294,6 +294,14 @@ public sealed class AaupReader(ILogger log)
                     var bytes = await Http.GetByteArrayAsync($"https://aeronav.faa.gov/d-tpp/{cycle}/{pdf}");
                     using var doc = PdfDocument.Open(bytes);
                     var found = ReadExpects(doc, fixes[key]);
+                    // What the chart says about "expect" (to check the reading): the words around each one.
+                    foreach (var page in doc.GetPages())
+                    {
+                        var ws = page.GetWords().Select(x => x.Text).ToList();
+                        var hits = ws.Select((x, i) => (x, i)).Where(x => x.x.StartsWith("EXPECT", StringComparison.OrdinalIgnoreCase)).Take(8)
+                            .Select(x => string.Join(" ", ws.Skip(Math.Max(0, x.i - 3)).Take(10))).ToList();
+                        if (hits.Count > 0) log.LogInformation("{icao} {star} chart, \"expect\" text: {hits}", icao, key, string.Join(" | ", hits));
+                    }
                     if (found.Count == 0) continue;
                     var list = exp.TryGetValue(key, out var l0) ? l0 : exp[key] = new();
                     foreach (var e in found) { list.RemoveAll(x => x.Fix == e.Fix); list.Add(e); }

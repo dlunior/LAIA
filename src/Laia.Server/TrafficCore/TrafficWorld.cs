@@ -919,7 +919,7 @@ public sealed partial class TrafficWorld
         var legs = Schedule!.Legs;
         var me = Apt.Icao;
         var active = Flights.Count(f => !f.Done);
-        const int cap = 10;
+        const int cap = 16;
         foreach (var l in legs)
         {
             if (active >= cap) break;
@@ -933,12 +933,15 @@ public sealed partial class TrafficWorld
             else if (l.Arr == me && Keep(l))
             {
                 var u = Until(l.ArrMin);
-                if (u > 30 || u < 1 || _done.Contains(Key(l, 'A'))) continue;
+                if (u > 50 || u < 1 || _done.Contains(Key(l, 'A'))) continue;
                 if (l.Reg.Length > 0 && Flights.Any(f => !f.Done && f.Reg == l.Reg)) continue;
                 var np = NetworkPosition(l);
                 if (np is null) continue;
                 var dist = Geo2.DistanceNm(Apt.Data.Lat, Apt.Data.Lon, np.Lat, np.Lon);
-                if (dist > 60) continue;
+                // Taken over as far out as the main airport's arrivals (user, 13 Nov, DAL3043 to MLB: taken over only
+                // 60 nm from MLB — by then 45 nm north of MCO, still a whole-sky dot: not drawn, not on its STAR, no
+                // restrictions). From the hand-over it flies its STAR, restrictions and approach like any arrival.
+                if (dist > HandoverNm) continue;
                 _done.Add(Key(l, 'A'));
                 if (dist > 12 && SpawnFromNetwork(l, np) is not null) { active++; Movements++; }
             }
@@ -2546,6 +2549,21 @@ public sealed partial class TrafficWorld
         {
             var star = PickStar(f, rwy, out var starLegs);
             var starPts = star is null ? new List<AirPoint>() : Apt.LegsToPoints(starLegs, entry ?? V2.FromBearing(Rng.Next(360), 40 * Geo2.MPerNm), 11000, out _);
+            // A STAR shared with another airport (MLB's BITHO7 is MCO's too): where this copy has no restriction at a fix
+            // and the other airport's copy does, that one applies.
+            if (star is not null && SharedArrivals is { } shared)
+                for (var k = 0; k < starPts.Count; k++)
+                {
+                    var sp = starPts[k];
+                    if (sp.Fix.Length == 0 || sp.AltMinFt > 0 || sp.AltMaxFt > 0) continue;
+                    var other = shared.Where(a => AirportRules.Base(a.Name) == AirportRules.Base(star.Name))
+                        .SelectMany(a => a.Legs.Concat(a.RunwayTransitions.SelectMany(t => t.Legs)).Concat(a.EnrouteTransitions.SelectMany(t => t.Legs)))
+                        .FirstOrDefault(l => l.Fix.Equals(sp.Fix, StringComparison.OrdinalIgnoreCase) && l.AltDesc > 0);
+                    if (other is null) continue;
+                    double mn = 0, mx = 0;
+                    switch (other.AltDesc) { case 1: mn = mx = other.Alt1Ft; break; case 2: mn = other.Alt1Ft; break; case 3: mx = other.Alt1Ft; break; case 4: mx = other.Alt1Ft; mn = other.Alt2Ft; break; }
+                    starPts[k] = sp with { AltMinFt = mn, AltMaxFt = mx, SpeedKt = sp.SpeedKt is > 0 and < 400 ? sp.SpeedKt : other.SpeedKt };
+                }
             // The chart's "expect" altitudes and speeds are restrictions too (user, 13 Nov), where the procedure data
             // has none at that fix.
             if (star is not null && StarExpects is { } se && se.TryGetValue(star.Name, out var exps))
@@ -4041,6 +4059,9 @@ public sealed partial class TrafficWorld
 
     private int _climbStops, _losCount, _releases, _heldAtTop;
     private double _heldSec;
+
+    /// <summary>For a neighbouring field: the main airport's STARs, whose restrictions apply to a shared STAR's fixes.</summary>
+    public List<Procedure>? SharedArrivals { get; set; }
 
     /// <summary>The "expect" restrictions from the FAA STAR charts, by STAR name: fix, at or above, at or below, speed.</summary>
     public Dictionary<string, List<(string fix, double min, double max, double kt)>>? StarExpects { get; set; }

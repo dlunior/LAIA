@@ -206,7 +206,11 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 if (nm > DrawRadiusNm) continue;
                 var dz = Math.Abs(f.AltFt - sim.AltitudeFt);
                 if (!f.OnGround && dz > DrawBandFt) continue;
-                cands.Add((f.Id, nm + dz / 2000));
+                // What matters first: moving traffic (in the air, taxiing, on the runway) before aircraft parked at a
+                // gate — a parked aircraft counts as 25 nm further away (MLB's arrivals 50 nm out weren't drawn while
+                // MCO's parked aircraft filled the 80).
+                var parked = f.OnGround && f.Phase is "parked" or "boarding" or "at gate";
+                cands.Add((f.Id, nm + dz / 2000 + (parked ? 25 : 0)));
             }
         var want = cands.OrderBy(c => c.score).Take(MaxDrawn).Select(c => c.id).ToList();
         if (forMap) return want.Where(_drawnLast.Contains).ToHashSet();   // the map shows what the sim has; it doesn't add
@@ -723,6 +727,17 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                             if (w.SidTops is not { Count: > 0 }) w.SidTops = Aaup.SidTops(w.Apt.Icao);
                             if (w.StarExpects is null && Aaup.StarExpects(w.Apt.Icao, StarFixes(w.Apt)) is { } ex)
                                 w.StarExpects = ex.ToDictionary(kv => kv.Key, kv => kv.Value.Select(e => (e.Fix, e.MinFt, e.MaxFt, e.Kt)).ToList(), StringComparer.OrdinalIgnoreCase);
+                            // A neighbour shares the main airport's STARs (and their charts' "expects"): BITHO7 is MCO's and MLB's.
+                            if (w != _world && _world is { } mw)
+                            {
+                                w.SharedArrivals = mw.Apt.Data.Arrivals;
+                                if (mw.StarExpects is { Count: > 0 } mex)
+                                {
+                                    w.StarExpects ??= new(StringComparer.OrdinalIgnoreCase);
+                                    foreach (var (name, list) in mex)
+                                        if (w.Apt.Data.Arrivals.Any(a => a.Name.Equals(name, StringComparison.OrdinalIgnoreCase)) && !w.StarExpects.ContainsKey(name)) w.StarExpects[name] = list;
+                                }
+                            }
                             w.Routes = routesDb.Routes;
                             w.NavData = nasrDb.Nav;
                             w.Learned = history.Profile(w.Apt.Icao);
