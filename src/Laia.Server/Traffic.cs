@@ -510,39 +510,59 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     /// <summary>Real tracks (adsb.lol) learned for the airport, for the map: a sample of arrivals and departures per runway.</summary>
     public object? RealTracks()
     {
-        var w = _world;
-        if (w is null || history.Profile(w.Apt.Icao) is not { } p) return null;
-        // Arrivals to the landing runways and departures from the departure runways (not either kind on any runway in
-        // use), and as many of each, spread over the day(s), so neither looks busier than it is.
-        var arrRw = w.ArrRwys.Select(e => e.Ident).ToHashSet();
-        var depRw = w.DepRwys.Select(e => e.Ident).ToHashSet();
-        var arr = p.Samples.Where(t => t.Kind == "arrival" && (arrRw.Count == 0 || arrRw.Contains(t.Runway))).ToList();
-        var dep = p.Samples.Where(t => t.Kind == "departure" && (depRw.Count == 0 || depRw.Contains(t.Runway))).ToList();
-        var n = Math.Min(arr.Count, dep.Count);
-        static List<T> Spread<T>(List<T> l, int n) => l.Count <= n || n <= 0 ? l : Enumerable.Range(0, n).Select(i => l[(int)((long)i * l.Count / n)]).ToList();
-        return new
+        // The departure field and the destination prepared ahead (user, 13 Nov, CYWG–CYYC: "not showing the real
+        // track or taxi flow for my arrival airport").
+        List<TrafficWorld> ws;
+        lock (_gate) ws = MapAirports().ToList();
+        var all = new List<object>();
+        var icaos = new List<string>();
+        foreach (var w in ws)
         {
-            icao = p.Icao, day = p.Day, source = p.Source,
-            tracks = Spread(arr, n).Concat(Spread(dep, n)).Select(t => new { kind = t.Kind, runway = t.Runway, points = t.Points }),
-        };
+            if (history.Profile(w.Apt.Icao) is not { } p) continue;
+            // Arrivals to the landing runways and departures from the departure runways (not either kind on any runway in
+            // use), and as many of each, spread over the day(s), so neither looks busier than it is.
+            var arrRw = w.ArrRwys.Select(e => e.Ident).ToHashSet();
+            var depRw = w.DepRwys.Select(e => e.Ident).ToHashSet();
+            var arr = p.Samples.Where(t => t.Kind == "arrival" && (arrRw.Count == 0 || arrRw.Contains(t.Runway))).ToList();
+            var dep = p.Samples.Where(t => t.Kind == "departure" && (depRw.Count == 0 || depRw.Contains(t.Runway))).ToList();
+            var n = Math.Min(arr.Count, dep.Count);
+            static List<T> Spread<T>(List<T> l, int n) => l.Count <= n || n <= 0 ? l : Enumerable.Range(0, n).Select(i => l[(int)((long)i * l.Count / n)]).ToList();
+            all.AddRange(Spread(arr, n).Concat(Spread(dep, n)).Select(t => (object)new { kind = t.Kind, runway = t.Runway, points = t.Points, icao = p.Icao }));
+            icaos.Add($"{p.Icao} {p.Day}");
+        }
+        if (icaos.Count == 0) return null;
+        return new { icao = string.Join(", ", icaos), tracks = all };
     }
 
-    /// <summary>The main airport's taxi flow for the map: one-way stretches with their direction.</summary>
+    /// <summary>The airports the map shows learned data for: the traffic airport and the destination prepared ahead.</summary>
+    private IEnumerable<TrafficWorld> MapAirports()
+    {
+        if (_world is not null) yield return _world;
+        if (_ahead is not null && _ahead.Apt != _world?.Apt) yield return _ahead;
+    }
+
+    /// <summary>The taxi flow for the map (the traffic airport's and the destination's): one-way stretches with their direction.</summary>
     public object? TaxiFlowMap()
     {
         lock (_gate)
         {
-            var w = _world;
-            if (w?.Flow is not { } fl) return null;
-            return new
+            var stretches = new List<object>();
+            var keys = new List<string>();
+            var sums = new List<string>();
+            foreach (var w in MapAirports())
             {
-                key = fl.Key, summary = fl.Summary,
-                stretches = fl.Stretches.Select(st => new
-                {
-                    name = st.name, use = st.use, real = st.real,
-                    points = st.pts.Select(q => { var (la, lo) = w.Apt.Map.ToLatLon(q); return new[] { Math.Round(la, 6), Math.Round(lo, 6) }; }),
-                }),
-            };
+                if (w.Flow is not { } fl) continue;
+                keys.Add(w.Apt.Icao + fl.Key);
+                sums.Add($"{w.Apt.Icao}: {fl.Summary}");
+                foreach (var st in fl.Stretches)
+                    stretches.Add(new
+                    {
+                        name = st.name, use = st.use, real = st.real, icao = w.Apt.Icao,
+                        points = st.pts.Select(q => { var (la, lo) = w.Apt.Map.ToLatLon(q); return new[] { Math.Round(la, 6), Math.Round(lo, 6) }; }),
+                    });
+            }
+            if (keys.Count == 0) return null;
+            return new { key = string.Join("|", keys), summary = string.Join(" · ", sums), stretches };
         }
     }
 
@@ -604,8 +624,12 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
             return new
             {
                 level = (LevelName),
+                // The traffic airport's checklist, or (en route, no traffic airport) the destination's being prepared ahead.
                 preparing = _prep is { Ready: false } pp && w is not null && pp.Icao == w.Apt.Icao
-                    ? new { seconds = (int)pp.Secs, items = pp.Items.Select(i => new { i.item, i.done, i.note }).ToList() } : null,
+                    ? new { icao = pp.Icao, ahead = false, seconds = (int)pp.Secs, items = pp.Items.Select(i => new { i.item, i.done, i.note }).ToList() }
+                    : w is null && _aheadPrep is { Ready: false } ap0
+                    ? new { icao = ap0.Icao, ahead = true, seconds = (int)ap0.Secs, items = ap0.Items.Select(i => new { i.item, i.done, i.note }).ToList() } : null,
+                destinationPlanned = simBrief.Plan?.Destination,
                 airport = w?.Apt.Icao,
                 destination = _ahead is { } ah ? $"{ah.Apt.Icao} {ah.Apt.Name}: " + (_aheadPrep is { Ready: true } ? $"ready, {ah.Flights.Count(f => !f.Done && f.Kind != "parked")} flights running ahead of you"
                     : _aheadPrep is { } ap ? "preparing (" + string.Join("; ", ap.Items.Where(i => !i.done).Select(i => i.item)) + ")" : "preparing") : null,
