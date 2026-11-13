@@ -44,10 +44,21 @@ public sealed class AdsbHistory(ILogger<AdsbHistory> log)
             if (need.Count == 0) return;
             if (_lastTry.TryGetValue(string.Join(",", need.Select(a => a.Icao)), out var at) && DateTime.UtcNow - at < TimeSpan.FromHours(6)) return;
             _lastTry[string.Join(",", need.Select(a => a.Icao))] = DateTime.UtcNow;
+            _learning = need.Select(a => a.Icao).ToHashSet(StringComparer.OrdinalIgnoreCase);
             _running = Task.Run(() => LearnAsync(need, CancellationToken.None));
         }
     }
     private readonly Dictionary<string, DateTime> _lastTry = new();
+    private HashSet<string> _learning = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Whether this airport is being learned right now.</summary>
+    public bool Learning(string icao) { lock (_gate) return _running is { IsCompleted: false } && _learning.Contains(icao); }
+
+    /// <summary>A current profile (learned with today's rules) for this airport.</summary>
+    public bool Current(string icao) => Profile(icao) is { } p && p.Version >= AirportProfile.CurrentVersion;
+
+    /// <summary>The last attempt to learn this airport ended without a profile (no history day found, or it failed).</summary>
+    public bool Gave(string icao) { lock (_gate) return _running is not { IsCompleted: false } && _lastTry.Keys.Any(k => k.Split(',').Contains(icao, StringComparer.OrdinalIgnoreCase)) && !Current(icao); }
 
     private async Task LearnAsync(List<AirportModel> apts, CancellationToken ct)
     {

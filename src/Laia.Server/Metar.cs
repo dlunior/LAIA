@@ -31,6 +31,9 @@ public sealed class MetarReader(ILogger<MetarReader> log)
         }
     }
 
+    /// <summary>Whether a METAR answer (or a failure) has come back for this airport yet.</summary>
+    public bool Known(string icao) { lock (_cache) return _cache.ContainsKey(icao); }
+
     private async Task FetchAsync(string icao)
     {
         try

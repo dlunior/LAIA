@@ -1382,6 +1382,8 @@ public sealed partial class TrafficWorld
     private Task<TaxiFlow>? _flowTask;
     /// <summary>The taxi flow for the runways in use (null until the airport has ground data and runways).</summary>
     public TaxiFlow? Flow => _flow;
+    /// <summary>The full taxi flow for the runways in use now is ready (or there's none to work out).</summary>
+    public bool FlowReady => !UseTaxiFlow || !Apt.HasGround || RunwayOnly || (_flow is { Full: true } fl && fl.Key == _flowKey && _flowTask is null);
     /// <summary>Set false to keep the taxi flow from being worked out (tests that compare without it).</summary>
     public bool UseTaxiFlow { get; set; } = true;
     /// <summary>Tests: wait for the background work and take it now.</summary>

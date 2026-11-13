@@ -25,6 +25,8 @@ public sealed class TaxiFlow
     private readonly HashSet<(int, int)> _against = new();
     private readonly HashSet<(int, int)> _depOnly = new(), _arrOnly = new();   // real tracks: only that kind uses it
     public int RealStretches { get; private set; }
+    /// <summary>The full flow (rehearsed and directions decided), not just the quick parallel preference.</summary>
+    public bool Full { get; private set; }
     public int RealTracks { get; private set; }
     public string Key { get; init; } = "";
     public string Summary { get; private set; } = "";
@@ -93,7 +95,7 @@ public sealed class TaxiFlow
         IReadOnlySet<int> activeRunways, Func<RunwayEnd, AirportModel.ParkingSpot, int> holdFor, string key,
         IReadOnlyList<(bool arrival, List<(V2 p, double trk)> pts)>? real = null, string realSource = "")
     {
-        var f = new TaxiFlow { Key = key };
+        var f = new TaxiFlow { Key = key, Full = true };
         f.FindParallels(apt, arr.Concat(dep).ToList());
 
         // ---- the rehearsal

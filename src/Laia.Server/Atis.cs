@@ -34,6 +34,9 @@ public sealed class AtisReader(ILogger log)
         }
     }
 
+    /// <summary>Whether an answer for this airport has come back yet (an ATIS, or that it publishes none).</summary>
+    public bool Known(string icao) { lock (_cache) return _cache.ContainsKey(icao) || icao.Length != 4 || icao[0] != 'K'; }
+
     /// <summary>The broadcasts in a reply: an array of {type, code, datis}, or one such object, or {data: [...]}.</summary>
     internal static List<(string type, string code, string text)> Parts(string json)
     {

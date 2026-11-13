@@ -57,6 +57,69 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         }
     }
 
+    // ------------------------------------------------------------------ preparation (quality over speed)
+
+    /// <summary>
+    /// Before any traffic at an airport, everything is gathered and worked out first (user, 12 Nov: "quality over
+    /// speed"): the layout, the installed models, the real schedule, the live ATIS and METAR, the FAA AAUP rules and
+    /// SID charts, the real-traffic learning (adsb.lol), then the runways in use (settled once, from all of that), the
+    /// taxi flow for them and the pushback plans. Each item waits only so long; what doesn't come is noted and skipped.
+    /// Traffic (here and at the neighbouring fields) starts only when it's all done, or when the user says start now.
+    /// </summary>
+    private sealed class Prep(string icao)
+    {
+        public readonly string Icao = icao;
+        public readonly DateTime Started = DateTime.UtcNow;
+        public Task? Survey;
+        public bool Ready, Forced, RunwaysSettled;
+        public DateTime? SettledAt;
+        public readonly List<(string item, bool done, string note)> Items = new();
+        public double Secs => (DateTime.UtcNow - Started).TotalSeconds;
+    }
+    private Prep? _prep;
+
+    /// <summary>Skip the rest of the preparation and start the traffic now.</summary>
+    public void StartNow() { lock (_gate) if (_prep is { Ready: false } p) p.Forced = true; }
+
+    private void UpdatePrep(TrafficWorld w)
+    {
+        var p = _prep;
+        if (p is null || p.Ready || p.Icao != w.Apt.Icao) return;
+        var icao = w.Apt.Icao;
+        var us = icao.Length == 4 && icao[0] == 'K';
+        var t = p.Secs;
+        p.Items.Clear();
+        void Item(string name, bool done, string note) => p.Items.Add((name, done, note));
+        Item("Airport layout", true, $"{w.Apt.Spots.Count} parking spots, {w.Apt.Data.Departures.Count} SIDs, {w.Apt.Data.Arrivals.Count} STARs");
+        Item("Real schedule", w.Schedule is not null || t > 90, w.Schedule is { } sd ? $"{sd.Legs.Count} flights a week ({sd.Source})" : t > 90 ? "none found, made-up flights" : "reading the AIG schedule…");
+        var atisDone = Atis.Known(icao) || t > 45;
+        Item("Live ATIS", atisDone, !us ? "none (not a US airport)" : Atis.Known(icao) ? (w.Atis.CodeArr is { } c ? $"info {c}" : "this airport publishes none") : atisDone ? "didn't answer" : "asking…");
+        var metarDone = metar.Known(icao) || t > 45;
+        Item("METAR wind", metarDone, metar.Wind(icao) is { } mw ? $"{(mw.dir is { } d ? $"{d:000}°" : "variable")} at {mw.kt:0} kt" : metarDone ? "not available, the sim's wind" : "asking…");
+        var aaupDone = !us || Aaup.Get(icao) is not null || t > 180;
+        Item("FAA runway rules (AAUP)", aaupDone, !us ? "none (not a US airport)" : w.Rules is { Charts.Length: > 0 } ru ? ru.Describe() : aaupDone ? "none published" : "downloading the charts…");
+        var topsDone = !us || w.SidTops is not null || t > 180;
+        Item("SID top altitudes (charts)", topsDone, !us ? "from the STARs (not a US airport)" : w.SidTops is { Count: > 0 } st ? $"{st.Count} SIDs" : topsDone ? "none on the charts, from the STARs" : "reading the departure charts…");
+        var learnDone = history.Current(icao) || history.Gave(icao) || t > 900 || (!history.Learning(icao) && t > 60 && history.Profile(icao) is null && !history.Status.StartsWith("learning"));
+        Item("Real traffic (adsb.lol)", learnDone, history.Current(icao) ? $"learned from {history.Profile(icao)!.Day}" : learnDone ? "not available" : history.Learning(icao) ? history.Status : "starting…");
+        // The runways: once everything they're decided from is in, settled once.
+        var inputs = atisDone && metarDone && aaupDone && learnDone;
+        if (inputs && !p.RunwaysSettled) { w.SelectRunways(true); p.RunwaysSettled = true; p.SettledAt = DateTime.UtcNow; }
+        Item("Runways in use", p.RunwaysSettled, p.RunwaysSettled ? $"landing {string.Join("/", w.ArrRwys.Select(e => e.Ident))}, departing {string.Join("/", w.DepRwys.Select(e => e.Ident))}" : "waiting for the ATIS, wind and rules…");
+        var flowDone = p.RunwaysSettled && (w.FlowReady || (DateTime.UtcNow - p.SettledAt!.Value).TotalSeconds > 60);
+        Item("Taxi flow", flowDone, w.Flow is { Full: true } fl ? $"{fl.OneWay} one-way stretches{(fl.RealStretches > 0 ? $", {fl.RealStretches} from real taxi tracks" : "")}" : flowDone ? "not worked out" : p.RunwaysSettled ? "rehearsing the taxi routes…" : "after the runways");
+        var pushDone = p.Survey is null || p.Survey.IsCompleted || t > 120;
+        Item("Pushback plans", pushDone, pushDone ? "planned" : "planning every stand…");
+        if (p.Items.All(i => i.done) || p.Forced)
+        {
+            p.Ready = true;
+            w.Automatic = true;
+            foreach (var n in _neighbours) n.Automatic = true;
+            log.LogInformation("{icao} prepared in {s:0} s{forced}: {items}", icao, t, p.Forced ? " (started early by the user)" : "",
+                string.Join("; ", p.Items.Select(i => $"{i.item}: {(i.done ? "" : "skipped, ")}{i.note}")));
+        }
+    }
+
     // ------------------------------------------------------------------ what LAIA Sim draws
 
     public List<TrafficAircraft> Snapshot()
@@ -84,7 +147,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     /// with its gates and taxiing, neighbours on their runways). At most 50, nearest first — ground traffic close to
     /// the user and aircraft near the user's level win over distant ones.
     /// </summary>
-    private HashSet<string>? DrawnIds()
+    private HashSet<string>? DrawnIds(bool forMap = false)
     {
         var sim = state.Sim;
         if (sim is null || !sim.Connected || DateTime.UtcNow - state.SimUpdatedUtc > TimeSpan.FromSeconds(30)) return null;
@@ -100,8 +163,27 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 if (!f.OnGround && dz > DrawBandFt) continue;
                 cands.Add((f.Id, nm + dz / 2000));
             }
-        return cands.OrderBy(c => c.score).Take(MaxDrawn).Select(c => c.id).ToHashSet();
+        var want = cands.OrderBy(c => c.score).Take(MaxDrawn).Select(c => c.id).ToList();
+        if (forMap) return want.Where(_drawnLast.Contains).ToHashSet();   // the map shows what the sim has; it doesn't add
+        // Brought in gradually (user: no "big bang"): aircraft already drawn stay; new ones join at about 4 a second,
+        // nearest first, so a level change or a restart never makes the sim create dozens at once.
+        var now = DateTime.UtcNow;
+        _drawBudget = Math.Min(4, _drawBudget + (now - _drawBudgetAt).TotalSeconds * 4);
+        _drawBudgetAt = now;
+        var res = new HashSet<string>();
+        foreach (var id in want)
+        {
+            if (_drawnLast.Contains(id)) { res.Add(id); continue; }
+            if (_drawBudget < 1) continue;
+            _drawBudget -= 1;
+            res.Add(id);
+        }
+        _drawnLast = res;
+        return res;
     }
+    private HashSet<string> _drawnLast = new();
+    private double _drawBudget = 4;
+    private DateTime _drawBudgetAt = DateTime.UtcNow;
 
     private IEnumerable<TrafficWorld> Worlds()
     {
@@ -142,7 +224,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         {
             var w = _world;
             var flights = new List<object>();
-            var drawnIds = DrawnIds();
+            var drawnIds = DrawnIds(forMap: true);
             foreach (var wd in Worlds())
                 foreach (var f in wd.Flights)
                 {
@@ -329,6 +411,8 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
             return new
             {
                 level = (LevelName),
+                preparing = _prep is { Ready: false } pp && w is not null && pp.Icao == w.Apt.Icao
+                    ? new { seconds = (int)pp.Secs, items = pp.Items.Select(i => new { i.item, i.done, i.note }).ToList() } : null,
                 airport = w?.Apt.Icao,
                 airportName = w?.Apt.Name,
                 layout = w is null ? null : $"{w.Apt.Spots.Count} parking spots, {w.Apt.Data.Departures.Count} SIDs, {w.Apt.Data.Arrivals.Count} STARs, {w.Apt.Data.Approaches.Count} approaches",
@@ -466,7 +550,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
             if (_neighbours.Any(n => n.Apt.Icao == icao)) continue;
             var nb = new TrafficWorld(model, source)
             {
-                RunwayOnly = true, Level = Level, ClockFrom = () => main.ScheduleClock, ClockOwner = main,
+                RunwayOnly = true, Level = Level, ClockFrom = () => main.ScheduleClock, ClockOwner = main, Automatic = _prep?.Ready ?? true,
                 Log = s => log.LogInformation("{msg}", s),
             };
             nb.Wind = main.Wind;
@@ -497,13 +581,14 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 // Wait (up to a minute) for the list of installed models, so the first aircraft use real liveries.
                 if (!source.CatalogKnown && _started.Elapsed < TimeSpan.FromSeconds(60)) return;
                 if (_world is not null && _world.Flights.Count > 0) _retiring.Add(_world);
-                _world = new TrafficWorld(n.model, source) { Level = Level, Log = s => log.LogInformation("{msg}", s) };
+                _world = new TrafficWorld(n.model, source) { Level = Level, Automatic = false, Log = s => log.LogInformation("{msg}", s) };
+                _prep = new Prep(n.model.Icao);
                 _world.Wind = new Wind(sim.WindDirection, sim.WindSpeed);
                 _world.SelectRunways(true);
                 log.LogInformation("Traffic airport: {icao} {name} ({nm:0} nm away); taxi map {cal}; {desc}", n.model.Icao, n.model.Name, n.nm, n.model.Calibration, n.model.Describe());
                 _testWorld = null;
                 var w = _world;
-                _ = Task.Run(() =>
+                _prep.Survey = Task.Run(() =>
                 {
                     try { var r = w.PushbackSurvey(); log.LogInformation("{icao}: {survey}", w.Apt.Icao, r); }
                     catch (Exception ex) { log.LogWarning("Pushback survey failed: {msg}", ex.Message); }
@@ -575,6 +660,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                             if (w.AtisLanding.Count == 0) { var lr = liveRunways.Get(w.Apt); w.LiveLanding = lr.landing; w.LiveDeparting = lr.departing; }
                             else { w.LiveLanding = new(); w.LiveDeparting = new(); }
                             w.Locate ??= code => worldAirports.Find(code) is { } p ? (p.lat, p.lon) : null;
+                            if (w == _world) UpdatePrep(w);
                         }
                         w.WeekMinute = live && sim!.ZuluWeekMinute >= 0 ? sim.ZuluWeekMinute : WeekMinuteNow();
                         // Don't run traffic while nobody is flying (sim closed): it would all depart unseen.
