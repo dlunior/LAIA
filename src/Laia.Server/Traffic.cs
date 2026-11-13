@@ -203,16 +203,23 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 if (f.Done) continue;
                 var (lat, lon) = w.Apt.Map.ToLatLon(f.Pos);
                 var nm = Geo2.DistanceNm(sim.Lat, sim.Lon, lat, lon);
-                if (nm > DrawRadiusNm) continue;
+                // A little give for what's already drawn (no flicker at the edges): 3 nm and 1,000 ft beyond.
+                var drawn = _drawnLast.Contains(f.Id);
+                if (nm > DrawRadiusNm + (drawn ? 3 : 0)) continue;
                 var dz = Math.Abs(f.AltFt - sim.AltitudeFt);
-                if (!f.OnGround && dz > DrawBandFt) continue;
+                if (!f.OnGround && dz > DrawBandFt + (drawn ? 1000 : 0)) continue;
                 // What matters first: moving traffic (in the air, taxiing, on the runway) before aircraft parked at a
                 // gate — a parked aircraft counts as 25 nm further away (MLB's arrivals 50 nm out weren't drawn while
                 // MCO's parked aircraft filled the 80).
                 var parked = f.OnGround && f.Phase is "parked" or "boarding" or "at gate";
                 cands.Add((f.Id, nm + dz / 2000 + (parked ? 25 : 0)));
             }
-        var want = cands.OrderBy(c => c.score).Take(MaxDrawn).Select(c => c.id).ToList();
+        // The nearest that matter, MaxDrawn of them; one already drawn stays while it's within the first MaxDrawn + 8
+        // (it isn't swapped out the moment another comes a little closer).
+        var ordered = cands.OrderBy(c => c.score).Select(c => c.id).ToList();
+        var keep = ordered.Take(MaxDrawn + 8).Where(_drawnLast.Contains).ToHashSet();
+        var want = ordered.Where(id => keep.Contains(id) || !_drawnLast.Contains(id)).Take(Math.Max(MaxDrawn, keep.Count)).ToList();
+        foreach (var id in keep) if (!want.Contains(id)) want.Add(id);
         if (forMap) return want.Where(_drawnLast.Contains).ToHashSet();   // the map shows what the sim has; it doesn't add
         // Brought in gradually (user: no "big bang"; 4 a second still looked like all at once): aircraft already drawn
         // stay; new ones join at one a second, nearest first, so a busy airport fills over about a minute.
@@ -774,6 +781,8 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                             if (w.AtisLanding.Count == 0) { var lr = liveRunways.Get(w.Apt); w.LiveLanding = lr.landing; w.LiveDeparting = lr.departing; }
                             else { w.LiveLanding = new(); w.LiveDeparting = new(); }
                             w.Locate ??= code => worldAirports.Find(code) is { } p ? (p.lat, p.lon) : null;
+                            var self = w;
+                            w.CallsignInUse ??= cs => Worlds().Any(o => o != self && o.Flights.Any(f => !f.Done && f.Kind != "parked" && f.Callsign == cs));
                             if (w == _world) UpdatePrep(w);
                         }
                         w.WeekMinute = live && sim!.ZuluWeekMinute >= 0 ? sim.ZuluWeekMinute : WeekMinuteNow();

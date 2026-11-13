@@ -934,6 +934,7 @@ public sealed partial class TrafficWorld
             {
                 var u = Until(l.DepMin);
                 if (u > -12 || u < -16 || _done.Contains(Key(l, 'D'))) continue;
+                if (CallsignBusy(l.Callsign)) continue;
                 if (l.Reg.Length > 0 && Flights.Any(f => !f.Done && f.Reg == l.Reg)) continue;
                 if (SpawnLinedUp(l) is not null) { _done.Add(Key(l, 'D')); active++; Movements++; }
             }
@@ -941,6 +942,7 @@ public sealed partial class TrafficWorld
             {
                 var u = Until(l.ArrMin);
                 if (u > 50 || u < 1 || _done.Contains(Key(l, 'A'))) continue;
+                if (CallsignBusy(l.Callsign)) continue;
                 if (l.Reg.Length > 0 && Flights.Any(f => !f.Done && f.Reg == l.Reg)) continue;
                 var np = NetworkPosition(l);
                 if (np is null) continue;
@@ -1036,6 +1038,7 @@ public sealed partial class TrafficWorld
             // Arrivals already on their way in.
             foreach (var l in arrs.Where(l => Until(l.ArrMin) is >= 1 and <= 13).OrderBy(l => Until(l.ArrMin)))
             {
+                if (CallsignBusy(l.Callsign)) continue;
                 if (l.Reg.Length > 0 && Flights.Any(f => !f.Done && f.Reg == l.Reg)) continue;
                 // Spread out along the approach, clear of every arrival already flying, rather than on top of one.
                 var plan = PlanArrival(l.Dep, l.Type);
@@ -1055,7 +1058,9 @@ public sealed partial class TrafficWorld
         {
             var u = Until(l.DepMin);
             if (u > 3 || u < -15) continue;
-            if (!_done.Add(Key(l, 'D'))) continue;
+            if (_done.Contains(Key(l, 'D'))) continue;
+            if (CallsignBusy(l.Callsign)) continue;   // the same flight number still flying: this one waits
+            _done.Add(Key(l, 'D'));
             if (active >= maxActive) { Log($"{l.Callsign}: skipped (traffic limit)"); continue; }
             var f = Flights.FirstOrDefault(x => x.Reg == l.Reg && x.Reg.Length > 0 && x.Kind == "parked" && x.Phase == "parked" && x.Spot is not null);
             if (f is null)
@@ -1074,6 +1079,7 @@ public sealed partial class TrafficWorld
             if (u > 75 || u < 1) continue;
             if (l.Reg.Length > 0 && Flights.Any(f => !f.Done && f.Reg == l.Reg)) continue;   // that airframe is still around
             if (_done.Contains(Key(l, 'A'))) continue;
+            if (CallsignBusy(l.Callsign)) continue;
             if (u > 13 || NetworkPosition(l) is not null)
             {
                 var np = NetworkPosition(l);
@@ -4156,6 +4162,15 @@ public sealed partial class TrafficWorld
 
     private int _climbStops, _losCount, _releases, _heldAtTop, _descentStops, _losBetween;
     private double _heldSec;
+
+    /// <summary>Whether a callsign is flying at another airport LAIA runs (set by the server).</summary>
+    public Func<string, bool>? CallsignInUse { get; set; }
+
+    /// <summary>
+    /// A callsign already in use (user: never two aircraft called JBU1728 at once — AIG gives one flight number to
+    /// several legs, and two airframes could fly it at the same time): the next leg waits until the first is done.
+    /// </summary>
+    private bool CallsignBusy(string cs) => cs.Length > 0 && (Flights.Any(f => !f.Done && f.Kind != "parked" && f.Callsign == cs) || (CallsignInUse?.Invoke(cs) ?? false));
 
     /// <summary>For a neighbouring field: the main airport's STARs, whose restrictions apply to a shared STAR's fixes.</summary>
     public List<Procedure>? SharedArrivals { get; set; }
