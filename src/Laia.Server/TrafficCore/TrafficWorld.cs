@@ -213,6 +213,8 @@ public sealed partial class TrafficWorld
     public V2? UserPos { get; set; }
     public bool UserOnGround { get; set; }
     public bool Automatic { get; set; } = true;
+    /// <summary>While the airport is being prepared: no runways chosen until the ATIS, wind and rules are in.</summary>
+    public bool HoldRunways { get; set; }
     public int Movements { get; private set; }
     /// <summary>The airport's real schedule; when set, traffic follows it instead of made-up flights.</summary>
     public ScheduleData? Schedule { get; set; }
@@ -467,7 +469,7 @@ public sealed partial class TrafficWorld
     public void Step(double dt)
     {
         Time += dt;
-        if (ArrRwy is null || Time - _lastRunwayCheck > 120) { SelectRunways(); _lastRunwayCheck = Time; }
+        if (!HoldRunways && (ArrRwy is null || Time - _lastRunwayCheck > 120)) { SelectRunways(); _lastRunwayCheck = Time; }
         UpdateTaxiFlow();
         foreach (var f in Flights)
         {
