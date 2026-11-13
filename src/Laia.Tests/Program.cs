@@ -1338,6 +1338,31 @@ Console.WriteLine("== Published altitude restrictions on the STAR are met at the
     }
 }
 
+Console.WriteLine("== Taken over mid-descent just before a high restriction (MCO WHOVL: 9,000–14,000 ft, max 250 kt) — still met");
+{
+    var nm = Geo2.MPerNm;
+    var data = TestAirport.Build(false);
+    var star = data.Arrivals.First(a => a.Name == "ARRVL1");
+    star.Legs[1].AltDesc = 4; star.Legs[1].Alt1Ft = 14000; star.Legs[1].Alt2Ft = 9000; star.Legs[1].SpeedKt = 250;
+    var world = new TrafficWorld(new AirportModel(data), new TestSource(), seed: 5) { Automatic = false, Wind = new Wind(270, 10) };
+    world.SelectRunways(true);
+    Laia.Common.Airports.ScheduleLeg L() => new() { Airline = "WJA", Operator = "WJA", Type = "B738", Reg = "C-FWJA", Flight = "1272", Dep = "CYYZ", Arr = "TEST" };
+    // 12 nm before MIDDL (18, -12) on the way from FARRR (30, -30), at 17,500 ft, as the session start puts it.
+    var midd = new V2(18 * nm, -12 * nm); var farr = new V2(30 * nm, -30 * nm);
+    var f = world.SpawnArrival(0, false, L(), entry: (midd + (farr - midd).Unit * (12 * nm), 17500, 37000))!;
+    var fix = f.AltLimits.FirstOrDefault(c => c.Max == 14000);
+    var startAlt = f.AltFt;
+    double crossed = double.NaN, crossedKt = double.NaN;
+    for (var t = 0.0; t < 1800 && double.IsNaN(crossed); t += 0.5)
+    {
+        world.Step(0.5);
+        if (fix.S > 0 && f.S >= fix.S) { crossed = f.AltFt; crossedKt = f.Ias; }
+    }
+    Console.WriteLine($"  starts at {startAlt:0} ft (was 17,500); crosses MIDDL at {crossed:0} ft, {crossedKt:0} kt");
+    Check(crossed <= 14150 && crossed >= 8900, "it crosses between 9,000 and 14,000 ft");
+    Check(crossedKt <= 255, "at or below 250 kt");
+}
+
 Console.WriteLine("== After a go-around, the aircraft comes back around and lands normally");
 {
     var apt = new AirportModel(TestAirport.Build(false));

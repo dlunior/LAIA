@@ -1250,7 +1250,12 @@ public sealed partial class TrafficWorld
             // With a speed limit at the same fix, get down a few miles early so there's level flight to slow in
             // (a jet can't slow and descend at once): about 1 nm per 10 kt below 250, plus a mile.
             var kt = f.SpeedLimits.Where(sl => Math.Abs(sl.S - c.S) < 100).Select(sl => sl.Kt).DefaultIfEmpty(0).Min();
-            var slowNm = kt > 0 && kt < 250 ? (250 - kt) / 10 + 1 : 0;
+            // Above 10,000 ft it's coming down at its descent speed (280 kt for jets), not 250: a "max 250 kt" fix up
+            // there needs its level piece too (MCO WHOVL "9,000–14,000, max 250": taken over 12 nm before it at
+            // 17,500 ft and 280 kt, WJA1272 crossed at 13,000–14,300 ft and 254–280 kt every session).
+            var high = c.Max > 10500 || (c.Max <= 0 && c.Min > 10500);
+            var from = high ? (f.P.Family == "turboprop" ? 230 : 280) : 250;
+            var slowNm = kt > 0 && kt < from ? (from - kt) / 10 + 1 : 0;
             if (c.Max > 0) hi = Math.Min(hi, c.Max + Math.Max(0, ahead - slowNm) * 300);
             if (c.Min > 0) lo = Math.Max(lo, c.Min);
         }
