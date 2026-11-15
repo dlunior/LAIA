@@ -30,6 +30,11 @@ public sealed class Stop
     public int Runway = -1;     // runway being crossed, or -1
     public double ExitS;        // distance at which the runway is clear again
     public bool Cleared;
+    /// <summary>When it started waiting at this hold line (NaN: not waiting), and whether that wait was logged.</summary>
+    public double WaitSince = double.NaN;
+    public bool WaitLogged, Rerouted;
+    /// <summary>When it was cleared across; a crossing that hasn't moved on gives the runway back.</summary>
+    public double ClearedAt = double.NaN, ClearedS;
 }
 
 public sealed class Flight
@@ -3911,6 +3916,12 @@ public sealed partial class TrafficWorld
             // Crossing: release the runway once past the far side.
             var st = f.Stops.FirstOrDefault(s => s.Runway == f.Reserve && s.Cleared);
             if (st is null || f.S > st.ExitS) f.Reserve = -1;
+            // Cleared but not moving on (stopped before the runway behind something): give the runway back and wait
+            // at the hold line again, rather than keeping every other crossing waiting.
+            else if (!double.IsNaN(st.ClearedAt) && Time - st.ClearedAt > 30 && f.S < st.S + 5 && f.Gs < 1 && f.OnRunway != f.Reserve)
+            {
+                st.Cleared = false; st.ClearedAt = double.NaN; f.Reserve = -1;
+            }
         }
     }
 
@@ -3945,7 +3956,12 @@ public sealed partial class TrafficWorld
         foreach (var st in f.Stops)
         {
             if (st.Cleared || st.S < f.S - 1) continue;
-            if (st.S - f.S < 80 && CrossingAllowed(st.Runway, f)) { st.Cleared = true; f.Reserve = st.Runway; continue; }
+            if (st.S - f.S < 80)
+            {
+                var why = CrossingBlock(st, f);
+                if (why is null) { st.Cleared = true; st.ClearedAt = Time; st.ClearedS = f.S; f.Reserve = st.Runway; st.WaitSince = double.NaN; continue; }
+                if (f.S >= st.S - 3) WaitAtCrossing(f, st, why);
+            }
             hold = st;
             break;
         }
@@ -4013,12 +4029,60 @@ public sealed partial class TrafficWorld
         return false;
     }
 
-    private bool CrossingAllowed(int runway, Flight f)
+    private bool CrossingAllowed(int runway, Flight f) => CrossingBlock(new Stop { Runway = runway, S = f.S, ExitS = f.S }, f) is null;
+
+    private string RunwayName(int runway) => string.Join("/", Apt.Ends.Where(e => e.Runway == runway).Select(e => e.Ident));
+
+    /// <summary>
+    /// Why it may not cross the runway now (null: it may). Besides the runway itself (an aircraft or the user on it, an
+    /// arrival within a minute, a departure lined up), the far side must be clear: it doesn't go onto a runway it
+    /// can't get off again (KORD, 15 Nov: "everyone seems to be holding short of 9R" — one crossing could stop
+    /// half-way, on the runway, behind an aircraft waiting on the far side, keeping the runway reserved and every other
+    /// crossing waiting behind it).
+    /// </summary>
+    private string? CrossingBlock(Stop st, Flight f)
     {
-        if (RunwayBusy(runway, f)) return false;
-        if (ArrivalEta(runway) < 60) return false;
-        if (Flights.Any(o => o.Rwy?.Runway == runway && o.Phase is "lined up" or "takeoff roll")) return false;
-        return true;
+        var runway = st.Runway;
+        if (UserOnRunway(runway)) return "your aircraft on the runway";
+        foreach (var o in Flights)
+            if (o != f && !o.Done && (o.Reserve == runway || (o.OnRunway == runway && !(o.Kind == "departure" && !o.OnGround))))
+                return $"{o.Callsign} {(o.Reserve == runway && o.OnRunway != runway ? "crossing" : "on the runway")}";
+        if (ArrivalEta(runway) is var eta && eta < 60) return $"an arrival {eta:0} s out";
+        if (Flights.FirstOrDefault(o => o.Rwy?.Runway == runway && o.Phase is "lined up" or "takeoff roll") is { } dep) return $"{dep.Callsign} departing";
+        // Room on the far side: nobody on its way between the runway and 60 m past where it's clear of it.
+        if (f.Path is { } path && st.ExitS > st.S)
+        {
+            var end = Math.Min(path.Length, st.ExitS + 60);
+            foreach (var o in Flights)
+            {
+                if (o == f || o.Done || !o.OnGround || o.Phase is "parked" or "boarding") continue;
+                for (var d = st.S; d <= end; d += 15)
+                    if ((path.At(d).p - o.Pos).Length < 25) return $"{o.Callsign} in the way on the far side";
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Waiting at a hold line: logged after a minute with the reason. Two aircraft waiting for each other across the
+    /// same runway (each in the other's way on the far side) can't both wait: after a minute the one waiting longer
+    /// takes another way round.
+    /// </summary>
+    private void WaitAtCrossing(Flight f, Stop st, string why)
+    {
+        if (double.IsNaN(st.WaitSince)) st.WaitSince = Time;
+        var waited = Time - st.WaitSince;
+        if (waited > 60 && !st.WaitLogged) { st.WaitLogged = true; Log($"{f.Callsign}: holding short of {RunwayName(st.Runway)} for {waited:0} s: {why}"); }
+        if (waited > 60 && !st.Rerouted && why.EndsWith("in the way on the far side"))
+        {
+            var name = why[..why.IndexOf(' ')];
+            if (Flights.FirstOrDefault(o => o.Callsign == name && !o.Done) is { } other
+                && other.Stops.Any(s2 => s2.Runway == st.Runway && !s2.Cleared && !double.IsNaN(s2.WaitSince) && s2.WaitSince >= st.WaitSince))
+            {
+                st.Rerouted = true;
+                if (Reroute(f, other)) Log($"{f.Callsign}: {other.Callsign} waiting across {RunwayName(st.Runway)} the other way: taking another way round");
+            }
+        }
     }
 
     /// <summary>Another aircraft (or the user) ahead and close: wait. Breaks head-on standoffs after a while.</summary>
