@@ -1137,6 +1137,53 @@ Console.WriteLine("== The user as traffic: departures level below the user, arri
     Check(minDz >= 900, "an arrival stays 1,000 ft above the user while near");
 }
 
+Console.WriteLine("== En-route separation of the whole-sky flights (RVSM: 1,000 ft or 5 nm)");
+{
+    Laia.Server.TrafficCore.NetLeg Leg(string reg, string fl, int dep, int arr) => new()
+    {
+        Airline = "DAL", Operator = "DAL", Type = "A320", Reg = reg, Flight = fl, Dep = "KAAA", Arr = "KBBB", Located = true,
+        DepLat = 40, DepLon = -100, ArrLat = 40, ArrLon = -90, DepElev = 500, ArrElev = 500, DepMin = dep, ArrMin = arr,
+        DistNm = Geo2.DistanceNm(40, -100, 40, -90),
+    };
+    double Worst(List<Laia.Server.TrafficCore.NetLeg> legs, List<EnRouteSeparation.Obstacle> obs, double from, double to, out int limits, out List<string> evs)
+    {
+        var sep = new EnRouteSeparation();
+        evs = new List<string>();
+        var worst = double.MaxValue;
+        for (var c = from; c < to; c += 2.0 / 60)
+        {
+            foreach (var e in sep.Update(c, 40, -95, legs, obs)) evs.Add($"{e.Leg.Callsign} {e.Text} for {e.Who}");
+            var ps = legs.Select(l => NetworkModel.At(l, c)).ToList();
+            for (var i = 0; i < legs.Count; i++)
+            {
+                if (ps[i] is not { } a || a.GsKt < 60) continue;
+                var ai = sep.Alt(legs[i], c, a.AltFt);
+                for (var j = i + 1; j < legs.Count; j++)
+                    if (ps[j] is { } b && b.GsKt >= 60 && Geo2.DistanceNm(a.Lat, a.Lon, b.Lat, b.Lon) < 5)
+                        worst = Math.Min(worst, Math.Abs(ai - sep.Alt(legs[j], c, b.AltFt)));
+                foreach (var o in obs)
+                    if (Geo2.DistanceNm(a.Lat, a.Lon, o.Lat, o.Lon) < 5) worst = Math.Min(worst, Math.Abs(ai - o.AltFt));
+            }
+        }
+        limits = sep.Limits;
+        return worst;
+    }
+    // A faster flight catching a slower one up on the same route and level.
+    var slow = Leg("N1", "100", 600, 700);
+    var fast = Leg("N2", "200", 615, 690);
+    var w0 = Worst(new() { slow, fast }, new(), 600, 700, out var n0, out var ev0);
+    foreach (var e in ev0.Take(3)) Console.WriteLine("  " + e);
+    Console.WriteLine($"  catching up at the same level: closest {w0:N0} ft within 5 nm, {n0} limits given");
+    Check(n0 > 0 && w0 >= 950, "a flight catching another up at its level is moved 2,000 ft (keeps 1,000 ft within 5 nm)");
+    // An aircraft (the user, an airport's) sitting at the cruise level on the route.
+    var c0 = NetworkModel.At(slow, 650)!;
+    var obstacle = new EnRouteSeparation.Obstacle("UAL1196 (you)", c0.Lat, c0.Lon + 1.5, 270, 0, c0.AltFt, 0, 6);
+    var w1 = Worst(new() { slow }, new() { obstacle }, 600, 700, out var n1, out var ev1);
+    foreach (var e in ev1.Take(2)) Console.WriteLine("  " + e);
+    Console.WriteLine($"  an aircraft at its level on the route: closest {w1:N0} ft within 5 nm, {n1} limits given");
+    Check(n1 > 0 && w1 >= 950, "a whole-sky flight moves 1,000 ft for an aircraft at its level in its way");
+}
+
 Console.WriteLine("== M6: learning an airport from real tracks (synthetic adsb.lol-style traces), and flying what was learned");
 {
     var nm = Geo2.MPerNm;

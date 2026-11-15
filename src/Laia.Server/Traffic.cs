@@ -237,7 +237,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
             var nm = Geo2.DistanceNm(sim.Lat, sim.Lon, p.Lat, p.Lon);
             var drawn = _drawnLast.Contains(l.Id);
             if (nm > DrawRadiusNm + (drawn ? 3 : 0)) continue;
-            var dz = Math.Abs(p.AltFt + _netAltOff.GetValueOrDefault(l.Id) - sim.AltitudeFt);
+            var dz = Math.Abs(NetAlt(l, clock, p.AltFt) - sim.AltitudeFt);
             if (dz > DrawBandFt + (drawn ? 1000 : 0)) continue;
             cands.Add((l.Id, nm + dz / 2000));
         }
@@ -321,65 +321,42 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
             foreach (var k in _alias.Keys.Where(k => !live.Contains(k)).ToList()) _alias.Remove(k);
         }
         if (_netDrawnRegs.Count > 300) _netDrawnRegs.Clear();
-        SeparateFromUser(sim, res);
+        SeparateEnRoute(sim, res);
         return res;
     }
 
-    private readonly Dictionary<string, double> _netAltOff = new(), _netAltWant = new();
+    private readonly EnRouteSeparation _sep = new();
 
-    /// <summary>
-    /// En-route traffic keeps 1,000 ft from the user (user, 14 Nov: "I did get a TA/RA at cruise"). The whole-sky flights
-    /// fly their schedule's straight lines and levels, so one could sit at the user's level on a crossing or head-on
-    /// track. Each flight near the user is projected 10 minutes ahead against the user's own track, speed and climb or
-    /// descent; where they'd come within 6 nm and 1,000 ft, the flight is given a level 1,000 ft above or below the
-    /// user at that point (the side it's already on), as ATC would. It changes level at 1,500 ft/min — usually decided
-    /// while it's up to 100 nm away, before it's drawn (at 60 nm) — and returns to its own level once the user is well clear.
-    /// </summary>
-    private void SeparateFromUser(AircraftState sim, List<Laia.Server.TrafficCore.NetLeg> legs)
+    /// <summary>A whole-sky flight's altitude as drawn (its schedule's altitude, unless separation changed it).</summary>
+    private double NetAlt(Laia.Server.TrafficCore.NetLeg l, double clock, double baseAlt) => _sep.Alt(l, clock, baseAlt);
+
+    /// <summary>Separation for the whole-sky flights near the user (see EnRouteSeparation): against each other, the
+    /// user and the airports' aircraft.</summary>
+    private void SeparateEnRoute(AircraftState sim, List<Laia.Server.TrafficCore.NetLeg> legs)
     {
-        var live = legs.Select(l => l.Id).ToHashSet();
-        foreach (var k in _netAltOff.Keys.Where(k => !live.Contains(k)).ToList()) { _netAltOff.Remove(k); _netAltWant.Remove(k); }
-        if (sim.OnGround) return;
-        var nm = Geo2.MPerNm;
-        var map = new LocalMap(sim.Lat, sim.Lon);
-        var uv = V2.FromBearing(sim.HeadingTrue, sim.GroundSpeed * Geo2.MpsPerKt);
-        var clock = NetClock;
-        foreach (var l in legs)
-        {
-            var off = _netAltOff.GetValueOrDefault(l.Id);
-            double? want = null;
-            for (var t = 0.0; t <= 600; t += 15)
+        var obs = new List<EnRouteSeparation.Obstacle>();
+        if (!sim.OnGround)
+            obs.Add(new((UserCallsignOf(sim) is { Length: > 0 } cs ? cs : "your aircraft") + " (you)", sim.Lat, sim.Lon, sim.HeadingTrue, sim.GroundSpeed, sim.AltitudeFt, sim.VerticalSpeed, 6));
+        foreach (var w in Worlds())
+            foreach (var f in w.Flights)
             {
-                if (NetworkModel.At(l, clock + t / 60) is not { } p) break;
-                var lat = (map.ToXY(p.Lat, p.Lon) - uv * t).Length;
-                if (lat > 6 * nm) continue;
-                var uAlt = sim.AltitudeFt + Math.Clamp(sim.VerticalSpeed, -4000, 4000) * Math.Min(t, 120) / 60;
-                var dz = p.AltFt + off - uAlt;
-                if (Math.Abs(dz) >= 1000) continue;
-                var side = dz != 0 ? Math.Sign(dz) : (p.AltFt >= uAlt ? 1 : -1);
-                want = uAlt + side * 1000 - p.AltFt;
-                break;
+                if (f.Done || f.OnGround) continue;
+                var (la, lo) = w.Apt.Map.ToLatLon(f.Pos);
+                if (Geo2.DistanceNm(sim.Lat, sim.Lon, la, lo) > DrawRadiusNm + 60) continue;
+                obs.Add(new($"{f.Callsign} ({w.Apt.Icao})", la, lo, f.Heading, f.Gs, f.AltFt, f.Vs, 5));
             }
-            if (want is null)
-            {
-                // Clear: back to its own level once the user is more than 10 nm away (and no longer in its way).
-                if (NetworkModel.At(l, clock) is { } now && Geo2.DistanceNm(sim.Lat, sim.Lon, now.Lat, now.Lon) > 10) want = 0;
-                else want = _netAltWant.GetValueOrDefault(l.Id);
-            }
-            _netAltWant[l.Id] = want.Value;
-            // Called every 2 s: 1,500 ft/min is 50 ft a step.
-            off += Math.Clamp(want.Value - off, -50, 50);
-            if (Math.Abs(off) < 1) _netAltOff.Remove(l.Id); else _netAltOff[l.Id] = off;
-        }
+        foreach (var e in _sep.Update(NetClock, sim.Lat, sim.Lon, legs, obs))
+            if (_drawnLast.Contains(e.Leg.Id) || e.Who.EndsWith("(you)"))
+                log.LogInformation("En route: {cs} {what} for {who}", e.Leg.Callsign, e.Text, e.Who);
     }
+
+    private string? UserCallsignOf(AircraftState sim) => _world?.UserCallsign is { Length: > 0 } c ? c : simBrief.Plan?.Callsign;
 
     private TrafficAircraft? EnRouteAircraft(Laia.Server.TrafficCore.NetLeg l, double clock)
     {
         if (NetworkModel.At(l, clock) is not { } p) return null;
-        var off = _netAltOff.GetValueOrDefault(l.Id);
-        var offWant = _netAltWant.GetValueOrDefault(l.Id);
-        var vs = (NetworkModel.At(l, clock + 0.25) is { } q ? (q.AltFt - p.AltFt) * 4 : 0) + Math.Clamp(offWant - off, -1500, 1500);
-        p = p with { AltFt = p.AltFt + off };
+        var vs = NetworkModel.At(l, clock + 0.25) is { } q ? (q.AltFt - p.AltFt) * 4 : 0;
+        if (_sep.Rate(l) is { } r) { vs = r; p = p with { AltFt = _sep.Alt(l, clock, p.AltFt) }; }
         var gs = p.GsKt;
         return new TrafficAircraft
         {
@@ -416,6 +393,17 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                     if (Geo2.DistanceNm(la, lo, w.Apt.Data.Lat, w.Apt.Data.Lon) > 80) continue;
                     list.Add(new TrafficWorld.Foreign(f.Callsign, o.Apt.Icao, f.Kind, w.Apt.Map.ToXY(la, lo), f.AltFt, f.Vs, f.Gs, f.Heading, f.Phase, o == _world));
                 }
+            }
+            // The whole-sky flights near the user too: the airports' departures stop their climbs below them and the
+            // arrivals their descents above (user, 15 Nov: separation for all traffic, not only the user).
+            var clock = NetClock;
+            foreach (var l in _enroute)
+            {
+                if (NetworkModel.At(l, clock) is not { } p) continue;
+                if (Geo2.DistanceNm(p.Lat, p.Lon, w.Apt.Data.Lat, w.Apt.Data.Lon) > 80) continue;
+                var a = NetAlt(l, clock, p.AltFt);
+                var vs = _sep.Rate(l) ?? (NetworkModel.At(l, clock + 0.25) is { } q ? (q.AltFt - p.AltFt) * 4 : 0);
+                list.Add(new TrafficWorld.Foreign(l.Callsign, "en route", vs < -300 ? "arrival" : "departure", w.Apt.Map.ToXY(p.Lat, p.Lon), a, vs, p.GsKt, p.Heading, p.Phase, true));
             }
             w.Others = list;
         }
@@ -537,7 +525,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
             list.Add(new
             {
                 id = p.Leg.Id, cs = p.Leg.Callsign, type = p.Leg.Type, airline = p.Leg.Airline, dep = p.Leg.Dep, arr = p.Leg.Arr,
-                lat = Math.Round(p.Lat, 4), lon = Math.Round(p.Lon, 4), alt = Math.Round(p.AltFt / 100) * 100, gs = Math.Round(p.GsKt),
+                lat = Math.Round(p.Lat, 4), lon = Math.Round(p.Lon, 4), alt = Math.Round(NetAlt(p.Leg, NetClock, p.AltFt) / 100) * 100, gs = Math.Round(p.GsKt),
                 hdg = Math.Round(p.Heading), phase = p.Phase, cruise = p.CruiseFt, eta = Math.Round(p.EtaMin), reg = p.Leg.Reg, title = p.Leg.Title,
                 drawn = _drawnLast.Contains(p.Leg.Id),
             });
