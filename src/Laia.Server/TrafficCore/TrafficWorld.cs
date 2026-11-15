@@ -35,6 +35,8 @@ public sealed class Stop
     public bool WaitLogged, Rerouted;
     /// <summary>When it was cleared across; a crossing that hasn't moved on gives the runway back.</summary>
     public double ClearedAt = double.NaN, ClearedS;
+    /// <summary>It has been on the runway it's crossing (so off it again means across).</summary>
+    public bool Entered;
 }
 
 public sealed class Flight
@@ -3915,7 +3917,12 @@ public sealed partial class TrafficWorld
         {
             // Crossing: release the runway once past the far side.
             var st = f.Stops.FirstOrDefault(s => s.Runway == f.Reserve && s.Cleared);
+            if (st is not null && f.OnRunway == f.Reserve) st.Entered = true;
             if (st is null || f.S > st.ExitS) f.Reserve = -1;
+            // Across and off the runway: it's the runway's no longer, even if it stops just past it (KORD, 15 Nov: an
+            // aircraft that had crossed 9R stopped in the queue for 9C, short of where 9R counted as clear, and kept 9R
+            // reserved — a line of departures held short of 9R behind it).
+            else if (st.Entered && f.OnRunway != f.Reserve) f.Reserve = -1;
             // Cleared but not moving on (stopped before the runway behind something): give the runway back and wait
             // at the hold line again, rather than keeping every other crossing waiting.
             else if (!double.IsNaN(st.ClearedAt) && Time - st.ClearedAt > 30 && f.S < st.S + 5 && f.Gs < 1 && f.OnRunway != f.Reserve)
