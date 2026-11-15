@@ -1154,7 +1154,7 @@ public sealed partial class TrafficWorld
             if (_done.Contains(Key(l, 'D'))) continue;
             if (CallsignBusy(l.Callsign)) continue;   // the same flight number still flying: this one waits
             _done.Add(Key(l, 'D'));
-            if (active >= maxActive) { Log($"{l.Callsign}: skipped (traffic limit)"); continue; }
+            if (active >= maxActive && !UnderShare("departure", maxActive)) { Log($"{l.Callsign}: skipped (traffic limit)"); continue; }
             var f = Flights.FirstOrDefault(x => x.Reg == l.Reg && x.Reg.Length > 0 && x.Kind == "parked" && x.Phase == "parked" && x.Spot is not null);
             if (f is null)
             {
@@ -1191,7 +1191,7 @@ public sealed partial class TrafficWorld
                 }
             }
             if (u > 13) continue;
-            if (active >= maxActive || objects >= maxObjects) { _done.Add(Key(l, 'A')); Log($"{l.Callsign}: skipped (traffic limit)"); continue; }
+            if ((active >= maxActive && !UnderShare("arrival", maxActive)) || objects >= maxObjects) { _done.Add(Key(l, 'A')); Log($"{l.Callsign}: skipped (traffic limit)"); continue; }
             // Start clear of every arrival already flying (a little later than scheduled if needed); if there's no
             // room yet, try again on the next step.
             var plan = PlanArrival(l.Dep, l.Type);
@@ -1209,6 +1209,14 @@ public sealed partial class TrafficWorld
             if (victim is not null) victim.Done = true;
         }
     }
+
+    /// <summary>
+    /// Departures and arrivals share the moving-aircraft limit: either kind still under half of it may start even when
+    /// the limit is reached (KATL at Medium, 15 Nov: arrivals filled the 14 moving slots, so in 50 minutes 27 aircraft
+    /// landed and 6 took off, 26 departures "skipped (traffic limit)").
+    /// </summary>
+    private bool UnderShare(string kind, int maxActive) =>
+        Flights.Count(f => f.Kind == kind && !f.Test && !f.Done && !Far(f) && !(kind == "departure" && f.Phase == "boarding")) < (maxActive + 1) / 2;
 
     private IEnumerable<AirportModel.ParkingSpot> UsableSpots()
     {
@@ -4317,6 +4325,10 @@ public sealed partial class TrafficWorld
         foreach (var o in OthersAndUser())
         {
             if (!o.Main || o.AltFt > f.AltFt + 500 || (o.Pos - f.Pos).Length > 20 * Geo2.MPerNm) continue;
+            // An arrival behind the user in the same runway's sequence is spaced by distance, not kept above (KATL,
+            // 15 Nov: DAL2266, behind the user for 08L, "descent stopped at 5,000 ft for DAL1196 (you) below" — it would
+            // end up high on the approach).
+            if (o.Phase == "user" && UserArr is { Rwy: { } ur } && f.Rwy?.Runway == ur.Runway) continue;
             double highest = double.MinValue; var conflict = false;
             for (var t = 0.0; t <= 120; t += 10)
             {
