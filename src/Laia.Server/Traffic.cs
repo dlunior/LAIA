@@ -987,7 +987,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                             else if (dNm < 15 && sim.AltitudeFt < w.Apt.ElevationFt + 5000) w.Wind = new Wind(sim.WindDirection, sim.WindSpeed);
                             w.UserPos = w.Apt.Map.ToXY(sim.Lat, sim.Lon);
                             w.UserOnGround = sim.OnGround;
-                            w.UserAltFt = sim.AltitudeFt; w.UserGs = sim.GroundSpeed; w.UserTrack = sim.HeadingTrue;
+                            w.UserAltFt = sim.AltitudeFt; w.UserGs = sim.GroundSpeed; w.UserTrack = sim.HeadingTrue; w.UserVs = sim.VerticalSpeed;
                             var plan = simBrief.Plan;
                             w.UserCallsign = plan?.Callsign is { Length: > 0 } pc ? pc : (sim.AtcAirline + " " + sim.AtcFlightNumber).Trim() is { Length: > 0 } ac ? ac : sim.AtcId;
                             w.UserType = plan?.Aircraft ?? "";

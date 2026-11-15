@@ -19,6 +19,7 @@ public sealed partial class TrafficWorld
 {
     /// <summary>The user's aircraft (set by the server each tick).</summary>
     public double UserAltFt { get; set; }
+    public double UserVs { get; set; }
     public double UserGs { get; set; }
     public double UserTrack { get; set; }
     public string UserCallsign { get; set; } = "";

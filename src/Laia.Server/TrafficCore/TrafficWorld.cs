@@ -110,6 +110,11 @@ public sealed class Flight
     public bool ClimbReleased;
     public string TopSource = "";
     public double TakeoffAt = double.NaN, TakeoffPred10 = double.NaN, TakeoffPred5 = double.NaN, ReadyAt = double.NaN;
+    /// <summary>Kept below the user at cruise (an arrival level with them starts down early); NaN: none.</summary>
+    public double UserCeiling = double.NaN;
+    /// <summary>Waiting at the runway for a release (an arrival being vectored across the way out); since when.</summary>
+    public double ReleaseWaitSince = double.NaN;
+    public string? ReleaseWaitFor;
     /// <summary>Held at the gate for its departure slot since (world time; NaN: not held), and whether that's over.</summary>
     public double GateHeldSince = double.NaN;
     public bool GateHoldDone;
@@ -1837,6 +1842,70 @@ public sealed partial class TrafficWorld
         return t;
     }
 
+    /// <summary>
+    /// The departure release (as a tower asks departure control before a take-off): no take-off into an arrival being
+    /// vectored across the way out, when the climb couldn't be stopped below it. Departure control never levels a
+    /// departure lower than 2,000 ft above the field, so at a high field with arrivals vectored low (CYYC, 14 Nov:
+    /// field 3,557 ft, arrivals at 6,500 ft, departures off 17R came within 2.6–2.9 nm and 900 ft of them four times)
+    /// the only way to keep them apart is to wait. The first 3½ minutes of the departure (line-up, roll, climb at
+    /// about 2,500 ft/min along its route) are checked against each vectored arrival along its own path; at most 4
+    /// minutes' wait, then it goes (logged).
+    /// </summary>
+    private bool Released(Flight f)
+    {
+        if (f.ReleaseWaitFor == "" || f.DepPlan is not { Count: > 0 } plan || f.Rwy is not { } rwy) return true;
+        var pts = new List<V2> { rwy.Threshold + rwy.Dir * Math.Max(0, rwy.Along(f.Pos)) };
+        pts.AddRange(plan.Select(p => p.P));
+        V2 At(double dist)
+        {
+            for (var i = 1; i < pts.Count; i++)
+            {
+                var seg = (pts[i] - pts[i - 1]).Length;
+                if (dist <= seg) return pts[i - 1] + (pts[i] - pts[i - 1]).Unit * dist;
+                dist -= seg;
+            }
+            return pts[^1];
+        }
+        var floorLevel = Apt.ElevationFt + 2000;
+        string? blocker = null;
+        foreach (var a in Flights)
+        {
+            if (a.Kind != "arrival" || a.OnGround || a.Done || a.Path is null || a.Phase is "flare" or "landing roll" or "final" or "approach" or "go-around") continue;
+            if ((a.Pos - f.Pos).Length > 20 * Geo2.MPerNm) continue;
+            for (var t = 0.0; t <= 210; t += 15)
+            {
+                var air = Math.Max(0, t - 65);                       // line-up and take-off roll first
+                var dist = 1500 + air * 170 * Geo2.MpsPerKt;
+                var dAlt = rwy.ElevationFt + air * 2500 / 60;
+                if (air <= 0) continue;
+                var ap = a.Path.At(Math.Min(a.Path.Length, a.S + a.Gs * 0.5144 * t)).p;
+                var aAlt = a.AltFt + Math.Min(0, a.Vs) * t / 60;
+                if ((At(dist) - ap).Length < 3.5 * Geo2.MPerNm && Math.Abs(dAlt - aAlt) < 1000
+                    && Math.Floor((aAlt - 1000) / 1000) * 1000 < floorLevel) { blocker = $"{a.Callsign} ({aAlt:N0} ft)"; break; }
+            }
+            if (blocker is not null) break;
+        }
+        if (blocker is null)
+        {
+            if (!double.IsNaN(f.ReleaseWaitSince)) Log($"{f.Callsign}: released after {(Time - f.ReleaseWaitSince) / 60:0.0} min");
+            f.ReleaseWaitSince = double.NaN; f.ReleaseWaitFor = null;
+            return true;
+        }
+        if (double.IsNaN(f.ReleaseWaitSince))
+        {
+            f.ReleaseWaitSince = Time;
+            Log($"{f.Callsign}: waiting for its release at runway {rwy.Ident}: {blocker} being vectored across the way out, too low to climb under");
+        }
+        f.ReleaseWaitFor = blocker;
+        if (Time - f.ReleaseWaitSince > 240)
+        {
+            Log($"{f.Callsign}: released after 4 min, {blocker} still near the way out");
+            f.ReleaseWaitSince = double.NaN; f.ReleaseWaitFor = "";
+            return true;
+        }
+        return false;
+    }
+
     private bool LineUpAllowed(Flight f)
     {
         var r = f.Rwy!.Runway;
@@ -1845,6 +1914,7 @@ public sealed partial class TrafficWorld
         // direction) within 30 nm: the airport turns round once the last of them has landed.
         if (Flights.Any(a => a.Kind == "arrival" && !a.Done && !a.OnGround && a.Rwy is { } ar && Math.Abs(Geo2.Diff(ar.Heading, f.Rwy.Heading)) > 90
                 && (a.ThrS - a.S) < 30 * Geo2.MPerNm)) return false;
+        if (!Released(f)) return false;
         // Only line up if the takeoff can follow without delaying the next arrival.
         var eta = ArrivalEta(r);
         // Line-up ~25 s, short wait, takeoff roll ~55 s, and the departure must be off the runway well before the arrival.
@@ -4030,7 +4100,7 @@ public sealed partial class TrafficWorld
     {
         if (f.Path is null || f.Phase is "final" or "flare" or "landing roll" or "go-around" || (f.ThrS - f.S) / Geo2.MPerNm < 8) return double.NaN;
         double floor = double.NaN; string? who = null;
-        foreach (var o in Others)
+        foreach (var o in OthersAndUser())
         {
             if (!o.Main || o.AltFt > f.AltFt + 500 || (o.Pos - f.Pos).Length > 20 * Geo2.MPerNm) continue;
             double highest = double.MinValue; var conflict = false;
@@ -4225,8 +4295,8 @@ public sealed partial class TrafficWorld
             if (minLat < 5 * Geo2.MPerNm && Math.Abs(Geo2.Diff(o.Heading, d.Heading)) < 60 && (o.Pos - d.Pos).Length < 6 * Geo2.MPerNm)
                 d.DepSpeedCap = double.IsNaN(d.DepSpeedCap) ? o.Ias : Math.Min(d.DepSpeedCap, o.Ias);
         }
-        // Another airport's traffic (MCO's arrivals for an MLB departure, MLB's for MCO's): projected straight ahead.
-        foreach (var o in Others)
+        // Another airport's traffic (MCO's arrivals for an MLB departure, MLB's for MCO's), and the user: projected straight ahead.
+        foreach (var o in OthersAndUser())
         {
             if (o.AltFt < d.AltFt - 1500 || (o.Pos - d.Pos).Length > 20 * Geo2.MPerNm || o.Phase is "flare" or "landing roll") continue;
             double lowest = double.MaxValue; var conflict = false;
@@ -4234,7 +4304,7 @@ public sealed partial class TrafficWorld
             {
                 var dp = d.Path.At(Math.Min(d.Path.Length, d.S + d.Gs * 0.5144 * t)).p;
                 var op = Ahead(o, t);
-                var oAlt = Math.Max(o.AltFt + (o.Kind == "arrival" ? Math.Min(0, o.Vs) : Math.Max(0, o.Vs)) * t / 60, 0);
+                var oAlt = Math.Max(o.AltFt + (o.Phase == "user" ? o.Vs * Math.Min(t, 60) / 60 : (o.Kind == "arrival" ? Math.Min(0, o.Vs) : Math.Max(0, o.Vs)) * t / 60), 0);
                 var lat = (dp - op).Length;
                 if (lat < 5 * Geo2.MPerNm) lowest = Math.Min(lowest, Math.Min(o.AltFt, oAlt));
                 if (lat < 3.5 * Geo2.MPerNm && Math.Abs(d.AltFt + climbFpm * t / 60 - oAlt) < 1000 && d.AltFt < oAlt) conflict = true;
@@ -4256,6 +4326,46 @@ public sealed partial class TrafficWorld
     public sealed record Foreign(string Callsign, string Airport, string Kind, V2 Pos, double AltFt, double Vs, double GsKt, double Track, string Phase, bool Main);
     public List<Foreign> Others { get; set; } = new();
     private static V2 Ahead(Foreign o, double t) => o.Pos + V2.FromBearing(o.Track) * (o.GsKt * 0.5144 * t);
+
+    /// <summary>
+    /// The user, as traffic LAIA's aircraft keep clear of (user, 14 Nov: after a TA/RA at cruise, "when is that fix
+    /// scheduled?" for the airports' own traffic): departures stop their climb 1,000 ft below the user, arrivals stop
+    /// their descent 1,000 ft above, and an arrival level with the user starts down early — the same rules as for
+    /// another airport's traffic. Not on the ground, and not while the user is on this airport's final (then it's the
+    /// runway's business, as for LAIA's own arrivals).
+    /// </summary>
+    private Foreign? UserTraffic()
+    {
+        if (UserOnGround || UserPos is not { } u) return null;
+        if (UserArr is { } ua && ua.Rwy is not null && (ua.ThrS - ua.S) / Geo2.MPerNm < 8) return null;
+        var cs = UserCallsign.Length > 0 ? UserCallsign : "your aircraft";
+        return new Foreign(cs, "you", UserVs < -300 ? "arrival" : "departure", u, UserAltFt, UserVs, UserGs, UserTrack, "user", true);
+    }
+
+    /// <summary>Other airports' traffic and the user.</summary>
+    private IEnumerable<Foreign> OthersAndUser() => UserTraffic() is { } me ? Others.Append(me) : Others;
+
+    /// <summary>
+    /// An arrival level with the user, closing (cruise, or the early descent): it starts down to 1,000 ft below the
+    /// user's level before they meet, as ATC would give one of them a lower level. NaN when not needed.
+    /// </summary>
+    private double ProbeUserLevel(Flight f)
+    {
+        if (UserTraffic() is not { } me || f.Path is null) return double.NaN;
+        if ((me.Pos - f.Pos).Length > 60 * Geo2.MPerNm || Math.Abs(f.AltFt - me.AltFt) >= 1000) return double.NaN;
+        if (f.AltFt < me.AltFt - 200) return double.NaN;   // already below and descending away
+        for (var t = 0.0; t <= 300; t += 15)
+        {
+            var fp = f.Path.At(Math.Min(f.Path.Length, f.S + f.Gs * 0.5144 * t)).p;
+            if ((fp - Ahead(me, t)).Length < 6 * Geo2.MPerNm)
+            {
+                var level = Math.Floor((me.AltFt - 1000) / 1000) * 1000;
+                if (f.UserCeiling != level) Log($"{f.Callsign}: descending early to {level:N0} ft below {me.Callsign} (you, {me.AltFt:N0} ft, {(me.Pos - f.Pos).Length / Geo2.MPerNm:0} nm)");
+                return level;
+            }
+        }
+        return double.NaN;
+    }
 
     private int _climbStops, _losCount, _releases, _heldAtTop, _descentStops, _losBetween;
     private double _heldSec;
@@ -4499,7 +4609,13 @@ public sealed partial class TrafficWorld
             {
                 var plan = f.CruiseFt > 0 ? Math.Min(Profile(rwy, dth), f.CruiseFt) : Profile(rwy, dth);
                 var want = Restricted(f, plan);
-                if (RunwayOnly && Time - f.DescentProbeAt >= 2) { f.DescentProbeAt = Time; f.DescentFloor = ProbeDescent(f); }
+                if (Time - f.DescentProbeAt >= 2)
+                {
+                    f.DescentProbeAt = Time;
+                    f.DescentFloor = ProbeDescent(f);
+                    f.UserCeiling = ProbeUserLevel(f);
+                }
+                if (!double.IsNaN(f.UserCeiling)) want = Math.Min(want, f.UserCeiling);
                 // Follow the slope of the wanted altitude itself (the descent path bent by the restrictions), not
                 // always the 3° path: level where a restriction holds it ("at 7,000" at BANYA), 300 ft/nm towards an
                 // "at or below". Following the 3° slope while held at a level let it sink ~600 ft below "at" fixes.

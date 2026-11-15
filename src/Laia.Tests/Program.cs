@@ -1098,6 +1098,45 @@ Console.WriteLine("== Between airports: departures level under another airport's
     Check(bad == 0, $"none comes within 3 nm and 900 ft of it ({bad} samples)");
 }
 
+Console.WriteLine("== The user as traffic: departures level below the user, arrivals stay above (14 Nov, after a TA/RA)");
+{
+    var nm = Geo2.MPerNm;
+    // Departures: the user circling 6 nm west at 4,000 ft, right over the departures off 27.
+    var world = new TrafficWorld(new AirportModel(TestAirport.Build(false)), new TestSource(), seed: 33) { Automatic = true, Level = TrafficLevel.Busy, Wind = new Wind(270, 10) };
+    var log = new List<string>(); world.Log = s2 => log.Add(s2);
+    world.SelectRunways(true);
+    var me = new V2(-6 * nm, 0);
+    world.UserCallsign = "UAL1196"; world.UserOnGround = false; world.UserPos = me; world.UserAltFt = 4000; world.UserGs = 0; world.UserTrack = 90;
+    var bad = 0;
+    for (var t = 0.0; t < 3600; t += 0.5)
+    {
+        world.Step(0.5);
+        bad += world.Flights.Count(f => f.Kind == "departure" && !f.OnGround && !f.Done && (f.Pos - me).Length < 3 * nm && Math.Abs(f.AltFt - 4000) < 900);
+    }
+    var stops = log.Where(x => x.Contains("UAL1196") && x.Contains("climb stopped")).ToList();
+    foreach (var x in stops.Take(2)) Console.WriteLine("  " + x);
+    Check(stops.Count > 0, "departures are stopped below the user");
+    Check(bad == 0, $"no departure comes within 3 nm and 900 ft of the user ({bad} samples)");
+
+    // Arrivals: the user 1,500 ft below an arrival's descent path, 20 nm out on its route.
+    var w2 = new TrafficWorld(new AirportModel(TestAirport.Build(false)), new TestSource(), seed: 34) { Automatic = false, Wind = new Wind(270, 10) };
+    var log2 = new List<string>(); w2.Log = s2 => log2.Add(s2);
+    w2.SelectRunways(true);
+    var a = w2.SpawnArrival(45, true)!;
+    var spot = a.Path!.At(a.ThrS - 20 * nm).p;
+    var userAlt = Math.Max(3000, (a.Rwy!.ElevationFt + 50 + 20 * 318.4) - 1500);
+    w2.UserCallsign = "UAL1196"; w2.UserOnGround = false; w2.UserPos = spot; w2.UserAltFt = userAlt; w2.UserGs = 0; w2.UserTrack = 0;
+    double minDz = double.MaxValue;
+    for (var t = 0.0; t < 1200 && !a.OnGround && !a.Done; t += 0.5)
+    {
+        w2.Step(0.5);
+        if ((a.Pos - spot).Length < 3 * nm) minDz = Math.Min(minDz, Math.Abs(a.AltFt - userAlt));
+    }
+    foreach (var x in log2.Where(x => x.Contains("UAL1196")).Take(2)) Console.WriteLine("  " + x);
+    Console.WriteLine($"  arrival over the user: closest {minDz:N0} ft vertically within 3 nm; {(a.OnGround ? "landed" : a.WentAround ? "went around" : "still flying")}");
+    Check(minDz >= 900, "an arrival stays 1,000 ft above the user while near");
+}
+
 Console.WriteLine("== M6: learning an airport from real tracks (synthetic adsb.lol-style traces), and flying what was learned");
 {
     var nm = Geo2.MPerNm;
