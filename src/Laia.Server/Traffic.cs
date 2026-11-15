@@ -183,6 +183,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                     {
                         var a = ToAircraft(w, f);
                         a.Id = OutId(f);
+                        if (!a.OnGround) a.AltFt += FlCorrection(a.AltFt);
                         list.Add(a);
                     }
             if (drawn is not null)
@@ -220,7 +221,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 // A little give for what's already drawn (no flicker at the edges): 3 nm and 1,000 ft beyond.
                 var drawn = _drawnLast.Contains(f.Id);
                 if (nm > DrawRadiusNm + (drawn ? 3 : 0)) continue;
-                var dz = Math.Abs(f.AltFt - sim.AltitudeFt);
+                var dz = Math.Abs(f.AltFt - UserLevelFt(sim));
                 if (!f.OnGround && dz > DrawBandFt + (drawn ? 1000 : 0)) continue;
                 // What matters first: moving traffic (in the air, taxiing, on the runway) before aircraft parked at a
                 // gate — a parked aircraft counts as 25 nm further away (MLB's arrivals 50 nm out weren't drawn while
@@ -237,7 +238,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
             var nm = Geo2.DistanceNm(sim.Lat, sim.Lon, p.Lat, p.Lon);
             var drawn = _drawnLast.Contains(l.Id);
             if (nm > DrawRadiusNm + (drawn ? 3 : 0)) continue;
-            var dz = Math.Abs(NetAlt(l, clock, p.AltFt) - sim.AltitudeFt);
+            var dz = Math.Abs(NetAlt(l, clock, p.AltFt) - UserLevelFt(sim));
             if (dz > DrawBandFt + (drawn ? 1000 : 0)) continue;
             cands.Add((l.Id, nm + dz / 2000));
         }
@@ -276,6 +277,24 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     private double NetClock => _world?.ScheduleClock ?? WeekMinuteNow();
 
     /// <summary>
+    /// Flight levels in the sim's real air (user, 15 Nov: traffic at "-07" on the TCAS, 700 ft below, at FL380 — LAIA
+    /// flew its traffic at true altitudes, 37,000 ft, while the user's FL380 was 37,750 ft true that day). Above the
+    /// transition (18,000 ft) LAIA's altitudes are flight levels, so they're drawn at the true altitude that flight
+    /// level has where the user is: plus (true − pressure altitude) of the user's own aircraft, eased in from 15,000 ft.
+    /// Below that, altitudes are on the local altimeter setting, as before. Needs LAIA Sim 0.1.194+ (pressure altitude).
+    /// </summary>
+    private double _trueMinusPressure;
+    private double FlCorrection(double altFt) => _trueMinusPressure * Math.Clamp((altFt - 15000) / 3000, 0, 1);
+    /// <summary>The user's altitude on LAIA's scale (a flight level above the transition).</summary>
+    private double UserLevelFt(AircraftState sim) => sim.AltitudeFt - FlCorrection(sim.AltitudeFt);
+    private void UpdateFlCorrection(AircraftState sim)
+    {
+        if (sim.PressureAltFt == 0) return;
+        var raw = Math.Clamp(sim.AltitudeFt - sim.PressureAltFt, -3000, 3000);
+        _trueMinusPressure += (raw - _trueMinusPressure) * 0.1;
+    }
+
+    /// <summary>
     /// The id an aircraft is drawn under. A whole-sky flight drawn en route that an airport then takes over (at 200 nm)
     /// keeps the id it was drawn with, so the sim moves the same aircraft on instead of removing it and adding a new one.
     /// </summary>
@@ -295,6 +314,8 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     /// 8,000 ft, not flown by an airport here (not within 30 nm of one, nor within its 200 nm take-over to or from it).</summary>
     private List<Laia.Server.TrafficCore.NetLeg> EnRoute(AircraftState sim)
     {
+        // Traffic off is all traffic off (user, 15 Nov: "if the traffic is off, why do I see traffic?").
+        if (Level == TrafficLevel.Off) return new();
         var worlds = Worlds().ToList();
         var exclude = new HashSet<string>(worlds.SelectMany(x => x.Flights).Select(f => f.Reg).Where(r => r.Length > 0), StringComparer.OrdinalIgnoreCase);
         var callsigns = worlds.SelectMany(x => x.Flights).Where(f => !f.Done).Select(f => f.Callsign).ToHashSet();
@@ -336,7 +357,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     {
         var obs = new List<EnRouteSeparation.Obstacle>();
         if (!sim.OnGround)
-            obs.Add(new((UserCallsignOf(sim) is { Length: > 0 } cs ? cs : "your aircraft") + " (you)", sim.Lat, sim.Lon, sim.HeadingTrue, sim.GroundSpeed, sim.AltitudeFt, sim.VerticalSpeed, 6));
+            obs.Add(new((UserCallsignOf(sim) is { Length: > 0 } cs ? cs : "your aircraft") + " (you)", sim.Lat, sim.Lon, sim.HeadingTrue, sim.GroundSpeed, UserLevelFt(sim), sim.VerticalSpeed, 6));
         foreach (var w in Worlds())
             foreach (var f in w.Flights)
             {
@@ -361,7 +382,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         return new TrafficAircraft
         {
             Id = l.Id, Callsign = l.Callsign, Airline = l.Operator.Length > 0 ? l.Operator : l.Airline, Type = l.Type, Model = l.Title,
-            Lat = p.Lat, Lon = p.Lon, AltFt = p.AltFt, AglFt = p.AltFt, OnGround = false, TimeMs = _stampMs, Heading = p.Heading,
+            Lat = p.Lat, Lon = p.Lon, AltFt = p.AltFt + FlCorrection(p.AltFt), AglFt = p.AltFt, OnGround = false, TimeMs = _stampMs, Heading = p.Heading,
             Pitch = Math.Clamp(2.5 + Math.Atan2(vs / 60, Math.Max(gs, 120) * 1.688) * 180 / Math.PI, -3, 12), Bank = 0,
             GroundSpeed = gs, VerticalSpeed = vs, GearDown = false, Phase = p.Phase,
             Lights = 1 | 2 | 4 | 32 | (p.AltFt < 10000 ? 8 : 0),
@@ -996,6 +1017,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 {
                     if (live && now - lastWorldCheck > 5) { UpdateWorld(sim!); lastWorldCheck = now; }
                     if (now - _othersAt > 1) { _othersAt = now; ShareTraffic(); }
+                    if (live) UpdateFlCorrection(sim!);
                     if (live && now - _enrouteAt > 2) { _enrouteAt = now; _enroute = EnRoute(sim!); }
                     foreach (var w in Worlds().ToList())
                     {
@@ -1009,7 +1031,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                             else if (dNm < 15 && sim.AltitudeFt < w.Apt.ElevationFt + 5000) w.Wind = new Wind(sim.WindDirection, sim.WindSpeed);
                             w.UserPos = w.Apt.Map.ToXY(sim.Lat, sim.Lon);
                             w.UserOnGround = sim.OnGround;
-                            w.UserAltFt = sim.AltitudeFt; w.UserGs = sim.GroundSpeed; w.UserTrack = sim.HeadingTrue; w.UserVs = sim.VerticalSpeed;
+                            w.UserAltFt = UserLevelFt(sim); w.UserGs = sim.GroundSpeed; w.UserTrack = sim.HeadingTrue; w.UserVs = sim.VerticalSpeed;
                             var plan = simBrief.Plan;
                             w.UserCallsign = plan?.Callsign is { Length: > 0 } pc ? pc : (sim.AtcAirline + " " + sim.AtcFlightNumber).Trim() is { Length: > 0 } ac ? ac : sim.AtcId;
                             w.UserType = plan?.Aircraft ?? "";

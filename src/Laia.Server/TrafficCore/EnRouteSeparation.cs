@@ -82,8 +82,9 @@ public sealed class EnRouteSeparation
                     var t = k * Step;
                     var oAlt = o.AltFt + o.vs * Math.Min(t, 90) / 60;
                     if ((pos[i, k] - (o.p0 + o.v * t)).Length >= o.SepNm * nm || Math.Abs(alt[i, k] - oAlt) >= 1000) continue;
-                    if (alt[i, k] >= oAlt) { if (oAlt + 1000 > floor) { floor = oAlt + 1000; why = o.Name; } }
-                    else if (oAlt - 1000 < cap) { cap = oAlt - 1000; why = o.Name; }
+                    // On a whole level (FL370, not 36,748 ft), at least 1,000 ft from the other.
+                    if (alt[i, k] >= oAlt) { var fl = Math.Ceiling((oAlt + 1000) / 1000) * 1000; if (fl > floor) { floor = fl; why = o.Name; } }
+                    else { var fl = Math.Floor((oAlt - 1000) / 1000) * 1000; if (fl < cap) { cap = fl; why = o.Name; } }
                     break;
                 }
             }

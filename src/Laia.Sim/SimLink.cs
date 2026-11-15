@@ -98,7 +98,7 @@ internal sealed class SimLink : IDisposable
         ("COM ACTIVE FREQUENCY:1", "MHz"), ("COM STANDBY FREQUENCY:1", "MHz"), ("COM ACTIVE FREQUENCY:2", "MHz"), ("COM STANDBY FREQUENCY:2", "MHz"),
         ("COM TRANSMIT:1", "bool"), ("COM TRANSMIT:2", "bool"), ("TRANSPONDER CODE:1", "number"),
         ("AMBIENT WIND DIRECTION", "degrees"), ("AMBIENT WIND VELOCITY", "knots"),
-        ("ZULU TIME", "seconds"), ("ZULU DAY OF WEEK", "number"),
+        ("ZULU TIME", "seconds"), ("ZULU DAY OF WEEK", "number"), ("PRESSURE ALTITUDE", "feet"),
     };
 
     private async Task RegisterAsync(SimConnectClient sc)
@@ -147,6 +147,7 @@ internal sealed class SimLink : IDisposable
                 var zuluSec = d.ReadFloat64();
                 var dow = (int)Math.Round(d.ReadFloat64()); // MSFS: 0 = Sunday
                 _state.ZuluWeekMinute = dow is >= 0 and <= 6 ? ((dow + 6) % 7) * 1440 + zuluSec / 60 : -1;
+                _state.PressureAltFt = d.ReadFloat64();
             }
             else if (d.RequestId == ReqStrings)
             {

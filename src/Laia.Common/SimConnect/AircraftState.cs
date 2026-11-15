@@ -8,6 +8,8 @@ public sealed class AircraftState
     public double Lat { get; set; }
     public double Lon { get; set; }
     public double AltitudeFt { get; set; }
+    /// <summary>Pressure altitude (standard 29.92): what flight levels are. 0 = not sent (older LAIA Sim).</summary>
+    public double PressureAltFt { get; set; }
     public double AglFt { get; set; }
     public double HeadingTrue { get; set; }
     public double HeadingMag { get; set; }
