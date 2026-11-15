@@ -313,9 +313,13 @@ public sealed partial class TrafficWorld
         {
             var (o, a, m, f) = Level switch
             {
-                TrafficLevel.Light => (12, 4, 10.0, 0.25),
-                TrafficLevel.Medium => (22, 7, 20.0, 0.40),
-                TrafficLevel.Busy => (34, 11, 32.0, 0.55),
+                // The level is the share of the real schedule (Light ~35%, Medium ~65%, Busy all of it); these caps are only
+                // a safety net, set so they don't bind at a real airport's normal rate (user, 15 Nov: "14 moving aircraft on
+                // Medium for ATL seems awful low" — ATL at 65% has about 38 moving at its busiest). What the sim draws is
+                // limited separately (the nearest 50, 80 at Real world and Peak), so the frame rate is protected either way.
+                TrafficLevel.Light => (40, 16, 10.0, 0.25),
+                TrafficLevel.Medium => (70, 28, 20.0, 0.40),
+                TrafficLevel.Busy => (110, 44, 32.0, 0.55),
                 TrafficLevel.RealWorld => (400, 150, 40.0, 0.65),
                 TrafficLevel.Peak => (400, 150, 44.0, 0.70),
                 _ => (0, 0, 0.0, 0.0),
