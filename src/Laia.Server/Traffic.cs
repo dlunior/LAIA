@@ -237,7 +237,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
             var nm = Geo2.DistanceNm(sim.Lat, sim.Lon, p.Lat, p.Lon);
             var drawn = _drawnLast.Contains(l.Id);
             if (nm > DrawRadiusNm + (drawn ? 3 : 0)) continue;
-            var dz = Math.Abs(p.AltFt - sim.AltitudeFt);
+            var dz = Math.Abs(p.AltFt + _netAltOff.GetValueOrDefault(l.Id) - sim.AltitudeFt);
             if (dz > DrawBandFt + (drawn ? 1000 : 0)) continue;
             cands.Add((l.Id, nm + dz / 2000));
         }
@@ -299,7 +299,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         var exclude = new HashSet<string>(worlds.SelectMany(x => x.Flights).Select(f => f.Reg).Where(r => r.Length > 0), StringComparer.OrdinalIgnoreCase);
         var callsigns = worlds.SelectMany(x => x.Flights).Where(f => !f.Done).Select(f => f.Callsign).ToHashSet();
         var res = new List<Laia.Server.TrafficCore.NetLeg>();
-        foreach (var p in network.Around(NetClock, sim.Lat, sim.Lon, DrawRadiusNm + 10, exclude, 300))
+        foreach (var p in network.Around(NetClock, sim.Lat, sim.Lon, DrawRadiusNm + 40, exclude, 400))
         {
             var l = p.Leg;
             if (p.AltFt < 8000 || TrafficWorld.IsCargo(l.Airline) || TrafficWorld.IsCargo(l.Operator) || Perf.For(l.Type).Family == "turboprop") continue;
@@ -321,13 +321,65 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
             foreach (var k in _alias.Keys.Where(k => !live.Contains(k)).ToList()) _alias.Remove(k);
         }
         if (_netDrawnRegs.Count > 300) _netDrawnRegs.Clear();
+        SeparateFromUser(sim, res);
         return res;
+    }
+
+    private readonly Dictionary<string, double> _netAltOff = new(), _netAltWant = new();
+
+    /// <summary>
+    /// En-route traffic keeps 1,000 ft from the user (user, 14 Nov: "I did get a TA/RA at cruise"). The whole-sky flights
+    /// fly their schedule's straight lines and levels, so one could sit at the user's level on a crossing or head-on
+    /// track. Each flight near the user is projected 10 minutes ahead against the user's own track, speed and climb or
+    /// descent; where they'd come within 6 nm and 1,000 ft, the flight is given a level 1,000 ft above or below the
+    /// user at that point (the side it's already on), as ATC would. It changes level at 1,500 ft/min — usually decided
+    /// while it's up to 100 nm away, before it's drawn (at 60 nm) — and returns to its own level once the user is well clear.
+    /// </summary>
+    private void SeparateFromUser(AircraftState sim, List<Laia.Server.TrafficCore.NetLeg> legs)
+    {
+        var live = legs.Select(l => l.Id).ToHashSet();
+        foreach (var k in _netAltOff.Keys.Where(k => !live.Contains(k)).ToList()) { _netAltOff.Remove(k); _netAltWant.Remove(k); }
+        if (sim.OnGround) return;
+        var nm = Geo2.MPerNm;
+        var map = new LocalMap(sim.Lat, sim.Lon);
+        var uv = V2.FromBearing(sim.HeadingTrue, sim.GroundSpeed * Geo2.MpsPerKt);
+        var clock = NetClock;
+        foreach (var l in legs)
+        {
+            var off = _netAltOff.GetValueOrDefault(l.Id);
+            double? want = null;
+            for (var t = 0.0; t <= 600; t += 15)
+            {
+                if (NetworkModel.At(l, clock + t / 60) is not { } p) break;
+                var lat = (map.ToXY(p.Lat, p.Lon) - uv * t).Length;
+                if (lat > 6 * nm) continue;
+                var uAlt = sim.AltitudeFt + Math.Clamp(sim.VerticalSpeed, -4000, 4000) * Math.Min(t, 120) / 60;
+                var dz = p.AltFt + off - uAlt;
+                if (Math.Abs(dz) >= 1000) continue;
+                var side = dz != 0 ? Math.Sign(dz) : (p.AltFt >= uAlt ? 1 : -1);
+                want = uAlt + side * 1000 - p.AltFt;
+                break;
+            }
+            if (want is null)
+            {
+                // Clear: back to its own level once the user is more than 10 nm away (and no longer in its way).
+                if (NetworkModel.At(l, clock) is { } now && Geo2.DistanceNm(sim.Lat, sim.Lon, now.Lat, now.Lon) > 10) want = 0;
+                else want = _netAltWant.GetValueOrDefault(l.Id);
+            }
+            _netAltWant[l.Id] = want.Value;
+            // Called every 2 s: 1,500 ft/min is 50 ft a step.
+            off += Math.Clamp(want.Value - off, -50, 50);
+            if (Math.Abs(off) < 1) _netAltOff.Remove(l.Id); else _netAltOff[l.Id] = off;
+        }
     }
 
     private TrafficAircraft? EnRouteAircraft(Laia.Server.TrafficCore.NetLeg l, double clock)
     {
         if (NetworkModel.At(l, clock) is not { } p) return null;
-        var vs = NetworkModel.At(l, clock + 0.25) is { } q ? (q.AltFt - p.AltFt) * 4 : 0;
+        var off = _netAltOff.GetValueOrDefault(l.Id);
+        var offWant = _netAltWant.GetValueOrDefault(l.Id);
+        var vs = (NetworkModel.At(l, clock + 0.25) is { } q ? (q.AltFt - p.AltFt) * 4 : 0) + Math.Clamp(offWant - off, -1500, 1500);
+        p = p with { AltFt = p.AltFt + off };
         var gs = p.GsKt;
         return new TrafficAircraft
         {
