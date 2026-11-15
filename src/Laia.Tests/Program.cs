@@ -594,6 +594,36 @@ Console.WriteLine("== The real ATIS decides the runways; the wind is only the fa
     Check(byWind == "27" && byAtis == "09" && world.ArrRwy?.Ident == "27", $"the ATIS's runway is used even against the wind, and the wind decides without an ATIS ({byWind} → {byAtis} → {world.ArrRwy?.Ident})");
 }
 
+Console.WriteLine("== Three landing runways: each side's arrivals shared among that side's runways (KATL, 15 Nov: none for 9R)");
+{
+    var nm = Geo2.MPerNm;
+    var data = TestAirport.Build(false);
+    var map = new LocalMap(data.Lat, data.Lon);
+    // 09L/27R 1,500 m north, 10/28 1,500 m south of the existing 09/27 (like Atlanta's 8L, 9R and 10).
+    var (pla, plo) = map.ToLatLon(new V2(0, 1500));
+    data.Runways.Add(new AirportRunway { Lat = pla, Lon = plo, ElevationM = 10, Heading = 90, LengthM = 3000, WidthM = 45, PrimaryNumber = 9, PrimaryDesignator = 1, SecondaryNumber = 27, SecondaryDesignator = 2 });
+    var (psa, pso) = map.ToLatLon(new V2(0, -1500));
+    data.Runways.Add(new AirportRunway { Lat = psa, Lon = pso, ElevationM = 10, Heading = 90, LengthM = 3000, WidthM = 45, PrimaryNumber = 10, SecondaryNumber = 28 });
+    Laia.Common.Airports.ProcedureLeg Fx(string name, double x, double y, int type = 18) { var (la, lo) = map.ToLatLon(new V2(x, y)); return new() { Type = type, Fix = name, Lat = la, Lon = lo }; }
+    data.Arrivals.Add(new() { Name = "NORTH1", Legs = { Fx("NORRR", 0, 40 * nm, 15), Fx("NORMD", 8 * nm, 20 * nm) } });
+    data.Arrivals.Add(new() { Name = "SOUTH1", Legs = { Fx("SOURR", 0, -40 * nm, 15), Fx("SOUMD", 8 * nm, -20 * nm) } });
+    var far = new Dictionary<string, (double, double)?> { ["KNOR"] = map.ToLatLon(new V2(0, 300 * nm)), ["KSOU"] = map.ToLatLon(new V2(0, -300 * nm)) };
+    var world = new TrafficWorld(new AirportModel(data), new TestSource(), seed: 4) { Automatic = false, Wind = new Wind(270, 10), Locate = c => far.TryGetValue(c, out var p) ? p : null };
+    world.SelectRunways(true);
+    world.AtisText = "TEST ARR INFO A. ILS RWY 27 AND RWY 27R AND RWY 28 APCHS IN USE. DEPG RWY 27.";
+    Console.WriteLine($"  landing {string.Join(", ", world.ArrRwys.Select(e => e.Ident))}");
+    Laia.Common.Airports.ScheduleLeg Leg(string from, int n) => new() { Airline = "DAL", Operator = "DAL", Type = "A321", Reg = "N" + n, Flight = n.ToString(), Dep = from, Arr = "TEST" };
+    var south = Enumerable.Range(0, 6).Select(i => world.SpawnArrival(30 + i * 6, false, Leg("KSOU", 300 + i))!).ToList();
+    var north = Enumerable.Range(0, 4).Select(i => world.SpawnArrival(30 + i * 6, false, Leg("KNOR", 400 + i))!).ToList();
+    Console.WriteLine($"  from the south: {string.Join(", ", south.Select(f => f.Rwy!.Ident))}; from the north: {string.Join(", ", north.Select(f => f.Rwy!.Ident))}");
+    if (world.ArrRwys.Count == 3)
+    {
+        Check(south.Select(f => f.Rwy!.Ident).Distinct().Count() >= 2, "the south arrivals are shared between the south runway and the middle one");
+        Check(!south.Any(f => f.Rwy!.Ident == "27R") && !north.Any(f => f.Rwy!.Ident == "28"), "nobody crosses the airport to the far side");
+    }
+    else Check(false, "the three landing runways the ATIS names are used");
+}
+
 Console.WriteLine("== Several runways from the ATIS, and STARs/SIDs chosen by where the flight comes from or goes");
 {
     var nm = Geo2.MPerNm;

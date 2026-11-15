@@ -2543,6 +2543,20 @@ public sealed partial class TrafficWorld
         side = Math.Abs(side) < 0.1 ? side / 0.1 : Math.Sign(side);
         int Queue(RunwayEnd e) => Flights.Count(o => !o.Done && o.Kind == "arrival" && !o.OnGround && o.Rwy?.Runway == e.Runway);
         var minQ = serving.Min(i => Queue(list[i]));
+        // Three or more landing runways (Atlanta: 08L in the north, 09R and 10 in the south): every runway on the STAR's
+        // side, or in the middle, shares that side's arrivals by queue — not all to the outermost one (user, 15 Nov:
+        // "planes sequenced for 8L and 10, but none for 9R"). With two, it's the STAR's side as before.
+        if (list.Count >= 3)
+        {
+            var raw = Across(list, out _);
+            var sideSet = serving.Where(i => Math.Abs(side) < 0.3 || Math.Abs(raw[i]) < 0.3 || Math.Sign(raw[i]) == Math.Sign(side)).ToList();
+            if (sideSet.Count > 0)
+            {
+                var pick = sideSet.OrderBy(i => Queue(list[i])).ThenBy(i => Math.Abs(raw[i] - side)).ThenByDescending(i => list[i].LengthM).First();
+                // Only a clearly longer queue on that side moves an arrival across the airport.
+                if (Queue(list[pick]) - minQ <= 4) return (list[pick], star);
+            }
+        }
         var best = serving.OrderByDescending(i => pos[i] * side * 2 - 0.25 * (Queue(list[i]) - minQ)).ThenByDescending(i => list[i].LengthM).First();
         return (list[best], star);
     }

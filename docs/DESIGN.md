@@ -539,6 +539,8 @@ around. Airliners can't do that on a taxiway, and a real ground controller never
 
 **0.1.200 — the map shows the en-route traffic that's drawn (user, 15 Nov: "I thought grey dots weren't injected into the sim, yet they show on my TCAS … the map is not reporting correctly"):** the en-route flights LAIA draws in the sim (since 0.1.179) were still shown on the map as grey "rest of the sky" dots. They're now drawn like the other aircraft in the sim: a plane in the drawn colour, with its callsign, flight level, speed and route.
 
+**0.1.201 — three landing runways share the arrivals (user, 15 Nov, KATL east flow, landing 08L, 09R, 10: "planes sequenced for 8L and 10, but none for 9R"):** the runway came from the STAR's side of the airport, so the north STARs went to 08L and the south ones all to 10, the outermost; 09R, between, got only arrivals from straight ahead. With three or more landing runways, every runway on the STAR's side (or in the middle) now shares that side's arrivals by queue; only a much longer queue (5 more) moves one across. With two runways nothing changes.
+
 Section 4 says *what* LAIA will do; this section says *in which order* it gets built. Each milestone is a set of
 releases that can be tested on its own before the next one starts. Every milestone also gets offline checks in
 `Laia.Tests`, so CI proves the rules before the user flies.
