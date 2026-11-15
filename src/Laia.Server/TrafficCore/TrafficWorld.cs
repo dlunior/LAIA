@@ -313,22 +313,17 @@ public sealed partial class TrafficWorld
         {
             var (o, a, m, f) = Level switch
             {
-                // The level is the share of the real schedule (Light ~35%, Medium ~65%, Busy all of it); these caps are only
-                // a safety net, set so they don't bind at a real airport's normal rate (user, 15 Nov: "14 moving aircraft on
-                // Medium for ATL seems awful low" — ATL at 65% has about 38 moving at its busiest). What the sim draws is
-                // limited separately (the nearest 50, 80 at Real world and Peak), so the frame rate is protected either way.
-                TrafficLevel.Light => (40, 16, 10.0, 0.25),
-                TrafficLevel.Medium => (70, 28, 20.0, 0.40),
-                TrafficLevel.Busy => (110, 44, 32.0, 0.55),
+                // No count of aircraft limits any level (user, 15 Nov: "the limits should never be aircraft on the ground,
+                // but rather a percentage of that field's scheduled traffic"): the level is the share of the real schedule
+                // (KeepAtLevel); these are only a runaway guard. What the sim draws is limited separately (the nearest 50,
+                // 80 at Real world and Peak).
+                TrafficLevel.Light => (400, 150, 10.0, 0.25),
+                TrafficLevel.Medium => (400, 150, 20.0, 0.40),
+                TrafficLevel.Busy => (400, 150, 32.0, 0.55),
                 TrafficLevel.RealWorld => (400, 150, 40.0, 0.65),
                 TrafficLevel.Peak => (400, 150, 44.0, 0.70),
                 _ => (0, 0, 0.0, 0.0),
             };
-            if (Level is TrafficLevel.Light or TrafficLevel.Medium or TrafficLevel.Busy)
-            {
-                var k = SizeFactor;
-                o = (int)Math.Round(o * k); a = (int)Math.Round(a * k);
-            }
             return (o, a, m, f);
         }
     }
@@ -951,7 +946,9 @@ public sealed partial class TrafficWorld
     /// </summary>
     public static bool KeepAtLevel(TrafficLevel level, string key)
     {
-        var pct = level switch { TrafficLevel.Off => 0, TrafficLevel.Light => 35, TrafficLevel.Medium => 65, _ => 100 };   // Busy, Real world and Peak: every flight (Busy under caps)
+        // The share of the real schedule (user, 15 Nov): Light a quarter, Medium half, Busy three quarters, Real world
+        // and Peak all of it.
+        var pct = level switch { TrafficLevel.Off => 0, TrafficLevel.Light => 25, TrafficLevel.Medium => 50, TrafficLevel.Busy => 75, _ => 100 };
         uint h = 2166136261;
         foreach (var c in key) h = (h ^ c) * 16777619;
         return h % 100 < pct;
