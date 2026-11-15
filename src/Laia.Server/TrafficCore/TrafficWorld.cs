@@ -1168,8 +1168,16 @@ public sealed partial class TrafficWorld
     {
         "FDX", "UPS", "GTI", "ABX", "ATN", "CKS", "KYE", "PAC", "CLX", "GEC", "BOX", "AJT", "MPH", "NCA", "LCO", "LTC", "CKK", "SQC",
         "ICV", "CAO", "ABW", "QTR-C", "WGN", "SRR", "CWC", "MXY", "FTA", "AMF", "BCS", "DHK", "DHL", "DAE", "UCA", "SWQ", "TPA", "KFS", "RLB",
+        "CJT", "KFA", "SOO", "NCR",
     };
     public static bool IsCargo(string? airline) => airline is { Length: > 0 } a && CargoAirlines.Contains(a);
+
+    /// <summary>
+    /// Freighters are left out of the traffic for now (user, 14 Nov: "for now yes, we'll add them at a later date"):
+    /// passenger jets only, like the real tracks LAIA learns from. The cargo-ramp parking logic stays for when they return.
+    /// </summary>
+    public static bool PassengerOnly { get; set; } = true;
+    public static bool LeaveOut(string? airline, string? op) => PassengerOnly && (IsCargo(airline) || IsCargo(op));
 
     private AirportModel.ParkingSpot? FindGate(Perf p, string airline, string? alsoAirline = null, string? callsign = null)
     {

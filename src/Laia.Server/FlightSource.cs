@@ -148,9 +148,17 @@ public sealed class FlightSource(SettingsStore settings, ILogger<FlightSource> l
         _ => null,
     } : null;
 
+    /// <summary>The installed models, freighters left out while traffic is passenger jets only (user, 14 Nov).</summary>
+    private List<CatalogEntry> PaxCatalog()
+    {
+        var all = Catalog().ToList();
+        var pax = all.Where(e => !Laia.Server.TrafficCore.TrafficWorld.LeaveOut(e.Airline, null)).ToList();
+        return pax.Count > 0 ? pax : all;
+    }
+
     public AircraftIdentity NewAircraft(string airport, int maxGateSize, Random rng, IReadOnlyCollection<string>? airlines = null)
     {
-        var cat = Catalog().Where(e => Perf.For(e.Type).GateSize <= maxGateSize).ToList();
+        var cat = PaxCatalog().Where(e => Perf.For(e.Type).GateSize <= maxGateSize).ToList();
         // A stand that belongs to particular airlines gets one of theirs (if a model is installed).
         if (airlines is { Count: > 0 })
         {
@@ -172,7 +180,7 @@ public sealed class FlightSource(SettingsStore settings, ILogger<FlightSource> l
             else
             {
                 // No local airline has a type this small: use the region's smallest types rather than a foreign airline.
-                var regional = Catalog().Where(e => region.Contains(e.Airline)).ToList();
+                var regional = PaxCatalog().Where(e => region.Contains(e.Airline)).ToList();
                 if (regional.Count > 0)
                 {
                     var smallest = regional.Min(e => Perf.For(e.Type).GateSize);
@@ -183,7 +191,7 @@ public sealed class FlightSource(SettingsStore settings, ILogger<FlightSource> l
         // Nothing small enough for this gate: take the smallest types available rather than nothing.
         if (cat.Count == 0)
         {
-            var all = Catalog();
+            var all = PaxCatalog();
             var regional = region is null ? all : all.Where(e => region.Contains(e.Airline)).ToList();
             if (regional.Count == 0) regional = all;
             var smallest = regional.Min(e => Perf.For(e.Type).GateSize);

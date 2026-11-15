@@ -119,6 +119,8 @@ public sealed class ScheduleStore(ILogger<ScheduleStore> log)
 
     public void Add(ScheduleData d)
     {
+        var cargo = d.Legs.RemoveAll(l => Laia.Server.TrafficCore.TrafficWorld.LeaveOut(l.Airline, l.Operator));
+        if (cargo > 0) log.LogInformation("Schedule for {apt}: {n} cargo flights a week left out (passenger jets only for now)", d.Airport, cargo);
         lock (_gate) _data[d.Airport] = d;
         var airlines = d.Legs.GroupBy(l => l.Airline).OrderByDescending(g => g.Count()).Take(8).Select(g => $"{g.Key} {g.Count()}");
         log.LogInformation("Schedule for {apt} from {src}: {n} flights a week ({airlines})", d.Airport, d.Source, d.Legs.Count, string.Join(", ", airlines));

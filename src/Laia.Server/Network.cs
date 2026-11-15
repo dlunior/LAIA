@@ -100,6 +100,7 @@ public sealed class NetworkStore(WorldAirports world, ILogger<NetworkStore> log)
             if (!File.Exists(File_)) return;
             using var f = File.OpenRead(File_);
             var (legs, read) = NetworkModel.Parse(f);
+            legs = legs.Where(l => !Laia.Server.TrafficCore.TrafficWorld.LeaveOut(l.Airline, l.Operator)).ToList();
             lock (_gate) { _legs = legs; _readUtc = read == DateTime.MinValue ? File.GetLastWriteTimeUtc(File_) : read; _locatedWith = -1; }
             log.LogInformation("Network schedule from cache: {n} flights a week", legs.Count);
         }
@@ -114,6 +115,7 @@ public sealed class NetworkStore(WorldAirports world, ILogger<NetworkStore> log)
         ms.Position = 0;
         var bytes = ms.ToArray();
         var (legs, read) = NetworkModel.Parse(new MemoryStream(bytes));
+        legs = legs.Where(l => !Laia.Server.TrafficCore.TrafficWorld.LeaveOut(l.Airline, l.Operator)).ToList();
         if (legs.Count == 0) return 0;
         lock (_gate) { _legs = legs; _readUtc = read == DateTime.MinValue ? DateTime.UtcNow : read; _locatedWith = -1; }
         try { Directory.CreateDirectory(Paths.DataDir); await File.WriteAllBytesAsync(File_, bytes, ct); } catch { }
