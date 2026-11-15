@@ -1322,6 +1322,15 @@ Console.WriteLine("== M6: learning an airport from real tracks (synthetic adsb.l
     }
     var prof = TrackLearner.Learn("TEST", map, apt.ElevationFt, apt.Ends, tracks, "test", "2026-11-10");
     Console.WriteLine("  " + prof.Describe());
+    {
+        // The same arrivals, but the receivers lose them below about 900 ft, 2.5 nm out (KMCI, 15 Nov: arrivals barely
+        // learned where the low part of the final isn't seen).
+        var cut = tracks.Take(12).Select(t => (IReadOnlyList<TrackPoint>)t.Where(q => q.AltFt is { } a0 && a0 > apt.ElevationFt + 900).ToList()).ToList();
+        var pc = TrackLearner.Learn("TEST", map, apt.ElevationFt, apt.Ends, cut, "test", "2026-11-10");
+        var ac = pc.Arrivals.GetValueOrDefault("27");
+        Console.WriteLine($"  arrivals not seen below 900 ft: {ac?.Count ?? 0} of 12 learned");
+        Check(ac is not null && ac.Count == 12, "landings seen only down to about 900 ft are learned too");
+    }
     var a27 = prof.Arrivals.GetValueOrDefault("27");
     Check(a27 is not null && a27.Count == 12 && Math.Abs(a27.JoinP50 - 10) < 1 && Math.Abs(a27.InterceptDeg - 30) < 8 && Math.Abs(a27.DownwindNm - 4) < 0.7 && Math.Abs(a27.BaseNm - 14) < 1.5,
         "arrivals: joins at ~10 nm, 30° intercept, downwind 4 nm out, base at ~14 nm");

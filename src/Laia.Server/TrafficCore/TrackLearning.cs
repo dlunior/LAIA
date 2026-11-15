@@ -25,7 +25,7 @@ public sealed class AirportProfile
     public List<TaxiTrack> Taxi { get; set; } = new();
     /// <summary>What the profile holds: 2 = with taxi tracks; 3 = airline passenger jets only; 4 = three days. Older ones are learned again.</summary>
     public int Version { get; set; }
-    public const int CurrentVersion = 4;
+    public const int CurrentVersion = 5;   // 5: landings seen only down to a few hundred feet count (KMCI)
 
     public sealed class TaxiTrack
     {
@@ -118,9 +118,26 @@ public static class TrackLearner
             for (var i = 1; i < tr.Count; i++)
             {
                 var low = tr[i].AltFt is null || tr[i].AltFt < elevFt + 300;
-                if (!low) continue;
-                var r = ends.FirstOrDefault(e => e.Along(xy[i]) > -1000 && e.Along(xy[i]) < e.LengthM * 0.8 && Math.Abs(e.Offset(xy[i])) < 120
-                    && Math.Abs(Geo2.Diff(tr[i].Track, e.Heading)) < 25);
+                RunwayEnd? r = null;
+                if (low)
+                    r = ends.FirstOrDefault(e => e.Along(xy[i]) > -1000 && e.Along(xy[i]) < e.LengthM * 0.8 && Math.Abs(e.Offset(xy[i])) < 120
+                        && Math.Abs(Geo2.Diff(tr[i].Track, e.Heading)) < 25);
+                // Where the receivers don't see an aircraft below a few hundred feet (KMCI, 15 Nov: 57 arrivals learned
+                // against 336 departures, none at all to 19L/19R): the last of it, low on a final, descending, with
+                // nothing after it but the ground or the end of the track, is a landing on that runway too.
+                if (r is null && tr[i].AltFt is { } al && al < elevFt + 1500 && tr[i - 1].AltFt is { } ap && ap > al)
+                {
+                    r = ends.FirstOrDefault(e => e.Along(xy[i]) > -5 * Nm && e.Along(xy[i]) < 0 && Math.Abs(e.Offset(xy[i])) < 150 + 0.06 * -e.Along(xy[i])
+                        && Math.Abs(Geo2.Diff(tr[i].Track, e.Heading)) < 20);
+                    if (r is not null)
+                    {
+                        // Not a go-around or a low pass: no climb back above 2,000 ft in the next 3 minutes.
+                        for (var q = i + 1; q < tr.Count && tr[q].T - tr[i].T < 180; q++)
+                            if (tr[q].AltFt is { } aq && aq > elevFt + 2000) { r = null; break; }
+                        // And the low part of the final not seen later on: this is its last point on the way down.
+                        if (r is not null && i + 1 < tr.Count && tr[i + 1].T - tr[i].T < 30 && tr[i + 1].AltFt is { } an && an < al && an > elevFt + 300) r = null;
+                    }
+                }
                 if (r is null) continue;
                 // It must have been flying, a minute before.
                 var j0 = Back(tr, i, 60);

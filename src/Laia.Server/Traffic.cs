@@ -588,8 +588,9 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
             var depRw = w.DepRwys.Select(e => e.Ident).ToHashSet();
             var arr = p.Samples.Where(t => t.Kind == "arrival" && (arrRw.Count == 0 || arrRw.Contains(t.Runway))).ToList();
             var dep = p.Samples.Where(t => t.Kind == "departure" && (depRw.Count == 0 || depRw.Contains(t.Runway))).ToList();
-            var n = Math.Min(arr.Count, dep.Count);
-            static List<T> Spread<T>(List<T> l, int n) => l.Count <= n || n <= 0 ? l : Enumerable.Range(0, n).Select(i => l[(int)((long)i * l.Count / n)]).ToList();
+            // As many of each kind (neither looks busier than it is); with none of one kind, up to 40 of the other.
+            var n = arr.Count == 0 || dep.Count == 0 ? 40 : Math.Min(arr.Count, dep.Count);
+            static List<T> Spread<T>(List<T> l, int n) => l.Count <= n ? l : Enumerable.Range(0, n).Select(i => l[(int)((long)i * l.Count / n)]).ToList();
             all.AddRange(Spread(arr, n).Concat(Spread(dep, n)).Select(t => (object)new { kind = t.Kind, runway = t.Runway, points = t.Points, icao = p.Icao }));
             icaos.Add($"{p.Icao} {p.Day}");
         }

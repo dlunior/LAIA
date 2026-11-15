@@ -531,6 +531,8 @@ around. Airliners can't do that on a taxiway, and a real ground controller never
 
 **0.1.196 — the traffic level thins the traffic between airports too (user, 15 Nov: "Yes"):** Light draws about a third of the en-route flights near the user, Medium about two thirds, Busy and up all of them — the same airframes left out as at the airports (the same hash of the registration), so a flight left out en route isn't drawn later at the airport either.
 
+**0.1.197 — arrivals learned where the receivers don't see them land (user, 15 Nov, KMCI map: "I only see departures and not arrival ADS-B data"):** Kansas City learned 336 departures but only 57 arrivals in three days, none to 19L/19R. A landing counted only if a position was seen within 300 ft of the ground on the runway, and around MCI the receivers lose many arrivals a few hundred feet up. Now the last position of a track low on a final (below 1,500 ft above the field, within 5 nm, aligned, descending, with no climb back above 2,000 ft in the next 3 minutes) counts as a landing on that runway too. Learned profiles are version 5, so each airport is learned again on its next visit (about 5–10 minutes, as on a first visit). The map's real-tracks layer no longer shows every departure when a runway has no arrivals (up to 40 instead).
+
 Section 4 says *what* LAIA will do; this section says *in which order* it gets built. Each milestone is a set of
 releases that can be tested on its own before the next one starts. Every milestone also gets offline checks in
 `Laia.Tests`, so CI proves the rules before the user flies.
