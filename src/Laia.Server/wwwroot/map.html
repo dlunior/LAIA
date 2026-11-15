@@ -268,10 +268,25 @@ async function updateFlow() {
   } catch { }
 }
 
+// En-route flights LAIA draws in the sim (user, 15 Nov: "I thought grey dots weren't injected into the sim, yet they
+// show on my TCAS"): shown like the other drawn aircraft — a plane in the drawn colour with its label — not as a grey dot.
+const skyDrawn = new Map();
 function updateSky() {
   const show = $("tSky").checked;
-  const seen = new Set();
+  const seen = new Set(), seenDrawn = new Set();
+  const showLabels = $("tLabels").checked;
   if (show) for (const f of sky) {
+    if (f.drawn) {
+      seenDrawn.add(f.id);
+      const icon = planeIcon(f.id === selected ? "#ffffff" : COLORS.drawn, f.hdg, 22);
+      let d = skyDrawn.get(f.id);
+      if (!d) { d = L.marker([f.lat, f.lon], { icon, keyboard: false }).addTo(layers.ac); d.on("click", () => select(f.id)); skyDrawn.set(f.id, d); }
+      else { d.setLatLng([f.lat, f.lon]); d.setIcon(icon); }
+      const lbl = `${f.cs}<br><span class="l2">${Math.round(f.alt / 100).toString().padStart(3, "0")} · ${f.gs} kt · ${f.dep}→${f.arr}</span>`;
+      if (showLabels) { if (!d.getTooltip()) d.bindTooltip(lbl, { permanent: true, direction: "right", offset: [10, 0], className: "ac-label" }); else d.setTooltipContent(lbl); }
+      else if (d.getTooltip()) d.unbindTooltip();
+      continue;
+    }
     seen.add(f.id);
     let m = skyMarkers.get(f.id);
     const on = f.id === selected;
@@ -285,6 +300,7 @@ function updateSky() {
     m.setTooltipContent(`${f.cs}<br><span class="l2">${f.type} · ${f.dep}→${f.arr} · ${Math.round(f.alt / 100).toString().padStart(3, "0")}</span>`);
   }
   for (const [id, m] of skyMarkers) if (!seen.has(id)) { skyLayer.removeLayer(m); skyMarkers.delete(id); }
+  for (const [id, d] of skyDrawn) if (!seenDrawn.has(id)) { layers.ac.removeLayer(d); skyDrawn.delete(id); }
 }
 
 function select(id) {

@@ -537,6 +537,8 @@ around. Airliners can't do that on a taxiway, and a real ground controller never
 
 **0.1.199:** after the 0.1.198 update, KMCI and its neighbour KMKC had been tried together an hour earlier under the old rules, so the 6-hour "don't retry" rule split them: KMKC was learned alone first (8 minutes), then KMCI, and KMCI's traffic started at the 15-minute limit without the real tracks. The retry rule now counts only attempts under the same learning rules, so after such an update an airport and its neighbours are learned again together, at once.
 
+**0.1.200 — the map shows the en-route traffic that's drawn (user, 15 Nov: "I thought grey dots weren't injected into the sim, yet they show on my TCAS … the map is not reporting correctly"):** the en-route flights LAIA draws in the sim (since 0.1.179) were still shown on the map as grey "rest of the sky" dots. They're now drawn like the other aircraft in the sim: a plane in the drawn colour, with its callsign, flight level, speed and route.
+
 Section 4 says *what* LAIA will do; this section says *in which order* it gets built. Each milestone is a set of
 releases that can be tested on its own before the next one starts. Every milestone also gets offline checks in
 `Laia.Tests`, so CI proves the rules before the user flies.
