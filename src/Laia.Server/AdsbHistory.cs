@@ -43,8 +43,13 @@ public sealed class AdsbHistory(ILogger<AdsbHistory> log)
             if (_running is { IsCompleted: false }) return;
             var need = airports.Where(a => Profile(a.Icao) is not { } p || p.Version < AirportProfile.CurrentVersion || DateTime.UtcNow - p.LearnedUtc > TimeSpan.FromDays(60)).ToList();
             if (need.Count == 0) return;
-            if (_lastTry.TryGetValue(string.Join(",", need.Select(a => a.Icao)), out var at) && DateTime.UtcNow - at < TimeSpan.FromHours(6)) return;
-            _lastTry[string.Join(",", need.Select(a => a.Icao))] = DateTime.UtcNow;
+            // Not tried again within 6 hours — with the same rules: after an update that changes how airports are learned,
+            // the airport and its neighbours are learned again together, at once (KMCI, 15 Nov: the pair had been tried
+            // an hour before under the old rules, so they were learned one at a time, the main airport second, and its
+            // traffic started at the 15-minute limit without the real tracks).
+            var key = string.Join(",", need.Select(a => a.Icao)) + "|v" + AirportProfile.CurrentVersion;
+            if (_lastTry.TryGetValue(key, out var at) && DateTime.UtcNow - at < TimeSpan.FromHours(6)) return;
+            _lastTry[key] = DateTime.UtcNow;
             _learning = need.Select(a => a.Icao).ToHashSet(StringComparer.OrdinalIgnoreCase);
             _running = Task.Run(() => LearnAsync(need, CancellationToken.None));
         }
@@ -59,7 +64,7 @@ public sealed class AdsbHistory(ILogger<AdsbHistory> log)
     public bool Current(string icao) => Profile(icao) is { } p && p.Version >= AirportProfile.CurrentVersion;
 
     /// <summary>The last attempt to learn this airport ended without a profile (no history day found, or it failed).</summary>
-    public bool Gave(string icao) { lock (_gate) return _running is not { IsCompleted: false } && _lastTry.Keys.Any(k => k.Split(',').Contains(icao, StringComparer.OrdinalIgnoreCase)) && !Current(icao); }
+    public bool Gave(string icao) { lock (_gate) return _running is not { IsCompleted: false } && _lastTry.Keys.Any(k => k.Split('|')[0].Split(',').Contains(icao, StringComparer.OrdinalIgnoreCase)) && !Current(icao); }
 
     private async Task LearnAsync(List<AirportModel> apts, CancellationToken ct)
     {
