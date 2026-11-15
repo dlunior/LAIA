@@ -911,11 +911,24 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
             if (!sim.OnGround) return false;
             return airports.Nearest(sim.Lat, sim.Lon, 3) is { } here && here.model.Icao == icao;
         }
-        return PassengerService(icao) != false;
+        // No flight plan yet: in the air, give it a minute after the server starts before going by the nearest
+        // airport (KMLI, 15 Nov: the server restarted after an update in cruise ORD–MCI and picked Quad City 23 nm
+        // away, a moment before the SimBrief plan was read). And only an airport known to have airline service.
+        if (!sim.OnGround && _started.Elapsed < TimeSpan.FromSeconds(60)) return false;
+        return PassengerService(icao) == true;
     }
 
     private void UpdateWorldCore(AircraftState sim)
     {
+        // A traffic airport that's no longer one LAIA may run (the flight plan arrived after it was picked, or
+        // changed): in the air, it's let go — its flights finish, nothing new starts.
+        if (_world is not null && !sim.OnGround && !MayRun(_world.Apt.Icao, sim))
+        {
+            log.LogInformation("Traffic airport {icao} let go: not your departure or destination", _world.Apt.Icao);
+            _world.Automatic = false;
+            if (_world.Flights.Count > 0) _retiring.Add(_world);
+            _world = null; _prep = null;
+        }
         var near = airports.Nearest(sim.Lat, sim.Lon, 40, icao => MayRun(icao, sim));
         // Keep the traffic airport while the user is still within 40 nm of it: flying out past a neighbour (Mirabel,
         // climbing west out of Montréal) doesn't make the neighbour the traffic airport — only landing or being on
