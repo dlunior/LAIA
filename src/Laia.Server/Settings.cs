@@ -82,7 +82,9 @@ public sealed class SettingsStore
                 if (!patch.TryGetProperty(k, out var el) || el.ValueKind == JsonValueKind.Null) continue;
                 var v = (el.GetString() ?? "").Trim();
                 if (k == "schedule_source" && v is not ("aig" or "airlabs")) continue;
-                if (k == "traffic_level" && v is not ("off" or "light" or "normal" or "busy" or "peak")) continue;
+                // Every level the control page offers (user, 15 Nov: Medium and Real world "didn't take" — this list still had
+                // only the old names, so "medium" and "real" were dropped without a word).
+                if (k == "traffic_level" && v is not ("off" or "light" or "medium" or "normal" or "busy" or "real" or "peak")) continue;
                 if (v.Length == 0) _data.Remove(k);
                 else _data[k] = Secrets.Contains(k) ? Protect(v) : v;
             }
