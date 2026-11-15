@@ -117,6 +117,8 @@ public sealed class Flight
     public string? ReleaseWaitFor;
     /// <summary>Held at the gate for its departure slot since (world time; NaN: not held), and whether that's over.</summary>
     public double GateHeldSince = double.NaN;
+    /// <summary>Its place in the departure queue while held at the gate: when it was ready to go as the hold began.</summary>
+    public double QueueReadyAt = double.NaN;
     public bool GateHoldDone;
     /// <summary>The planned departure route (planned when lining up, so the spacing can look at where it goes).</summary>
     public List<AirPoint>? DepPlan;
@@ -1095,6 +1097,9 @@ public sealed partial class TrafficWorld
                 if (arrivedAndWaiting || untilDep < 240) upcoming.Add(next);
             }
             upcoming = upcoming.OrderBy(l => Until(l.DepMin)).ToList();
+            // Departures whose time passed more than 3 minutes ago have gone: not all started at once now (KORD, 15 Nov:
+            // a dozen boarding together the moment the level was picked, and a 15-minute queue from the start).
+            foreach (var l in deps.Where(l => Until(l.DepMin) < -3)) _done.Add(Key(l, 'D'));
             var room = Math.Max(0, maxObjects - maxActive - parked);
             var placed = 0;
             foreach (var l in upcoming)
@@ -1122,7 +1127,10 @@ public sealed partial class TrafficWorld
         }
         // Arrivals still far out (handed over from the whole sky) don't count against the traffic level: only what's
         // near the airport does (and only that is ever drawn in the sim).
-        var active = Flights.Count(f => f.Kind != "parked" && !f.Test && !Far(f));
+        // Moving aircraft: not those still boarding at the gate (held for their slot, or before push-back) — they're
+        // parked, and counting them let a queue of held departures stop every new flight (KORD, 15 Nov: 29 flights
+        // "skipped (traffic limit)" in 20 minutes).
+        var active = Flights.Count(f => f.Kind != "parked" && !f.Test && !Far(f) && !(f.Kind == "departure" && f.Phase == "boarding"));
         var objects = Flights.Count(f => !Far(f));
         // Departures: board a few minutes before, push back on time.
         foreach (var l in deps)
@@ -2251,7 +2259,11 @@ public sealed partial class TrafficWorld
                 .OrderBy(x => x).ToList();
             var occ = _rotSeen.TryGetValue(g.First().Rwy!, out var seen) ? seen : 55;
             double prev = double.NegativeInfinity; Flight? prevF = null;
-            foreach (var f in g.OrderBy(x => x.Phase is "lined up" or "lining up" ? 0 : x.Phase == "holding short" ? 1 : 2).ThenBy(x => x.ReadyAt))
+            // A departure held at the gate keeps its place in the queue (when it was ready as the hold began): its own
+            // ready time slides on while it waits, and ordered by that, every held one stayed behind the rest and was
+            // only let go by the 15-minute limit (KORD, 15 Nov: 13 held, three pushed together after 15 minutes).
+            foreach (var f in g.OrderBy(x => x.Phase is "lined up" or "lining up" ? 0 : x.Phase == "holding short" ? 1 : 2)
+                         .ThenBy(x => !double.IsNaN(x.GateHeldSince) && !double.IsNaN(x.QueueReadyAt) ? x.QueueReadyAt : x.ReadyAt))
             {
                 var gap = prevF is null ? 0 : prevF.P.Heavy ? 120 : 75;
                 var t = Math.Max(f.ReadyAt + (f.Phase is "lined up" ? 5 : 35), prev + gap);   // lining up and rolling: ~35 s
@@ -2288,6 +2300,7 @@ public sealed partial class TrafficWorld
         {
             if (wait <= 240) return false;
             f.GateHeldSince = Time;
+            f.QueueReadyAt = f.ReadyAt;
             Log($"{f.Callsign}: held at the gate for its departure slot (the wait at runway {f.Rwy?.Ident} would be {wait / 60:0.0} min)");
             return true;
         }

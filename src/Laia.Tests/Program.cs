@@ -368,6 +368,32 @@ Console.WriteLine("== Changing the traffic level while traffic runs refits it at
     Check(back >= medium && back == real, "Real world brings them all back at once");
 }
 
+Console.WriteLine("== A bank of departures at once: held at the gate in order, released one by one (KORD, 15 Nov)");
+{
+    var apt = new AirportModel(TestAirport.Build(false));
+    var sched = new Laia.Common.Airports.ScheduleData { Airport = "TEST", Source = "AIG" };
+    const int start = 2 * 1440 + 600;
+    for (var i = 0; i < 12; i++)
+        sched.Legs.Add(new() { Airline = "AAL", Operator = "AAL", Title = "T", Type = "B738", Reg = $"N{i}BK", Flight = $"{500 + i}", Dep = "TEST", Arr = "KYYY", DepMin = start + 6 + (i % 3), ArrMin = start + 200 });
+    var log = new List<string>();
+    var world = new TrafficWorld(apt, new TestSource(), seed: 9) { Level = TrafficLevel.Busy, Wind = new Wind(270, 8), Schedule = sched, WeekMinute = start };
+    world.Log = s2 => log.Add($"{world.Time / 60,5:0.0} min {s2}");
+    var airborne = new Dictionary<string, double>();
+    for (var t = 0.0; t < 50 * 60; t += 0.5)
+    {
+        world.WeekMinute = start + world.Time / 60;
+        world.Step(0.5);
+        foreach (var f in world.Flights) if (f.Kind == "departure" && !f.OnGround && !airborne.ContainsKey(f.Callsign)) airborne[f.Callsign] = world.Time / 60;
+    }
+    var times = airborne.Values.OrderBy(x => x).ToList();
+    var gaps = times.Zip(times.Skip(1), (x, y) => y - x).ToList();
+    foreach (var x in log.Where(x => x.Contains("gate hold") || x.Contains("held at the gate")).Take(4)) Console.WriteLine("  " + x);
+    Console.WriteLine($"  {times.Count} of 12 airborne, at {string.Join(", ", times.Select(x => x.ToString("0.0")))} min");
+    Check(times.Count == 12, "the whole bank departs");
+    Check(gaps.Count > 0 && gaps.Max() < 3, $"one after another, no long gaps (longest {(gaps.Count > 0 ? gaps.Max() : 0):0.0} min)");
+    Check(!log.Any(x => x.Contains("released from the gate hold after 15.0")), "nobody waits out the 15-minute limit");
+}
+
 Console.WriteLine("== Real gates override the scenery's gate assignments");
 {
     var apt = new AirportModel(TestAirport.Build(false));
