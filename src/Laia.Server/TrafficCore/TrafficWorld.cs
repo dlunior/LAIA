@@ -233,6 +233,12 @@ public sealed partial class TrafficWorld
     public int Movements { get; private set; }
     /// <summary>The airport's real schedule; when set, traffic follows it instead of made-up flights.</summary>
     public ScheduleData? Schedule { get; set; }
+    /// <summary>
+    /// Made-up airline traffic when the airport has no schedule (tests, and the test airport). Off for real airports:
+    /// no schedule means no airline service, and no airliners are made up for it (KPWK and KJVL, 15 Nov: airliners
+    /// landing at an executive airport and a regional field with no airline flights).
+    /// </summary>
+    public bool GenericTraffic { get; set; } = true;
     /// <summary>Current time as minutes into the week (Monday 00:00 UTC = 0), from the simulator's clock.</summary>
     public double WeekMinute { get; set; } = -1;
     /// <summary>The gates the airlines really use here (learned from real flight data); overrides the scenery's assignments.</summary>
@@ -530,7 +536,7 @@ public sealed partial class TrafficWorld
         else if (Automatic && Level != TrafficLevel.Off && Apt.HasGround)
         {
             if (Schedule is { Legs.Count: > 0 } && WeekMinute >= 0) RunSchedule();
-            else Schedule_();
+            else if (GenericTraffic) Schedule_();
         }
         if (Level == TrafficLevel.Off) foreach (var f in Flights) if (!f.Test) f.Done = true;
         var sig = string.Join(",", ArrRwys.Select(e => e.Ident)) + "|" + string.Join(",", DepRwys.Select(e => e.Ident));

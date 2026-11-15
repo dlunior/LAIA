@@ -92,13 +92,14 @@ public sealed class AirportStore(ILogger<AirportStore> log)
     }
 
     /// <summary>The nearest airport on file with a usable layout, within maxNm of the position.</summary>
-    public (AirportModel model, double nm)? Nearest(double lat, double lon, double maxNm)
+    public (AirportModel model, double nm)? Nearest(double lat, double lon, double maxNm, Func<string, bool>? allowed = null)
     {
         List<AirportData> all;
         lock (_gate) { EnsureLoaded(); all = _data.Values.ToList(); }
         (AirportData d, double nm)? best = null;
         foreach (var d in all)
         {
+            if (allowed is not null && !allowed(d.Icao)) continue;
             var nm = Geo2.DistanceNm(lat, lon, d.Lat, d.Lon);
             if (nm <= maxNm && (best is null || nm < best.Value.nm)) best = (d, nm);
         }

@@ -826,6 +826,8 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
             if (model is null) continue;
             foreach (var a in model.Data.Arrivals) shared.Add(AirportRules.Base(a.Name));
             if (_neighbours.Any(n => n.Apt.Icao == icao)) continue;
+            // Never a second copy of an airport LAIA already runs in full (the destination prepared ahead).
+            if (_ahead?.Apt.Icao == icao) continue;
             var nb = new TrafficWorld(model, source)
             {
                 RunwayOnly = true, Level = Level, ClockFrom = () => main.ScheduleClock, ClockOwner = main, Automatic = _prep?.Ready ?? true,
@@ -875,7 +877,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         }
         if (!want || _ahead is not null || model is null) return;
         if (!source.CatalogKnown) return;
-        _ahead = new TrafficWorld(model, source) { Level = Level, Automatic = false, HoldRunways = true, Log = s => log.LogInformation("{msg}", s) };
+        _ahead = new TrafficWorld(model, source) { Level = Level, Automatic = false, HoldRunways = true, GenericTraffic = false, Log = s => log.LogInformation("{msg}", s) };
         _aheadPrep = new Prep(model.Icao);
         if (metar.Wind(model.Icao) is { } mw) _ahead.Wind = new Wind(mw.dir ?? 0, mw.kt);
         _aheadNeighbourWant = NeighbourWant(model, Family(model));
@@ -893,9 +895,28 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         if (learn.Count > 0) history.Want(learn);
     }
 
+    /// <summary>
+    /// The airports LAIA runs with ground traffic (user, 12 Nov: "as far as ground traffic we only need the departing
+    /// and arriving fields of the user"; 15 Nov, KORD: airliners landing at KPWK). With a flight plan: its departure
+    /// and destination fields only — flying past or near another airport (KBIS, KRST, KDBQ, KJVL, then KPWK 19 nm
+    /// from O'Hare) no longer makes it the traffic airport, and the destination takes over as soon as the user is
+    /// within 40 nm of it. On the ground somewhere else (a different start), that airport. With no flight plan: the
+    /// nearest airport with airline service (14+ passenger flights a week in the schedules).
+    /// </summary>
+    private bool MayRun(string icao, AircraftState sim)
+    {
+        if (simBrief.Plan is { } plan && (plan.Origin.Length > 0 || plan.Destination.Length > 0))
+        {
+            if (icao.Equals(plan.Origin, StringComparison.OrdinalIgnoreCase) || icao.Equals(plan.Destination, StringComparison.OrdinalIgnoreCase)) return true;
+            if (!sim.OnGround) return false;
+            return airports.Nearest(sim.Lat, sim.Lon, 3) is { } here && here.model.Icao == icao;
+        }
+        return PassengerService(icao) != false;
+    }
+
     private void UpdateWorldCore(AircraftState sim)
     {
-        var near = airports.Nearest(sim.Lat, sim.Lon, 40);
+        var near = airports.Nearest(sim.Lat, sim.Lon, 40, icao => MayRun(icao, sim));
         // Keep the traffic airport while the user is still within 40 nm of it: flying out past a neighbour (Mirabel,
         // climbing west out of Montréal) doesn't make the neighbour the traffic airport — only landing or being on
         // the ground at another airport does, or leaving the area.
@@ -918,7 +939,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                     _testWorld = null;
                     return;
                 }
-                _world = new TrafficWorld(n.model, source) { Level = Level, Automatic = false, HoldRunways = true, Log = s => log.LogInformation("{msg}", s) };
+                _world = new TrafficWorld(n.model, source) { Level = Level, Automatic = false, HoldRunways = true, GenericTraffic = false, Log = s => log.LogInformation("{msg}", s) };
                 _prep = new Prep(n.model.Icao);
                 _world.Wind = new Wind(sim.WindDirection, sim.WindSpeed);
                 log.LogInformation("Traffic airport: {icao} {name} ({nm:0} nm away); taxi map {cal}; {desc}", n.model.Icao, n.model.Name, n.nm, n.model.Calibration, n.model.Describe());
