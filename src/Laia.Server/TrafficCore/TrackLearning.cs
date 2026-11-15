@@ -25,7 +25,7 @@ public sealed class AirportProfile
     public List<TaxiTrack> Taxi { get; set; } = new();
     /// <summary>What the profile holds: 2 = with taxi tracks; 3 = airline passenger jets only; 4 = three days. Older ones are learned again.</summary>
     public int Version { get; set; }
-    public const int CurrentVersion = 5;   // 5: landings seen only down to a few hundred feet count (KMCI)
+    public const int CurrentVersion = 6;   // 5: landings seen only down to a few hundred feet count (KMCI); 6: arrival samples kept (KMCI)
 
     public sealed class TaxiTrack
     {
@@ -147,7 +147,11 @@ public static class TrackLearner
                 {
                     if (!arr.TryGetValue(r.Ident, out var l)) arr[r.Ident] = l = new();
                     l.Add(a.Value);
-                    Sample("arrival", r.Ident, tr, Back(tr, i, 1500), i);
+                    // From 25 minutes before the landing, or from the start of what was kept of the track (only the part near the
+                    // airport is kept, usually less than 25 minutes: every such arrival was left out of the samples — KMCI,
+                    // 15 Nov: 3 lines on the map; it also starved the real-vectors-off-the-STAR rule).
+                    var from = Back(tr, i, 1500);
+                    Sample("arrival", r.Ident, tr, from < 0 ? 0 : from, i);
                 }
                 Taxi("arrival", r.Ident, tr, xy, i, +1);
                 // Skip past this landing (taxi, park).
@@ -261,7 +265,7 @@ public static class TrackLearner
         {
             var key = kind + rw;
             var c = sampleCount.GetValueOrDefault(key);
-            if (c >= 40 || from < 0) return;
+            if (c >= 500 || from < 0) return;   // up to 500 of each kind per runway: every real track (3 days) for the map and the vectors (user, 15 Nov: "all arrival and departure tracks lower than FL200 should be shown")
             sampleCount[key] = c + 1;
             var pts = new List<double[]>();
             double lastT = double.MinValue;

@@ -582,16 +582,26 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         foreach (var w in ws)
         {
             if (history.Profile(w.Apt.Icao) is not { } p) continue;
-            // Arrivals to the landing runways and departures from the departure runways (not either kind on any runway in
-            // use), and as many of each, spread over the day(s), so neither looks busier than it is.
+            // Every real arrival to the landing runways and departure from the departure runways, the part below FL200
+            // (user, 15 Nov: "all arrival and departure tracks lower than FL200 should be shown" — no longer an equal
+            // number of each).
             var arrRw = w.ArrRwys.Select(e => e.Ident).ToHashSet();
             var depRw = w.DepRwys.Select(e => e.Ident).ToHashSet();
-            var arr = p.Samples.Where(t => t.Kind == "arrival" && (arrRw.Count == 0 || arrRw.Contains(t.Runway))).ToList();
-            var dep = p.Samples.Where(t => t.Kind == "departure" && (depRw.Count == 0 || depRw.Contains(t.Runway))).ToList();
-            // As many of each kind (neither looks busier than it is); with none of one kind, up to 40 of the other.
-            var n = arr.Count == 0 || dep.Count == 0 ? 40 : Math.Min(arr.Count, dep.Count);
-            static List<T> Spread<T>(List<T> l, int n) => l.Count <= n ? l : Enumerable.Range(0, n).Select(i => l[(int)((long)i * l.Count / n)]).ToList();
-            all.AddRange(Spread(arr, n).Concat(Spread(dep, n)).Select(t => (object)new { kind = t.Kind, runway = t.Runway, points = t.Points, icao = p.Icao }));
+            static List<double[]> Below(List<double[]> pts, bool arrival)
+            {
+                // The contiguous part below FL200 next to the runway: the end of an arrival, the start of a departure.
+                var res = new List<double[]>();
+                if (arrival) { for (var i = pts.Count - 1; i >= 0 && (pts[i].Length < 3 || pts[i][2] < 20000); i--) res.Add(pts[i]); res.Reverse(); }
+                else for (var i = 0; i < pts.Count && (pts[i].Length < 3 || pts[i][2] < 20000); i++) res.Add(pts[i]);
+                return res;
+            }
+            foreach (var t in p.Samples)
+            {
+                var arrival = t.Kind == "arrival";
+                if (!(arrival ? arrRw.Count == 0 || arrRw.Contains(t.Runway) : depRw.Count == 0 || depRw.Contains(t.Runway))) continue;
+                var pts = Below(t.Points, arrival);
+                if (pts.Count >= 2) all.Add(new { kind = t.Kind, runway = t.Runway, points = pts, icao = p.Icao });
+            }
             icaos.Add($"{p.Icao} {p.Day}");
         }
         if (icaos.Count == 0) return null;
