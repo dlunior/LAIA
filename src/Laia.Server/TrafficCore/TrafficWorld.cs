@@ -937,10 +937,17 @@ public sealed partial class TrafficWorld
     /// <summary>The traffic level thins the real schedule (the same flights each time).</summary>
     private bool Keep(ScheduleLeg l) => KeepAirframe(l.Reg.Length > 0 ? l.Reg : l.Callsign);
 
-    private bool KeepAirframe(string key)
+    private bool KeepAirframe(string key) => KeepAtLevel(Level, key);
+
+    /// <summary>
+    /// Whether an airframe flies at this level: Light about a third, Medium about two thirds, Busy and up every one.
+    /// Whole airframes are kept or left out (so an aircraft that lands also leaves again), the same ones every time —
+    /// at the airports and, since 15 Nov, between them (user: "should the traffic level also thin the traffic between
+    /// airports?" — "Yes").
+    /// </summary>
+    public static bool KeepAtLevel(TrafficLevel level, string key)
     {
-        var pct = Level switch { TrafficLevel.Light => 35, TrafficLevel.Medium => 65, _ => 100 };   // Busy, Real world and Peak: every flight (Busy under caps)
-        // Whole airframes are kept or left out (so an aircraft that lands also leaves again), the same ones every time.
+        var pct = level switch { TrafficLevel.Off => 0, TrafficLevel.Light => 35, TrafficLevel.Medium => 65, _ => 100 };   // Busy, Real world and Peak: every flight (Busy under caps)
         uint h = 2166136261;
         foreach (var c in key) h = (h ^ c) * 16777619;
         return h % 100 < pct;

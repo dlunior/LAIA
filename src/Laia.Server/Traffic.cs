@@ -325,6 +325,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         {
             var l = p.Leg;
             if (p.AltFt < 8000 || TrafficWorld.IsCargo(l.Airline) || TrafficWorld.IsCargo(l.Operator) || Perf.For(l.Type).Family == "turboprop") continue;
+            if (!TrafficWorld.KeepAtLevel(Level, l.Reg.Length > 0 ? l.Reg : l.Callsign)) continue;   // the level thins it, as at the airports
             if (callsigns.Contains(l.Callsign)) continue;
             var owned = false;
             foreach (var wd in worlds)
