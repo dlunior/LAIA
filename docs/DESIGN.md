@@ -527,6 +527,8 @@ around. Airliners can't do that on a taxiway, and a real ground controller never
 
 ## 4a. Feature schedule (the build order, with how each part is tested)
 
+**Plan reset, 15 Nov 2026 (user: "take all uncompleted items … and formulate a new implementation plan with just our unfinished items"):** the open work is now one plan in eight phases, kept as the Claude doc "LAIA implementation plan (reset)": 1 confirm in flight what's built (0.1.179–0.1.195); 2 traffic accuracy and visibility (STAR "expect" reading, dead-end pushbacks, arrival spacing, map labels, codeshare gate codes, wake categories F–I, main gear tracking, crossing-runway ops at LGA); 3 the rest of M10 (push-back timed to the runway gap, take-off predictions, ground instructions, no 180s); 4 the rest of M11 (planned changeover, notes with lead time, approach tied to the neighbours' flow); 5 M12; 6 M9 and cargo's return; 7 M13; 8 M14 last. Open questions for the user: whether the level should thin en-route traffic, whether M9 moves earlier, where shared learned data would be hosted.
+
 Section 4 says *what* LAIA will do; this section says *in which order* it gets built. Each milestone is a set of
 releases that can be tested on its own before the next one starts. Every milestone also gets offline checks in
 `Laia.Tests`, so CI proves the rules before the user flies.
