@@ -4328,7 +4328,7 @@ public sealed partial class TrafficWorld
             // An arrival behind the user in the same runway's sequence is spaced by distance, not kept above (KATL,
             // 15 Nov: DAL2266, behind the user for 08L, "descent stopped at 5,000 ft for DAL1196 (you) below" — it would
             // end up high on the approach).
-            if (o.Phase == "user" && UserArr is { Rwy: { } ur } && f.Rwy?.Runway == ur.Runway) continue;
+            if (o.Phase == "user" && UserArr is { Rwy: { } ur } && f.Rwy?.Runway == ur.Runway && string.Equals(UserDestination, Apt.Icao, StringComparison.OrdinalIgnoreCase)) continue;
             double highest = double.MinValue; var conflict = false;
             for (var t = 0.0; t <= 120; t += 10)
             {
