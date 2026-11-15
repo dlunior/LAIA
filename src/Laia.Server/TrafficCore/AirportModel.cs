@@ -367,7 +367,10 @@ public sealed class AirportModel
             switch (l.AltDesc)
             {
                 case 1: minA = maxA = l.Alt1Ft; break;
-                case 2: minA = l.Alt1Ft; break;
+                // "At or above" with a lower second altitude: MSFS codes an ILS fix inside the intercept this way (Calgary
+                // ULBUD 3.8 nm out: "at or above 6,500" and 4,890, the glideslope's altitude there). The second one is
+                // the altitude flown at the fix; the first is the intercept altitude from further out.
+                case 2: minA = l.Alt2Ft > 0 && l.Alt2Ft < l.Alt1Ft - 100 ? l.Alt2Ft : l.Alt1Ft; break;
                 case 3: maxA = l.Alt1Ft; break;
                 case 4: maxA = l.Alt1Ft; minA = l.Alt2Ft; break;
             }

@@ -1309,7 +1309,15 @@ public sealed partial class TrafficWorld
             var from = high ? (f.P.Family == "turboprop" ? 230 : 280) : 250;
             var slowNm = kt > 0 && kt < from ? (from - kt) / 10 + 1 : 0;
             if (c.Max > 0) { var h = c.Max + Math.Max(0, ahead - slowNm) * 300; if (h < hi) { hi = h; hiS = c.S; } }
-            if (c.Min > 0 && c.Min > lo) { lo = c.Min; loS = c.S; }
+            // On the final approach no floor is above the glidepath (a 3° path clears every step-down fix; a floor above
+            // it is a misread intercept altitude, and it left every arrival 500 ft high at 1,000 ft — CYYC, MCO).
+            var min = c.Min;
+            if (min > 0 && f.Kind == "arrival" && f.Rwy is { } rw && f.ThrS > 0)
+            {
+                var dAt = (f.ThrS - c.S) / Geo2.MPerNm;
+                if (dAt is >= 0 and < 12) min = Math.Min(min, ProfileLow(rw, dAt) + 100);
+            }
+            if (min > 0 && min > lo) { lo = min; loS = c.S; }
         }
         var t = Math.Min(plan, hi);
         // A floor at a nearer fix wins over getting down early for a farther one: "at or above 9,000" at MIDDL, then

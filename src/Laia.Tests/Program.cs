@@ -631,6 +631,43 @@ Console.WriteLine("== Vectors to final: downwind, base, a 20–30° intercept 8�
     }
 }
 
+Console.WriteLine("== An ILS fix coded 'at or above' the intercept altitude, with the glideslope altitude second (Calgary ULBUD)");
+{
+    // CYYC ILS 17L in MSFS: VIKTI "at or above 6,500", ULBUD (3.8 nm out) "at or above 6,500" with 4,890 (the glideslope's
+    // altitude there) as the second altitude. Read as 6,500 at 3.8 nm, every arrival arrived 500 ft high at 1,000 ft
+    // above the field and went around (CYYC, 14 Nov: 15 go-arounds in 45 minutes; MCO had them too).
+    var nm = Geo2.MPerNm;
+    var data = TestAirport.Build(false);
+    data.Arrivals.Clear(); data.Approaches.Clear();
+    var map = new LocalMap(data.Lat, data.Lon);
+    Laia.Common.Airports.ProcedureLeg Fix(string name, double x, int type, int desc, double a1, double a2)
+    {
+        var (la, lo) = map.ToLatLon(new V2(x, 0));
+        return new() { Type = type, Fix = name, Lat = la, Lon = lo, Course = 270, AltDesc = desc, Alt1Ft = a1, Alt2Ft = a2 };
+    }
+    var elev = 10 * 3.28084;
+    data.Approaches.Add(new() { Type = 4, Runway = "27", FinalLegs = {
+        Fix("VIKTX", 1500 + 10.9 * nm, 15, 2, elev + 2950, elev + 2950),
+        Fix("ULBUX", 1500 + 3.8 * nm, 4, 2, elev + 2950, elev + 1330),
+        Fix("RW27", 1500, 4, 1, elev + 105, 0) } });
+    var world = new TrafficWorld(new AirportModel(data), new TestSource(), seed: 31) { Automatic = false, Wind = new Wind(270, 5) };
+    var log = new List<string>(); world.Log = s2 => log.Add(s2);
+    world.SelectRunways(true);
+    var f = world.SpawnArrival(40, true)!;
+    double offAt1000 = double.NaN;
+    var rwy = f.Rwy!;
+    for (var t = 0.0; t < 2400 && !f.OnGround && !f.WentAround; t += 0.5)
+    {
+        world.Step(0.5);
+        var dth = (f.ThrS - f.S) / nm;
+        if (double.IsNaN(offAt1000) && !f.OnGround && f.AltFt - elev < 1000 && dth < 6) offAt1000 = f.AltFt - (elev + 50 + dth * 318.4);
+    }
+    foreach (var x in log.Where(x => x.Contains(f.Callsign) && (x.Contains("going around") || x.Contains("landed")))) Console.WriteLine("  " + x);
+    Console.WriteLine($"  {f.Route}: {(f.WentAround ? "went around" : f.OnGround ? "landed" : "still flying")}; {offAt1000:+0;-0} ft from the 3° path at 1,000 ft");
+    Check(f.OnGround && !f.WentAround, "lands off the first approach: the glideslope altitude at the fix is the restriction, not the intercept altitude");
+    Check(Math.Abs(offAt1000) < 300, "on the glidepath at 1,000 ft above the field");
+}
+
 Console.WriteLine("== Airport rules read from the FAA's AAUP text (any airport, no airport-specific code)");
 {
     // The text of Orlando's RNAV Departure AAUP (AL-571), as a PDF text extractor gives it.
