@@ -183,8 +183,11 @@ public sealed partial class TrafficWorld
             var isBusy = value >= TrafficLevel.Medium;
             if (value != TrafficLevel.Peak) { _peakSet = false; _peakOffset = 0; PeakInfo = null; }
             if (wasBusy != isBusy && ArrRwy is not null) SelectRunways(true);
+            if (value != TrafficLevel.Off) _levelChanged = true;
         }
     }
+    /// <summary>The level changed while traffic runs: refit it at once (more or fewer aircraft), not only as new flights come.</summary>
+    private bool _levelChanged;
     private TrafficLevel _level = TrafficLevel.Medium;
     public RunwayEnd? ArrRwy { get; private set; }
     /// <summary>Every landing runway in use (the ATIS can name several, e.g. Orlando's 35L and 36L); ArrRwy is the main one.</summary>
@@ -923,12 +926,14 @@ public sealed partial class TrafficWorld
     }
 
     /// <summary>The traffic level thins the real schedule (the same flights each time).</summary>
-    private bool Keep(ScheduleLeg l)
+    private bool Keep(ScheduleLeg l) => KeepAirframe(l.Reg.Length > 0 ? l.Reg : l.Callsign);
+
+    private bool KeepAirframe(string key)
     {
         var pct = Level switch { TrafficLevel.Light => 35, TrafficLevel.Medium => 65, _ => 100 };   // Busy, Real world and Peak: every flight (Busy under caps)
         // Whole airframes are kept or left out (so an aircraft that lands also leaves again), the same ones every time.
         uint h = 2166136261;
-        foreach (var c in l.Reg.Length > 0 ? l.Reg : l.Callsign) h = (h ^ c) * 16777619;
+        foreach (var c in key) h = (h ^ c) * 16777619;
         return h % 100 < pct;
     }
 
@@ -1042,6 +1047,27 @@ public sealed partial class TrafficWorld
                 _peakOffset -= _peakLen;
                 _done.Clear();
                 Log($"{me}: peak test: replaying the busiest hours again");
+            }
+        }
+        if (_levelChanged)
+        {
+            // A new level while traffic runs (user, 15 Nov: "when I click Medium or Real world nothing seems to happen"
+            // — the level only changed which new flights started, so Busy → Medium or Busy → Real world showed nothing
+            // for many minutes). Fewer: the aircraft the new level leaves out go now — parked ones and arrivals still far
+            // out; anything taxiing, departing or near the airport carries on. More: the gates and the arrivals on their
+            // way in are filled again for the new level, as at the start.
+            _levelChanged = false;
+            if (_schedStarted)
+            {
+                var gone = 0;
+                foreach (var f in Flights)
+                {
+                    if (f.Done || f.Test || f.Reg.Length == 0 && f.Callsign.Length == 0) continue;
+                    if (KeepAirframe(f.Reg.Length > 0 ? f.Reg : f.Callsign)) continue;
+                    if ((f.Kind == "parked" && f.Phase == "parked") || (f.Kind == "arrival" && Far(f))) { f.Done = true; gone++; }
+                }
+                _schedStarted = false;
+                Log($"{me}: traffic level now {Level}: {gone} aircraft the new level leaves out removed; the gates and arrivals refilled for it");
             }
         }
         var deps = legs.Where(l => l.Dep == me && Keep(l)).ToList();

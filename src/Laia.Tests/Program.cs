@@ -341,6 +341,33 @@ Console.WriteLine("== Traffic from a real schedule");
     Check(dl >= 9, $"arrived airframes leave again on their next flight ({dl} of 10)");
 }
 
+Console.WriteLine("== Changing the traffic level while traffic runs refits it at once (15 Nov: Medium and Real world seemed to do nothing)");
+{
+    var apt = new AirportModel(TestAirport.Build(false));
+    var sched = new Laia.Common.Airports.ScheduleData { Airport = "TEST", Source = "AIG" };
+    const int start = 2 * 1440 + 600;
+    for (var i = 0; i < 16; i++)
+        sched.Legs.Add(new() { Airline = "DAL", Operator = "DAL", Title = "T", Type = "B739", Reg = $"N{i}LV", Flight = $"{400 + i}", Dep = "TEST", Arr = "KYYY", DepMin = start + 60 + i * 8, ArrMin = start + 200 });
+    var log = new List<string>();
+    var world = new TrafficWorld(apt, new TestSource(), seed: 9) { Level = TrafficLevel.RealWorld, Wind = new Wind(270, 8), Schedule = sched, WeekMinute = start };
+    world.Log = s2 => log.Add(s2);
+    int Parked() => world.Flights.Count(f => !f.Done && f.Kind == "parked");
+    void Run(double secs) { for (var t = 0.0; t < secs; t += 0.5) { world.WeekMinute = start + world.Time / 60; world.Step(0.5); } }
+    Run(5);
+    var real = Parked();
+    world.Level = TrafficLevel.Light; Run(2);
+    var light = Parked();
+    world.Level = TrafficLevel.Medium; Run(2);
+    var medium = Parked();
+    world.Level = TrafficLevel.RealWorld; Run(2);
+    var back = Parked();
+    foreach (var x in log.Where(x => x.Contains("traffic level now"))) Console.WriteLine("  " + x);
+    Console.WriteLine($"  aircraft at the gates: Real world {real} → Light {light} → Medium {medium} → Real world {back}");
+    Check(light < real, "Light removes the aircraft it leaves out at once");
+    Check(medium > light, "Medium adds aircraft at once");
+    Check(back >= medium && back == real, "Real world brings them all back at once");
+}
+
 Console.WriteLine("== Real gates override the scenery's gate assignments");
 {
     var apt = new AirportModel(TestAirport.Build(false));

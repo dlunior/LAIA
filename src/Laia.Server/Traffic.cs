@@ -43,7 +43,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         if (level == "normal") level = "medium";
         if (level is not ("off" or "light" or "medium" or "busy" or "real" or "peak")) return;
         settings.Update(System.Text.Json.JsonSerializer.SerializeToElement(new Dictionary<string, string> { ["traffic_level"] = level }));
-        lock (_gate) if (_world is not null) _world.Level = Level;
+        lock (_gate) foreach (var w in Worlds()) w.Level = Level;   // the destination ahead and the neighbouring fields too
         log.LogInformation("Traffic level: {level}", level);
     }
 
