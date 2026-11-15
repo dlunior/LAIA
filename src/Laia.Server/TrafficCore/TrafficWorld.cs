@@ -2814,11 +2814,20 @@ public sealed partial class TrafficWorld
             // or base, so the STAR is only flown until it's about 8 nm from the airport.
             var near = starPts.FindIndex(p => p.P.Length < 8 * Geo2.MPerNm);
             if (near >= 0) starPts.RemoveRange(near, starPts.Count - near);
+            // Where real traffic is turned off this STAR and how it's vectored onto final (adsb.lol): the STAR up to
+            // there, then the way a real arrival on it flew to the final (user, 15 Nov, KORD: arrivals from the
+            // northwest "blindly following the STAR and not taking into consideration the ADSB data on vectors to final").
+            var realVec = starPts.Count >= 2 ? RealVectors(rwy, starPts) : null;
+            if (realVec is { } rv)
+            {
+                starPts.RemoveRange(rv.cut + 1, starPts.Count - rv.cut - 1);
+                starPts.AddRange(rv.pts.Select(q => new AirPoint(q, "")));
+            }
             if (star is not null && starPts.Count > 0) names.Add(star.Name);
             // The STAR's restrictions, kept before the approach join trims the STAR (the joining fix keeps its restriction).
             altFixes.AddRange(starPts.Where(p => p.AltMinFt > 0 || p.AltMaxFt > 0 || p.SpeedKt is >= 100 and < 400));
             named.AddRange(starPts.Where(p => p.Fix.Length > 0));
-            var (appName, appPts) = ApproachPoints(rwy, starPts);
+            var (appName, appPts) = realVec is not null ? FinalFrom(rwy, starPts[^1].P) : ApproachPoints(rwy, starPts);
             if (appName.Length > 0) names.Add(appName);
             if (entry is { } en1)
             {
@@ -2843,7 +2852,7 @@ public sealed partial class TrafficWorld
             if (appPts.Count > 0) { route.AddRange(appPts.Select(p => p.P)); speeds.AddRange(appPts.Select(p => p.SpeedKt)); }
             else route.AddRange(Vectors(route[^1], rwy, ShapeFor(rwy)));
             while (speeds.Count < route.Count) speeds.Add(0);
-            ShapeFinal(route, speeds, rwy, ShapeFor(rwy));
+            if (realVec is null) ShapeFinal(route, speeds, rwy, ShapeFor(rwy));   // real vectors are flown as real traffic flew them
         }
         var thrIndex = route.Count;
         route.Add(rwy.Threshold);
@@ -2907,6 +2916,74 @@ public sealed partial class TrafficWorld
         var rt = star.RunwayTransitions.FirstOrDefault(t => t.Name == rwy.Ident);
         if (rt is not null) legs.AddRange(rt.Legs);
         return star;
+    }
+
+    /// <summary>
+    /// Real traffic's vectors off a STAR (adsb.lol tracks learned for the airport): of the real arrivals to this runway
+    /// that flew this STAR (within 2 nm of it for at least 5 nm), where they were turned off it (more than 2 nm away from
+    /// it and staying away), and the path the typical one flew from there until established on final (within 0.3 nm of
+    /// the centreline). The typical one is the one turned off at the median distance from the airport. Null when fewer
+    /// than three real arrivals flew the STAR, or they stayed on it to its end (then the STAR and the usual vectors apply).
+    /// </summary>
+    private (int cut, List<V2> pts)? RealVectors(RunwayEnd rwy, List<AirPoint> starPts)
+    {
+        if (Learned is not { Samples.Count: > 0 } prof) return null;
+        var nm = Geo2.MPerNm;
+        var star = starPts.Select(p => p.P).ToList();
+        double ToStar(V2 p) { var d = double.MaxValue; for (var i = 0; i + 1 < star.Count; i++) d = Math.Min(d, DistToSegment(p, star[i], star[i + 1])); return d; }
+        var found = new List<(double leaveNm, V2 leave, List<V2> rest)>();
+        foreach (var smp in prof.Samples)
+        {
+            if (smp.Kind != "arrival" || smp.Runway != rwy.Ident || smp.Points.Count < 6) continue;
+            var pts = smp.Points.Where(q => q.Length >= 2).Select(q => Apt.Map.ToXY(q[0], q[1])).ToList();
+            // Flew the STAR: within 2 nm of it for 5 nm or more.
+            int i = 0; double onFor = 0; int lastOn = -1;
+            for (; i < pts.Count; i++)
+            {
+                if (ToStar(pts[i]) < 2 * nm) { if (lastOn >= 0) onFor += (pts[i] - pts[lastOn]).Length; lastOn = i; }
+                else if (lastOn >= 0 && onFor >= 5 * nm)
+                {
+                    // Left it: and stays more than 2 nm away from here on (not a wiggle).
+                    var stays = true;
+                    for (var j = i; j < Math.Min(pts.Count, i + 4); j++) if (ToStar(pts[j]) < 2 * nm) { stays = false; break; }
+                    if (stays) break;
+                }
+            }
+            if (lastOn < 0 || onFor < 5 * nm || i >= pts.Count) continue;
+            // From the turn off the STAR until established on final.
+            var rest = new List<V2>();
+            for (var j = lastOn; j < pts.Count; j++)
+            {
+                rest.Add(pts[j]);
+                if (Math.Abs(rwy.Offset(pts[j])) < 0.3 * nm && rwy.Along(pts[j]) < -2 * nm && rwy.Along(pts[j]) > -20 * nm) break;
+            }
+            if (rest.Count < 2 || Math.Abs(rwy.Offset(rest[^1])) >= 0.3 * nm) continue;
+            found.Add((pts[lastOn].Length / nm, pts[lastOn], rest));
+        }
+        if (found.Count < 3) return null;
+        var typical = found.OrderBy(x => x.leaveNm).ElementAt(found.Count / 2);
+        // Where on the STAR it was turned off: the STAR point before the nearest segment.
+        int cut = 0; double best = double.MaxValue;
+        for (var k = 0; k + 1 < star.Count; k++) { var d = DistToSegment(typical.leave, star[k], star[k + 1]); if (d < best) { best = d; cut = k; } }
+        // Thin the real track to points at least 1 nm apart (the radar positions are dense and a little noisy).
+        var thin = new List<V2>();
+        foreach (var q in typical.rest) if (thin.Count == 0 || (q - thin[^1]).Length >= 1 * nm) thin.Add(q);
+        if ((typical.rest[^1] - thin[^1]).Length > 1) thin.Add(typical.rest[^1]);
+        return (cut, thin);
+    }
+
+    /// <summary>The final approach from where a real-vectors path is established on it: the runway's approach points
+    /// closer in than that (with their restrictions), or straight down the centreline.</summary>
+    private (string name, List<AirPoint> pts) FinalFrom(RunwayEnd rwy, V2 established)
+    {
+        var app = ApproachFor(rwy) ?? Apt.Data.Approaches.Where(a => a.Runway == rwy.Ident && a.FinalLegs.Count > 0).OrderBy(a => ApproachPref(a.Type)).FirstOrDefault();
+        var at = rwy.Along(established);
+        if (app is null) return ("vectors as real traffic flies them (adsb.lol)", new List<AirPoint>());
+        var pts = Apt.LegsToPoints(app.FinalLegs, established, 3000, out _);
+        TrimAtRunway(pts, rwy);
+        var keep = pts.Where(p => rwy.Along(p.P) > at + 0.3 * Geo2.MPerNm && Math.Abs(rwy.Offset(p.P)) < 0.5 * Geo2.MPerNm).ToList();
+        var typeLabel = app.Type switch { 4 => "ILS", 10 => "RNAV", 1 => "GPS", 5 => "LOC", 2 => "VOR", 7 => "LDA", _ => "approach" };
+        return ($"vectors as real traffic flies them (adsb.lol) to the {typeLabel} {rwy.Ident}{(app.Suffix.Length > 0 ? " " + app.Suffix : "")}", keep);
     }
 
     /// <summary>The approach to the runway, joined to the STAR where they share a fix. Empty if it doesn't line up.</summary>

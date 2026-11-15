@@ -721,6 +721,47 @@ Console.WriteLine("== An ILS fix coded 'at or above' the intercept altitude, wit
     Check(Math.Abs(offAt1000) < 300, "on the glidepath at 1,000 ft above the field");
 }
 
+Console.WriteLine("== Vectors off the STAR where real traffic is turned off it (KORD, 15 Nov: arrivals from the NW 'blindly following the STAR')");
+{
+    var nm = Geo2.MPerNm;
+    var data = TestAirport.Build(false);
+    data.Arrivals.Clear();
+    var map = new LocalMap(data.Lat, data.Lon);
+    Laia.Common.Airports.ProcedureLeg Fx(string name, double xNm, double yNm, int type)
+    {
+        var (la, lo) = map.ToLatLon(new V2(xNm * nm, yNm * nm));
+        return new() { Type = type, Fix = name, Lat = la, Lon = lo };
+    }
+    // A STAR from the northwest that runs on to a point 8 nm north-west of the field.
+    data.Arrivals.Add(new() { Name = "NWEST1", Legs = { Fx("NWAAA", -30, 30, 15), Fx("NWBBB", -14, 14, 18), Fx("NWCCC", -7, 9, 18), Fx("NWDDD", -5, 6, 18) } });
+    // Real arrivals to 27 (landing west, from the east): on the STAR to NWBBB, then turned east onto a downwind
+    // 5 nm north of the field, base 12 nm east, final 10 nm out.
+    double[] P(double x, double y) { var (la, lo) = map.ToLatLon(new V2(x * nm, y * nm)); return new[] { la, lo, 6000 }; }
+    var prof = new AirportProfile { Icao = "TEST", Source = "test", Day = "test" };
+    for (var k = 0; k < 5; k++)
+    {
+        var pts = new List<double[]>();
+        for (var t = 0.0; t <= 1; t += 0.05) pts.Add(P(-30 + 16 * t, 30 - 16 * t));                 // NWAAA → NWBBB
+        for (var x = -13.0; x <= 6; x += 1) pts.Add(P(x, 14 - (x + 13) / 19 * (9 + k * 0.2)));       // turned off: to the downwind
+        for (var x = 7.0; x <= 12; x += 1) pts.Add(P(x, 5));                                        // downwind
+        for (var y = 4.0; y >= 1; y -= 1) pts.Add(P(12, y));                                        // base
+        for (var x = 11.0; x >= 1.5; x -= 1) pts.Add(P(x, 0));                                       // final
+        prof.Samples.Add(new AirportProfile.SampleTrack { Kind = "arrival", Runway = "27", Points = pts });
+    }
+    var world = new TrafficWorld(new AirportModel(data), new TestSource(), seed: 41) { Automatic = false, Wind = new Wind(270, 5), Learned = prof };
+    world.SelectRunways(true);
+    var f = world.SpawnArrival(45, true)!;
+    var downwind = new V2(9 * nm, 5 * nm);
+    var minToDownwind = double.MaxValue;
+    for (var d = 0.0; d < f.Path!.Length; d += 200) minToDownwind = Math.Min(minToDownwind, (f.Path.At(d).p - downwind).Length);
+    var nearDddd = double.MaxValue;
+    for (var d = 0.0; d < f.Path.Length; d += 200) nearDddd = Math.Min(nearDddd, (f.Path.At(d).p - new V2(-5 * nm, 6 * nm)).Length);
+    Console.WriteLine($"  {f.Route}; passes {minToDownwind / nm:0.0} nm from the real downwind, {nearDddd / nm:0.0} nm from the STAR's last fix");
+    Check(f.Route.Contains("real traffic"), "flies the vectors real traffic flew");
+    Check(minToDownwind < 1.5 * nm, "out to the real downwind");
+    Check(nearDddd > 2 * nm, "turned off the STAR where real traffic is, not flown to its end");
+}
+
 Console.WriteLine("== Airport rules read from the FAA's AAUP text (any airport, no airport-specific code)");
 {
     // The text of Orlando's RNAV Departure AAUP (AL-571), as a PDF text extractor gives it.
