@@ -313,7 +313,7 @@ Console.WriteLine("== Traffic from a real schedule");
         sched.Legs.Add(new() { Airline = "UAL", Operator = "UAL", Title = "U", Type = "A320", Reg = $"N{i}UA", Flight = $"{300 + i}", Dep = "TEST", Arr = "KZZZ", DepMin = start + 8 + i * 3, ArrMin = start + 120 });
     }
     var log = new List<string>();
-    var world = new TrafficWorld(apt, new TestSource(), seed: 9) { Level = TrafficLevel.Busy, Wind = new Wind(270, 8), Schedule = sched, WeekMinute = start };
+    var world = new TrafficWorld(apt, new TestSource(), seed: 9) { Level = TrafficLevel.RealWorld, Wind = new Wind(270, 8), Schedule = sched, WeekMinute = start };
     world.Log = s => log.Add($"{start + world.Time / 60 - start,5:0.0} min {s}");
     var landedAt = new Dictionary<string, double>();
     var airborneAt = new Dictionary<string, double>();
@@ -376,7 +376,7 @@ Console.WriteLine("== A bank of departures at once: held at the gate in order, r
     for (var i = 0; i < 12; i++)
         sched.Legs.Add(new() { Airline = "AAL", Operator = "AAL", Title = "T", Type = "B738", Reg = $"N{i}BK", Flight = $"{500 + i}", Dep = "TEST", Arr = "KYYY", DepMin = start + 6 + (i % 3), ArrMin = start + 200 });
     var log = new List<string>();
-    var world = new TrafficWorld(apt, new TestSource(), seed: 9) { Level = TrafficLevel.Busy, Wind = new Wind(270, 8), Schedule = sched, WeekMinute = start };
+    var world = new TrafficWorld(apt, new TestSource(), seed: 9) { Level = TrafficLevel.RealWorld, Wind = new Wind(270, 8), Schedule = sched, WeekMinute = start };
     world.Log = s2 => log.Add($"{world.Time / 60,5:0.0} min {s2}");
     var airborne = new Dictionary<string, double>();
     for (var t = 0.0; t < 50 * 60; t += 0.5)
@@ -424,7 +424,7 @@ Console.WriteLine("== Real gates override the scenery's gate assignments");
     // Two arrivals due the same minute don't appear on top of each other.
     sched.Legs.Add(new() { Airline = "UAL", Operator = "UAL", Title = "U", Type = "A320", Reg = "N800UA", Flight = "800", Dep = "KZZZ", Arr = "TEST", DepMin = start - 120, ArrMin = start + 3 });
     sched.Legs.Add(new() { Airline = "UAL", Operator = "UAL", Title = "U", Type = "A320", Reg = "N801UA", Flight = "801", Dep = "KZZZ", Arr = "TEST", DepMin = start - 125, ArrMin = start + 3 });
-    var world = new TrafficWorld(apt, new TestSource(), seed: 5) { Level = TrafficLevel.Busy, Wind = new Wind(270, 8), Schedule = sched, WeekMinute = start, Gates = real };
+    var world = new TrafficWorld(apt, new TestSource(), seed: 5) { Level = TrafficLevel.RealWorld, Wind = new Wind(270, 8), Schedule = sched, WeekMinute = start, Gates = real };
     var log = new List<string>();
     world.Log = s => log.Add(s);
     for (var i = 0; i < 40; i++) { world.WeekMinute = start + world.Time / 60; world.Step(0.25); }
@@ -919,7 +919,7 @@ Console.WriteLine("== Hand-over of a short flight: one departing a field inside 
     var clock = 2000.0;
     var w = new TrafficWorld(new AirportModel(data), new TestSource(), seed: 4)
     {
-        Level = TrafficLevel.Busy, Wind = new Wind(270, 10), WeekMinute = 2000, ClockFrom = () => clock,
+        Level = TrafficLevel.RealWorld, Wind = new Wind(270, 10), WeekMinute = 2000, ClockFrom = () => clock,
         Locate = c => c == "KNEA" ? near : null, Schedule = sched,
     };
     w.SelectRunways(true);
@@ -1515,7 +1515,7 @@ Console.WriteLine("== Neighbouring fields: runway traffic only, on the main airp
     var clock = 2000.0;
     var nb = new TrafficWorld(new AirportModel(data), new TestSource(), seed: 2)
     {
-        RunwayOnly = true, Level = TrafficLevel.Busy, Wind = new Wind(270, 10), WeekMinute = 2000, ClockFrom = () => clock,
+        RunwayOnly = true, Level = TrafficLevel.RealWorld, Wind = new Wind(270, 10), WeekMinute = 2000, ClockFrom = () => clock,
         Locate = c => c == "KFAR" ? far : null, Schedule = sched,
     };
     nb.SelectRunways(true);
