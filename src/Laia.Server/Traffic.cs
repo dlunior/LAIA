@@ -9,7 +9,7 @@ namespace Laia.Server;
 /// Without a layout (or for the test buttons at an airport not read yet) a simple runway-only world is used.
 /// </summary>
 public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportStore airports, FlightSource source, SettingsStore settings,
-    SimBriefService simbrief, ServerState state, ScheduleStore schedules, NetworkStore network, WorldAirports worldAirports, RoutesDb routesDb, NasrDb nasrDb, AdsbHistory history, MetarReader metar, LiveRunways liveRunways, SimBriefService simBrief, ILogger<TrafficEngine> log) : BackgroundService
+    SimBriefService simbrief, ServerState state, ScheduleStore schedules, NetworkStore network, WorldAirports worldAirports, RoutesDb routesDb, NasrDb nasrDb, AdsbHistory history, MetarReader metar, LiveRunways liveRunways, SimBriefService simBrief, PerfMonitor perf, ILogger<TrafficEngine> log) : BackgroundService
 {
     private readonly object _gate = new();
     private readonly List<TrafficWorld> _neighbours = new();
@@ -1130,18 +1130,29 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
             var now = clock.Elapsed.TotalSeconds;
             var dt = Math.Clamp(now - last, 0.01, 1.0);
             last = now;
+            // Timing for the performance line (PerfMonitor): the whole update, the wait for the lock, and its parts.
+            var tickSw = System.Diagnostics.Stopwatch.StartNew();
+            var parts = new List<(string, double)>();
+            double lockMs = 0;
+            var partSw = new System.Diagnostics.Stopwatch();
+            void Part(string name) { parts.Add((name, partSw.Elapsed.TotalMilliseconds)); partSw.Restart(); }
             try
             {
                 var sim = state.Sim;
                 var live = sim is not null && sim.Connected && DateTime.UtcNow - state.SimUpdatedUtc < TimeSpan.FromSeconds(30);
+                var lockSw = System.Diagnostics.Stopwatch.StartNew();
                 lock (_gate)
                 {
-                    if (live && now - lastWorldCheck > 5) { UpdateWorld(sim!); lastWorldCheck = now; }
-                    if (now - _othersAt > 1) { _othersAt = now; ShareTraffic(); }
+                    lockMs = lockSw.Elapsed.TotalMilliseconds;
+                    tickSw.Restart();
+                    partSw.Restart();
+                    if (live && now - lastWorldCheck > 5) { UpdateWorld(sim!); lastWorldCheck = now; Part("airport check"); }
+                    if (now - _othersAt > 1) { _othersAt = now; ShareTraffic(); Part("sharing between airports"); }
                     if (live) UpdateFlCorrection(sim!);
-                    if (live && now - _enrouteAt > 2) { _enrouteAt = now; _enroute = EnRoute(sim!); }
+                    if (live && now - _enrouteAt > 2) { _enrouteAt = now; _enroute = EnRoute(sim!); Part("en route"); }
                     foreach (var w in Worlds().ToList())
                     {
+                        partSw.Restart();
                         if (live)
                         {
                             // The airport's METAR is the source of truth for its wind (user rule). Only with no METAR is
@@ -1194,12 +1205,14 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                         w.WeekMinute = live && sim!.ZuluWeekMinute >= 0 ? sim.ZuluWeekMinute : WeekMinuteNow();
                         // Don't run traffic while nobody is flying (sim closed): it would all depart unseen.
                         if (live || w.Flights.Any(f => f.Test)) w.Step(dt);
+                        Part(w.Apt.Icao);
                     }
                     _retiring.RemoveAll(w => w.Flights.Count == 0 || w.Flights.All(f => f.Kind == "parked"));
                     _stampMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 }
             }
             catch (Exception ex) { log.LogWarning("Traffic step failed: {msg}", ex.Message); }
+            perf.Tick(tickSw.Elapsed.TotalMilliseconds, lockMs, parts);
         }
     }
 }

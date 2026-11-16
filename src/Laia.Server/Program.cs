@@ -39,6 +39,8 @@ builder.Services.AddSingleton<MetarReader>();
 builder.Services.AddSingleton<LiveRunways>();
 builder.Services.AddHostedService<NasrUpdater>();
 builder.Services.AddSingleton<FlightSource>();
+builder.Services.AddSingleton<PerfMonitor>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<PerfMonitor>());
 builder.Services.AddSingleton<TrafficEngine>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<TrafficEngine>());
 builder.Services.AddSingleton<SpeechWorker>();
@@ -125,7 +127,7 @@ app.MapPost("/api/sim/state", async (HttpContext ctx, ServerState s, SimBriefSer
 app.MapGet("/map", () => Results.Bytes(mapHtml, "text/html; charset=utf-8"));
 app.MapGet("/api/map", (HttpContext ctx, TrafficEngine t) => Results.Json(t.MapData(ctx.Request.Query["sky"] == "1"), jsonOpts));
 app.MapGet("/api/map/path/{id}", (string id, TrafficEngine t) => t.MapPath(id) is { } p ? Results.Json(p, jsonOpts) : Results.NotFound());
-app.MapGet("/api/traffic", (TrafficEngine t, RunwayDb r) => Results.Json(new { runways = r.Status, motion = t.Motion, status = t.Status(), traffic = t.Snapshot() }, jsonOpts));
+app.MapGet("/api/traffic", (TrafficEngine t, RunwayDb r, PerfMonitor pm) => Results.Json(new { runways = r.Status, motion = t.Motion, status = t.Status(), traffic = t.Snapshot(), perf = pm.Latest }, jsonOpts));
 app.MapPost("/api/traffic/level/{level}", (string level, TrafficEngine t) =>
 {
     t.SetLevel(level);
