@@ -81,10 +81,14 @@ public sealed class EnRouteSeparation
                 {
                     var t = k * Step;
                     var oAlt = o.AltFt + o.vs * Math.Min(t, 90) / 60;
-                    if ((pos[i, k] - (o.p0 + o.v * t)).Length >= o.SepNm * nm || Math.Abs(alt[i, k] - oAlt) >= 1000) continue;
-                    // On a whole level (FL370, not 36,748 ft), at least 1,000 ft from the other.
-                    if (alt[i, k] >= oAlt) { var fl = Math.Ceiling((oAlt + 1000) / 1000) * 1000; if (fl > floor) { floor = fl; why = o.Name; } }
-                    else { var fl = Math.Floor((oAlt - 1000) / 1000) * 1000; if (fl < cap) { cap = fl; why = o.Name; } }
+                    // 1,000 ft apart is separation (RVSM, each on its side's levels); the other's altitude as read is
+                    // allowed 200 ft either way of its level (user, 16 Nov: "1000ft of separation is okay in RVSM airspace
+                    // as long as planes are following east-west altitude rules" — SWA3049 at FL370 was moved up to FL380
+                    // for the user at FL360, whose altitude read a few feet above 36,000).
+                    if ((pos[i, k] - (o.p0 + o.v * t)).Length >= o.SepNm * nm || Math.Abs(alt[i, k] - oAlt) >= 800) continue;
+                    // On a whole level (FL370, not 36,748 ft), at least 1,000 ft from the other's level.
+                    if (alt[i, k] >= oAlt) { var fl = Math.Ceiling((oAlt + 800) / 1000) * 1000; if (fl > floor) { floor = fl; why = o.Name; } }
+                    else { var fl = Math.Floor((oAlt - 800) / 1000) * 1000; if (fl < cap) { cap = fl; why = o.Name; } }
                     break;
                 }
             }

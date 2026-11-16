@@ -1315,6 +1315,13 @@ Console.WriteLine("== En-route separation of the whole-sky flights (RVSM: 1,000 
     foreach (var e in ev1.Take(2)) Console.WriteLine("  " + e);
     Console.WriteLine($"  an aircraft at its level on the route: closest {w1:N0} ft within 5 nm, {n1} limits given");
     Check(n1 > 0 && w1 >= 950, "a whole-sky flight moves 1,000 ft for an aircraft at its level in its way");
+    // The user 1,000 ft below its level (read a few feet high, 20 ft above their level): RVSM separation already,
+    // nothing to do (16 Nov: SWA3049 at FL370 was moved to FL380 for the user at FL360).
+    var below = new EnRouteSeparation.Obstacle("UAL1196 (you)", c0.Lat, c0.Lon + 1.5, 270, 0, c0.AltFt - 1000 + 20, 0, 6);
+    var w2 = Worst(new() { slow }, new() { below }, 600, 700, out var n2, out var ev2);
+    foreach (var e in ev2.Take(2)) Console.WriteLine("  " + e);
+    Console.WriteLine($"  the user 1,000 ft below its level (read 20 ft high): {n2} limits given, closest {w2:N0} ft within 5 nm");
+    Check(n2 == 0, "1,000 ft from the user's level is left alone (RVSM), even with the user's altitude read a little off");
 }
 
 Console.WriteLine("== M6: learning an airport from real tracks (synthetic adsb.lol-style traces), and flying what was learned");

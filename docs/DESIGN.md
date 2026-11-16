@@ -569,6 +569,8 @@ around. Airliners can't do that on a taxiway, and a real ground controller never
 
 **0.1.230 — the destination from 300 nm, with the runway to expect (user, 16 Nov: "set that to 300 to allow the user to configure arriving runway and approach sooner"):** the destination is prepared ahead from 300 nm (was 250). Once ready, the control page's "Destination ahead" line gives its landing runways and approaches and the runway the user can expect with its approach ("expect runway 27C, ILS 27C") — the landing runway on the user's side of the field, kept while it's in use. The runway the user is given at 80 nm is that one if it's still in use (and the one-change, never-below-10,000 ft rule is unchanged).
 
+**0.1.231 — 1,000 ft is separation in RVSM (user, 16 Nov: "1000ft of separation is okay in RVSM airspace as long as planes are following east-west altitude rules"):** the whole-sky flights already cruise on their side's levels (odd thousands eastbound, even westbound). But one 1,000 ft from the user was moved 2,000 ft away (SWA3049 at FL370 put up to FL380 for the user at FL360) because the user's altitude read a few feet above 36,000, making the gap 980 ft. The user's (or an airport aircraft's) altitude is now allowed 200 ft either way of its level: within 800 ft is a conflict, and the level given is at least 1,000 ft from the other's level.
+
 Section 4 says *what* LAIA will do; this section says *in which order* it gets built. Each milestone is a set of
 releases that can be tested on its own before the next one starts. Every milestone also gets offline checks in
 `Laia.Tests`, so CI proves the rules before the user flies.
