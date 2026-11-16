@@ -186,8 +186,7 @@ public sealed class AaupReader(ILogger log)
     }
 
     // ------------------------------------------------------------------ STAR "expect" restrictions (the arrival charts)
-    public sealed record Expect(string Fix, double MinFt, double MaxFt, double Kt, string How);
-    private readonly Dictionary<string, (DateTime at, Dictionary<string, List<Expect>> exp)> _exp = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, (DateTime at, Dictionary<string, List<StarExpect>> exp)> _exp = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _expBusy = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
@@ -195,7 +194,7 @@ public sealed class AaupReader(ILogger log)
     /// as an actual restriction"), by STAR name, for the fixes the sim's procedure data has; null until read (in the
     /// background, once a cycle), empty for an airport without them. fixes: each STAR's fix names.
     /// </summary>
-    public Dictionary<string, List<Expect>>? StarExpects(string icao, Dictionary<string, HashSet<string>> fixes)
+    public Dictionary<string, List<StarExpect>>? StarExpects(string icao, Dictionary<string, HashSet<string>> fixes)
     {
         if (icao.Length != 4 || icao[0] != 'K') return null;
         lock (_exp)
@@ -206,94 +205,40 @@ public sealed class AaupReader(ILogger log)
         }
     }
 
-    private static readonly System.Text.RegularExpressions.Regex AltTok = new(@"^(FL)?(\d{3,5})('|FT)?$");
-    private static readonly System.Text.RegularExpressions.Regex KtTok = new(@"^(\d{3})(K|KT|KTS|KIAS)$");
-
-    /// <summary>The expects on one chart: "EXPECT TO CROSS BUGGZ AT 11000" in the notes, and "Expect 11000 / 250K"
-    /// printed beside a fix on the plan view (the nearest of the STAR's fixes to the word).</summary>
-    public static List<Expect> ReadExpects(PdfDocument doc, HashSet<string> fixes)
-    {
-        var res = new List<Expect>();
-        var text = new StringBuilder();
-        foreach (var page in doc.GetPages())
-        {
-            var words = page.GetWords().ToList();
-            text.AppendLine(string.Join(" ", words.Select(w => w.Text)));
-            for (var i = 0; i < words.Count; i++)
-            {
-                var w = words[i];
-                if (!w.Text.ToUpperInvariant().StartsWith("EXPECT")) continue;
-                var b = w.BoundingBox;
-                var h = Math.Max(4, b.Height);
-                // The words right after it: on its line to the right, or the line just below, starting near it.
-                var after = words.Where(o => o != w && (
-                        (Math.Abs(o.BoundingBox.Bottom - b.Bottom) < h * 0.6 && o.BoundingBox.Left >= b.Left && o.BoundingBox.Left - b.Right < 90)
-                        || (b.Bottom - o.BoundingBox.Top is >= -1 and < 1.8 * 14 && Math.Abs(o.BoundingBox.Left - b.Left) < 40)))
-                    .OrderBy(o => -o.BoundingBox.Bottom).ThenBy(o => o.BoundingBox.Left).Take(6).Select(o => o.Text.ToUpperInvariant().Trim(',', '.', '/')).ToList();
-                if (after.Count > 0 && (after[0] is "TO" or "CLEARANCE" or "RADAR" or "VECTORS" or "FILED" or "DEPARTURE")) continue;   // a note, read below
-                var alts = after.Select(t => AltTok.Match(t)).Where(m => m.Success).Select(m => double.Parse(m.Groups[2].Value) * (m.Groups[1].Success ? 100 : 1))
-                    .Where(a => a is >= 1000 and <= 45000).Take(2).ToList();
-                var kt = after.Select(t => KtTok.Match(t)).Where(m => m.Success).Select(m => double.Parse(m.Groups[1].Value)).FirstOrDefault();
-                if (alts.Count == 0 && kt == 0) continue;
-                var fix = words.Where(o => fixes.Contains(o.Text.ToUpperInvariant().Trim(',', '.')))
-                    .Select(o => (o, d: Math.Sqrt(Math.Pow(o.BoundingBox.Centroid.X - b.Centroid.X, 2) + Math.Pow(o.BoundingBox.Centroid.Y - b.Centroid.Y, 2))))
-                    .Where(x => x.d < 160).OrderBy(x => x.d).Select(x => x.o.Text.ToUpperInvariant().Trim(',', '.')).FirstOrDefault();
-                if (fix is null) continue;
-                double mn = 0, mx = 0;
-                if (alts.Count == 2) { mn = Math.Min(alts[0], alts[1]); mx = Math.Max(alts[0], alts[1]); }
-                else if (alts.Count == 1) mn = mx = alts[0];
-                res.Add(new Expect(fix, mn, mx, kt, "plan view"));
-            }
-        }
-        // The notes: "EXPECT TO CROSS BUGGZ AT 11000", "... AT OR ABOVE FL240", "... AT 250 KT".
-        var t = System.Text.RegularExpressions.Regex.Replace(text.ToString().ToUpperInvariant(), @"\s+", " ");
-        foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(t,
-            @"EXPECT (?:CLEARANCE )?TO CROSS ([A-Z]{3,5}) AT (OR ABOVE |OR BELOW )?(FL)?(\d{3,5})(?:'|FT)?(?: (?:AND|AT) (\d{3}) ?K)?"))
-        {
-            var fix = m.Groups[1].Value;
-            if (!fixes.Contains(fix)) continue;
-            var alt = double.Parse(m.Groups[4].Value) * (m.Groups[3].Success ? 100 : 1);
-            if (alt is < 1000 or > 45000) continue;
-            var how = m.Groups[2].Value.Trim();
-            double mn = how == "OR BELOW" ? 0 : alt, mx = how == "OR ABOVE" ? 0 : alt;
-            var kt = m.Groups[5].Success ? double.Parse(m.Groups[5].Value) : 0;
-            res.RemoveAll(e => e.Fix == fix);   // the note's wording (with "or above/below") wins over the plan view
-            res.Add(new Expect(fix, mn, mx, kt, "notes"));
-        }
-        return res.GroupBy(e => e.Fix).Select(g => g.Last()).ToList();
-    }
-
     private async Task FetchExpectsAsync(string icao, Dictionary<string, HashSet<string>> fixes)
     {
-        var exp = new Dictionary<string, List<Expect>>(StringComparer.OrdinalIgnoreCase);
+        var exp = new Dictionary<string, List<StarExpect>>(StringComparer.OrdinalIgnoreCase);
         try
         {
             var (cycle, _) = Cycle(DateTime.UtcNow);
             var dir = Path.Combine(Paths.DataDir, "aaup", cycle);
             Directory.CreateDirectory(dir);
-            var file = Path.Combine(dir, icao + ".starexpect2.txt");
+            var file = Path.Combine(dir, icao + ".starexpect3.txt");
             if (File.Exists(file))
             {
                 foreach (var l in await File.ReadAllLinesAsync(file))
-                    if (l.Split('|') is [var star, var fix, var mn, var mx, var kt, var how])
-                        (exp.TryGetValue(star, out var list) ? list : exp[star] = new()).Add(new Expect(fix, double.Parse(mn), double.Parse(mx), double.Parse(kt), how));
+                    if (l.Split('|') is [var star, var fix, var mn, var mx, var kt, var when, var how])
+                        (exp.TryGetValue(star, out var list) ? list : exp[star] = new()).Add(new StarExpect(fix, double.Parse(mn), double.Parse(mx), double.Parse(kt), when, how));
             }
             else
             {
                 var meta = await MetafileAsync(cycle, dir);
                 var apt = meta?.Descendants("airport_name").FirstOrDefault(a => (string?)a.Attribute("icao_ident") == icao
                     || "K" + (string?)a.Attribute("apt_ident") == icao);
-                var recs = apt?.Elements("record").Where(r => ((string?)r.Element("chart_code") ?? "") == "STAR").ToList() ?? new();
-                foreach (var r in recs)
+                // The airport's FAA name ("MELBOURNE ORLANDO INTL"): planning boxes list the airports each expect is for.
+                var aptName = (string?)apt?.Attribute("ID") ?? "";
+                // Its STARs' charts, wherever they're filed: a STAR serving several airports is filed under one of them
+                // (BITHO7 is under Orlando Intl; Melbourne uses it too). STAR names are unique, so matched by name.
+                var recs = meta?.Descendants("record").Where(r => ((string?)r.Element("chart_code") ?? "") == "STAR")
+                    .Select(r => (pdf: (string?)r.Element("pdf_name"), name: SidName((string?)r.Element("chart_name") ?? "")))
+                    .Where(r => !string.IsNullOrEmpty(r.pdf) && r.name is not null && fixes.ContainsKey(r.name))
+                    .GroupBy(r => r.pdf).Select(g => g.First()).ToList() ?? new();
+                foreach (var (pdf, name) in recs)
                 {
-                    var pdf = (string?)r.Element("pdf_name");
-                    var name = SidName((string?)r.Element("chart_name") ?? "");
-                    if (string.IsNullOrEmpty(pdf) || name is null) continue;
-                    var key = fixes.Keys.FirstOrDefault(k => k.Equals(name, StringComparison.OrdinalIgnoreCase));
-                    if (key is null) continue;
+                    var key = fixes.Keys.First(k => k.Equals(name, StringComparison.OrdinalIgnoreCase));
                     var bytes = await Http.GetByteArrayAsync($"https://aeronav.faa.gov/d-tpp/{cycle}/{pdf}");
                     using var doc = PdfDocument.Open(bytes);
-                    var found = ReadExpects(doc, fixes[key]);
+                    var found = StarCharts.ReadExpects(doc, fixes[key], aptName);
                     // What the chart says about "expect" (to check the reading): the words around each one.
                     foreach (var page in doc.GetPages())
                     {
@@ -304,21 +249,15 @@ public sealed class AaupReader(ILogger log)
                     }
                     if (found.Count == 0) continue;
                     var list = exp.TryGetValue(key, out var l0) ? l0 : exp[key] = new();
-                    foreach (var e in found) { list.RemoveAll(x => x.Fix == e.Fix); list.Add(e); }
+                    foreach (var e in found) { list.RemoveAll(x => x.Fix == e.Fix && x.When == e.When); list.Add(e); }
                 }
-                await File.WriteAllLinesAsync(file, exp.SelectMany(kv => kv.Value.Select(e => $"{kv.Key}|{e.Fix}|{e.MinFt}|{e.MaxFt}|{e.Kt}|{e.How}")));
+                await File.WriteAllLinesAsync(file, exp.SelectMany(kv => kv.Value.Select(e => $"{kv.Key}|{e.Fix}|{e.MinFt}|{e.MaxFt}|{e.Kt}|{e.When}|{e.How}")));
             }
             log.LogInformation("{icao} STAR \"expect\" restrictions (d-TPP {cycle} charts): {what}", icao, cycle,
-                exp.Count == 0 ? "none found" : string.Join("; ", exp.OrderBy(kv => kv.Key).Select(kv => kv.Key + ": " + string.Join(", ", kv.Value.Select(Describe)))));
+                exp.Count == 0 ? "none found" : string.Join("; ", exp.OrderBy(kv => kv.Key).Select(kv => kv.Key + ": " + string.Join(", ", kv.Value.Select(StarCharts.Describe)))));
         }
         catch (Exception ex) { log.LogInformation("{icao} STAR charts not available: {msg}", icao, ex.Message); }
         lock (_exp) { _exp[icao] = (DateTime.UtcNow, exp); _expBusy.Remove(icao); }
-    }
-
-    public static string Describe(Expect e)
-    {
-        var a = e.MinFt > 0 && e.MaxFt > 0 ? (e.MinFt == e.MaxFt ? $"at {e.MinFt:N0}" : $"{e.MinFt:N0}–{e.MaxFt:N0}") : e.MinFt > 0 ? $"at or above {e.MinFt:N0}" : e.MaxFt > 0 ? $"at or below {e.MaxFt:N0}" : "";
-        return $"{e.Fix} {a}{(e.Kt > 0 ? $"{(a.Length > 0 ? ", " : "")}{e.Kt:0} kt" : "")}".Trim();
     }
 
     /// <summary>The cycle's chart list (about 30 MB), downloaded once a cycle and kept.</summary>

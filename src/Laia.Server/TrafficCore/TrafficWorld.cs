@@ -2811,9 +2811,15 @@ public sealed partial class TrafficWorld
                 for (var k = 0; k < starPts.Count; k++)
                 {
                     var sp = starPts[k];
-                    if (sp.Fix.Length == 0 || exps.FirstOrDefault(e => e.fix.Equals(sp.Fix, StringComparison.OrdinalIgnoreCase)) is not { fix.Length: > 0 } ex) continue;
-                    if (sp.AltMinFt <= 0 && sp.AltMaxFt <= 0 && (ex.min > 0 || ex.max > 0)) sp = sp with { AltMinFt = ex.min, AltMaxFt = ex.max };
-                    if (sp.SpeedKt is <= 0 or >= 400 && ex.kt > 0) sp = sp with { SpeedKt = ex.kt };
+                    if (sp.Fix.Length == 0) continue;
+                    // All that apply to this arrival (BITHO7's LAMMA: 12,000 ft landing Orlando, and 250 kt when
+                    // Orlando lands south); one for this runway or flow first.
+                    foreach (var ex in exps.Where(e => e.fix.Equals(sp.Fix, StringComparison.OrdinalIgnoreCase) && ExpectApplies(e.when, rwy.Ident, rwy.Heading))
+                                 .OrderBy(e => e.when.Length == 0))
+                    {
+                        if (sp.AltMinFt <= 0 && sp.AltMaxFt <= 0 && (ex.min > 0 || ex.max > 0)) sp = sp with { AltMinFt = ex.min, AltMaxFt = ex.max };
+                        if (sp.SpeedKt is <= 0 or >= 400 && ex.kt > 0) sp = sp with { SpeedKt = ex.kt };
+                    }
                     starPts[k] = sp;
                 }
             // Handed over from the whole sky: direct to the STAR, joining it at the first fix that isn't further out
@@ -4610,7 +4616,26 @@ public sealed partial class TrafficWorld
     public List<Procedure>? SharedArrivals { get; set; }
 
     /// <summary>The "expect" restrictions from the FAA STAR charts, by STAR name: fix, at or above, at or below, speed.</summary>
-    public Dictionary<string, List<(string fix, double min, double max, double kt)>>? StarExpects { get; set; }
+    /// <summary>Whether a chart's "expect" applies to an arrival landing this runway (ident, true heading): when is ""
+    /// (always), "rwy:18" (18, 18L, 18C, 18R) or "dir:S" (landing within 60° of south; N, E, W alike).</summary>
+    public static bool ExpectApplies(string when, string rwyIdent, double rwyHeading)
+    {
+        if (string.IsNullOrEmpty(when)) return true;
+        if (when.StartsWith("rwy:"))
+        {
+            var r = when[4..];
+            return rwyIdent.Equals(r, StringComparison.OrdinalIgnoreCase) || (r.All(char.IsDigit) && rwyIdent.StartsWith(r) && (rwyIdent.Length == r.Length || !char.IsDigit(rwyIdent[r.Length])));
+        }
+        if (when.StartsWith("dir:"))
+        {
+            var h = when[4..] switch { "N" => 0.0, "E" => 90.0, "S" => 180.0, _ => 270.0 };
+            return Math.Abs(Geo2.Diff(rwyHeading, h)) < 60;
+        }
+        return true;
+    }
+
+    /// <summary>The STAR charts' "expect" restrictions, by STAR: when is "" (always), "dir:S" (landing south) or "rwy:18".</summary>
+    public Dictionary<string, List<(string fix, double min, double max, double kt, string when)>>? StarExpects { get; set; }
 
     /// <summary>The SID top altitudes from the FAA departure charts, by SID name (set by the server; null: none known).</summary>
     public Dictionary<string, int>? SidTops { get; set; }

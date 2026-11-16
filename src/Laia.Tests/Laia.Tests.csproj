@@ -8,6 +8,13 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="..\Laia.Server\TrafficCore\*.cs" Link="TrafficCore\%(Filename)%(Extension)" />
+    <Compile Include="..\Laia.Server\StarCharts.cs" Link="StarCharts.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="PdfPig" Version="0.1.9" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="charts\*.pdf" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\Laia.Common\Laia.Common.csproj" />

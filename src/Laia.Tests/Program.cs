@@ -1883,6 +1883,26 @@ Console.WriteLine("== LAIA Collector track store");
     Check(TrackStore.Facing(land, 280) == 1 && TrackStore.Facing(land, 90) == 0, "days are told apart by which way their landings faced");
 }
 
+Console.WriteLine("== STAR chart \"expect\" boxes (BITHO7, d-TPP 2611)");
+{
+    using var doc = UglyToad.PdfPig.PdfDocument.Open(Path.Combine(AppContext.BaseDirectory, "charts", "BITHO7.pdf"));
+    var fixes = new HashSet<string> { "OMN", "LAMMA", "JESUP", "COZMO", "BITHO" };
+    string Show(List<Laia.Server.StarExpect> l) => string.Join("; ", l.OrderBy(e => e.Fix).ThenBy(e => e.When).Select(Laia.Server.StarCharts.Describe));
+    var mco = Laia.Server.StarCharts.ReadExpects(doc, fixes, "ORLANDO INTL");
+    Console.WriteLine("  Orlando Intl: " + Show(mco));
+    Check(mco.Any(e => e.Fix == "LAMMA" && e.When == "" && e.MinFt == 12000 && e.MaxFt == 12000), "Orlando: LAMMA at 12,000");
+    Check(mco.Any(e => e.Fix == "LAMMA" && e.When == "dir:S" && e.Kt == 250), "Orlando landing south: LAMMA at 250 kt");
+    Check(mco.Any(e => e.Fix == "COZMO" && e.When == "rwy:18" && e.MinFt == 10000), "Orlando runway 18: COZMO at 10,000");
+    Check(!mco.Any(e => e.Fix == "BITHO") && !mco.Any(e => e.MinFt == 15000), "Orlando: not the 15,000 or BITHO's 8,000 (they're for other airports)");
+    var mlb = Laia.Server.StarCharts.ReadExpects(doc, fixes, "MELBOURNE ORLANDO INTL");
+    Console.WriteLine("  Melbourne Orlando Intl: " + Show(mlb));
+    Check(mlb.Any(e => e.Fix == "LAMMA" && e.MinFt == 15000) && mlb.Any(e => e.Fix == "BITHO" && e.MinFt == 8000) && !mlb.Any(e => e.Fix == "COZMO") && !mlb.Any(e => e.MinFt == 12000),
+        "Melbourne: LAMMA at 15,000 and BITHO at 8,000 only");
+    Check(TrafficWorld.ExpectApplies("rwy:18", "18L", 175) && !TrafficWorld.ExpectApplies("rwy:18", "36R", 355) && !TrafficWorld.ExpectApplies("rwy:1", "18L", 175),
+        "a runway expect applies to 18L/18R, not 36R");
+    Check(TrafficWorld.ExpectApplies("dir:S", "17R", 172) && !TrafficWorld.ExpectApplies("dir:S", "35L", 352), "a landing-south expect applies to 17R, not 35L");
+}
+
 Console.WriteLine(failures.Count == 0 ? "TRAFFIC CHECKS PASSED" : $"TRAFFIC CHECKS FAILED: {failures.Count}");
 return failures.Count == 0 ? 0 : 1;
 

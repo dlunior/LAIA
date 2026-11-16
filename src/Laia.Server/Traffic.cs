@@ -1156,18 +1156,11 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                             }
                             if (w.SidTops is not { Count: > 0 }) w.SidTops = Aaup.SidTops(w.Apt.Icao);
                             if (w.StarExpects is null && Aaup.StarExpects(w.Apt.Icao, StarFixes(w.Apt)) is { } ex)
-                                w.StarExpects = ex.ToDictionary(kv => kv.Key, kv => kv.Value.Select(e => (e.Fix, e.MinFt, e.MaxFt, e.Kt)).ToList(), StringComparer.OrdinalIgnoreCase);
-                            // A neighbour shares the main airport's STARs (and their charts' "expects"): BITHO7 is MCO's and MLB's.
-                            if (_neighbours.Contains(w) && _world is { } mw)
-                            {
-                                w.SharedArrivals = mw.Apt.Data.Arrivals;
-                                if (mw.StarExpects is { Count: > 0 } mex)
-                                {
-                                    w.StarExpects ??= new(StringComparer.OrdinalIgnoreCase);
-                                    foreach (var (name, list) in mex)
-                                        if (w.Apt.Data.Arrivals.Any(a => a.Name.Equals(name, StringComparison.OrdinalIgnoreCase)) && !w.StarExpects.ContainsKey(name)) w.StarExpects[name] = list;
-                                }
-                            }
+                                w.StarExpects = ex.ToDictionary(kv => kv.Key, kv => kv.Value.Select(e => (e.Fix, e.MinFt, e.MaxFt, e.Kt, e.When)).ToList(), StringComparer.OrdinalIgnoreCase);
+                            // A neighbour shares the main airport's STARs: BITHO7 is MCO's and MLB's. Their charts' "expects"
+                            // are read for each airport itself, since a chart lists which airports each one is for (BITHO7:
+                            // LAMMA at 15,000 landing Melbourne, 12,000 landing Orlando).
+                            if (_neighbours.Contains(w) && _world is { } mw) w.SharedArrivals = mw.Apt.Data.Arrivals;
                             w.Routes = routesDb.Routes;
                             w.NavData = nasrDb.Nav;
                             w.Learned = history.Profile(w.Apt.Icao);
