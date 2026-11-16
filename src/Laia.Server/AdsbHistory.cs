@@ -75,17 +75,17 @@ public sealed class AdsbHistory(ILogger<AdsbHistory> log)
             http.DefaultRequestHeaders.UserAgent.ParseAdd("LAIA-Server");
             // The newest full days (user, 13 Nov: one day was thin for whichever flow was used less that day): the
             // year's repository (and last year's), its latest "prod" releases — up to three days.
-            const int Days = 3;
+            const int Days = 3, MaxDays = 7;   // three days first; up to seven when one flow wasn't seen (below)
             var rels = new List<(string tag, List<(string name, string url, long size)> parts)>();
             foreach (var year in new[] { DateTime.UtcNow.Year, DateTime.UtcNow.Year - 1 })
             {
-                if (rels.Count >= Days) break;
+                if (rels.Count >= MaxDays) break;
                 using var r = await http.GetAsync($"https://api.github.com/repos/adsblol/globe_history_{year}/releases?per_page=20", ct);
                 if (!r.IsSuccessStatusCode) continue;
                 using var doc = JsonDocument.Parse(await r.Content.ReadAsStringAsync(ct));
                 foreach (var e in doc.RootElement.EnumerateArray())
                 {
-                    if (rels.Count >= Days) break;
+                    if (rels.Count >= MaxDays) break;
                     var tag = e.GetProperty("tag_name").GetString() ?? "";
                     if (!tag.Contains("-prod-")) continue;
                     var dayOf = tag.Replace("v", "").Split('-')[0];
@@ -98,19 +98,25 @@ public sealed class AdsbHistory(ILogger<AdsbHistory> log)
                 }
             }
             if (rels.Count == 0) { Status = "couldn't find an adsb.lol history day"; log.LogWarning("adsb.lol history: no release found"); return; }
-            var dayList = rels.Select(x => x.tag.Replace("v", "").Split('-')[0]).OrderBy(x => x, StringComparer.Ordinal).ToList();
-            var day = dayList.Count == 1 ? dayList[0] : $"{dayList[0]}–{dayList[^1].Split('.').Last()} ({dayList.Count} days)";
+            string DayText(int count)
+            {
+                var dl = rels.Take(count).Select(x => x.tag.Replace("v", "").Split('-')[0]).OrderBy(x => x, StringComparer.Ordinal).ToList();
+                return dl.Count == 1 ? dl[0] : $"{dl[0]}–{dl[^1].Split('.').Last()} ({dl.Count} days)";
+            }
+            var day = DayText(Math.Min(Days, rels.Count));
             var targets = apts.Select(a => (a, lat: a.Data.Lat, lon: a.Data.Lon, elev: a.ElevationFt)).ToList();
             var kept = targets.ToDictionary(t => t.a.Icao, _ => new List<IReadOnlyList<TrackPoint>>(), StringComparer.OrdinalIgnoreCase);
             var files = 0;
-            for (var di = 0; di < rels.Count; di++)
+            var active = targets.ToList();
+            for (var di = 0; di < rels.Count && active.Count > 0; di++)
             {
                 var rl = rels[di];
                 var total = rl.parts.Sum(p => p.size);
                 long done = 0;
-                log.LogInformation("Learning {apts} from real tracks: adsb.lol {tag} ({gb:0.0} GB, streamed), day {n} of {of}", names, rl.tag, total / 1e9, di + 1, rels.Count);
+                var activeNames = string.Join(", ", active.Select(t => t.a.Icao));
+                log.LogInformation("Learning {apts} from real tracks: adsb.lol {tag} ({gb:0.0} GB, streamed), day {n} of {of}", activeNames, rl.tag, total / 1e9, di + 1, di < Days ? Math.Min(Days, rels.Count) : rels.Count);
                 var dn = di + 1;
-                await using var stream = new PartsStream(http, rl.parts.Select(p => p.url).ToList(), n => { done = n; Status = $"learning {names} from real tracks: day {dn} of {rels.Count}, {done / 1e9:0.0} of {total / 1e9:0.0} GB read"; })
+                await using var stream = new PartsStream(http, rl.parts.Select(p => p.url).ToList(), n => { done = n; Status = $"learning {activeNames} from real tracks: day {dn}, {done / 1e9:0.0} of {total / 1e9:0.0} GB read"; })
                 { Log = m => log.LogInformation("adsb.lol {m}", m) };
                 using var tar = new TarReader(stream);
                 TarEntry? entry;
@@ -131,21 +137,33 @@ public sealed class AdsbHistory(ILogger<AdsbHistory> log)
                     List<TrackPoint>? pts;
                     try { pts = AdsbTrace.Parse(bytes, passengerJetsOnly: true); } catch { continue; }
                     if (pts is null || pts.Count < 5) continue;
-                    foreach (var t in targets)
+                    foreach (var t in active)
                     {
                         // Near this airport and low: a candidate arrival or departure (the rest of its day isn't kept).
                         var near = pts.Where(p => (p.AltFt ?? 0) < t.elev + 18000 && Geo2.DistanceNm(t.lat, t.lon, p.Lat, p.Lon) < 45).ToList();
                         if (near.Count >= 5) kept[t.a.Icao].Add(near);
                     }
                 }
-            }
-            foreach (var t in targets)
-            {
-                var prof = TrackLearner.Learn(t.a.Icao, t.a.Map, t.elev, t.a.Ends, kept[t.a.Icao], "adsb.lol", day);
-                Directory.CreateDirectory(Dir);
-                await File.WriteAllTextAsync(Path.Combine(Dir, t.a.Icao + ".json"), JsonSerializer.Serialize(prof, Json), ct);
-                lock (_gate) _profiles[t.a.Icao] = prof;
-                log.LogInformation("Learned {icao} from {n} real tracks: {what}", t.a.Icao, kept[t.a.Icao].Count, prof.Describe());
+                if (di + 1 < Math.Min(Days, rels.Count)) continue;
+                // Learned (after the first three days, and again after each extra day): saved at once, so the airport's
+                // preparation goes on with it.
+                var stillShort = new List<(AirportModel a, double lat, double lon, double elev)>();
+                foreach (var t in active)
+                {
+                    var prof = TrackLearner.Learn(t.a.Icao, t.a.Map, t.elev, t.a.Ends, kept[t.a.Icao], "adsb.lol", DayText(di + 1));
+                    Directory.CreateDirectory(Dir);
+                    await File.WriteAllTextAsync(Path.Combine(Dir, t.a.Icao + ".json"), JsonSerializer.Serialize(prof, Json), ct);
+                    lock (_gate) _profiles[t.a.Icao] = prof;
+                    log.LogInformation("Learned {icao} from {n} real tracks: {what}", t.a.Icao, kept[t.a.Icao].Count, prof.Describe());
+                    // The other flow not seen (KATL, 15 Nov: three days all landing west, so east flow had no real
+                    // arrivals at all — no tracks on the map, no real vectors): more days, up to seven, until it is.
+                    if (MissingFlow(prof, t.a.Ends) is { } miss && di + 1 < rels.Count)
+                    {
+                        log.LogInformation("{icao}: {miss}; learning another day for it", t.a.Icao, miss);
+                        stillShort.Add(t);
+                    }
+                }
+                active = stillShort;
             }
             Status = $"learned {names} from adsb.lol {day} ({files:N0} aircraft read)";
         }
@@ -154,6 +172,24 @@ public sealed class AdsbHistory(ILogger<AdsbHistory> log)
             Status = "learning from real tracks failed: " + ex.Message;
             log.LogWarning("adsb.lol history: {msg}", ex.ToString().Split('\n').Take(6).Aggregate((a, b) => a + " | " + b.Trim()));
         }
+    }
+
+    /// <summary>
+    /// A flow the real tracks hardly cover: the runways facing the other way from the most used ones had fewer than 20
+    /// arrivals while the most used way had 20 or more. Null when both ways are covered (or neither is busy enough to tell).
+    /// </summary>
+    private static string? MissingFlow(AirportProfile prof, IReadOnlyList<RunwayEnd> ends)
+    {
+        if (prof.Arrivals.Count == 0) return null;
+        var top = prof.Arrivals.OrderByDescending(kv => kv.Value.Count).First();
+        var topEnd = ends.FirstOrDefault(e => e.Ident == top.Key);
+        if (topEnd is null) return null;
+        int Count(Func<RunwayEnd, bool> way) => prof.Arrivals.Where(kv => ends.FirstOrDefault(e => e.Ident == kv.Key) is { } e && way(e)).Sum(kv => kv.Value.Count);
+        var same = Count(e => Math.Abs(Geo2.Diff(e.Heading, topEnd.Heading)) < 60);
+        var other = Count(e => Math.Abs(Geo2.Diff(e.Heading, topEnd.Heading + 180)) < 60);
+        if (same < 20 || other >= 20) return null;
+        var otherIdents = string.Join("/", ends.Where(e => Math.Abs(Geo2.Diff(e.Heading, topEnd.Heading + 180)) < 60).Select(e => e.Ident).Distinct());
+        return $"the other flow ({otherIdents}) has only {other} real arrivals against {same}";
     }
 
     /// <summary>The release's parts (.tar.aa, .tar.ab, …) read one after another as one stream, without storing them.</summary>

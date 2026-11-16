@@ -25,7 +25,7 @@ public sealed class AirportProfile
     public List<TaxiTrack> Taxi { get; set; } = new();
     /// <summary>What the profile holds: 2 = with taxi tracks; 3 = airline passenger jets only; 4 = three days. Older ones are learned again.</summary>
     public int Version { get; set; }
-    public const int CurrentVersion = 6;   // 5: landings seen only down to a few hundred feet count (KMCI); 6: arrival samples kept (KMCI)
+    public const int CurrentVersion = 7;   // 7: more days when one flow wasn't seen (KATL);   // 5: landings seen only down to a few hundred feet count (KMCI); 6: arrival samples kept (KMCI)
 
     public sealed class TaxiTrack
     {
