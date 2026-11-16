@@ -14,6 +14,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     private readonly object _gate = new();
     private readonly List<TrafficWorld> _neighbours = new();
     private List<string> _neighbourWant = new();
+    private TrafficWorld? _neighbourFor;
     private string _neighbourWhy = "";
     private string _neighbourHow = "";
     private DateTime _neighbourAt = DateTime.MinValue;
@@ -909,9 +910,12 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
             _neighbours.Clear();
             return;
         }
-        if (DateTime.UtcNow - _neighbourAt > TimeSpan.FromMinutes(2))
+        // At once when the traffic airport changes (16 Nov: after O'Hare, Midway was set up as Orlando's neighbour for two
+        // minutes, until the list was worked out again).
+        if (DateTime.UtcNow - _neighbourAt > TimeSpan.FromMinutes(2) || _neighbourFor != main)
         {
             _neighbourAt = DateTime.UtcNow;
+            _neighbourFor = main;
             // The airports worked by the same approach control (the FAA's records: MCO's F11 also works SFB, ORL, MLB,
             // ISM, TIX, LEE) that have airline traffic in the schedules; a 40 nm circle where the FAA data has none.
             var family = Family(main.Apt);

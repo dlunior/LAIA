@@ -575,11 +575,27 @@ public sealed partial class TrafficWorld
             Flight? prev = null; double prevSlot = 0;
             // Frozen arrivals (inside ~15 minutes) keep their place; the rest are ordered by their own unhindered time.
             var ordered = g.OrderBy(f => f.Frozen ? f.FrozenSlot : f.EtaNominal).ToList();
+            // A runway for landings and take-offs both (KORD at night, 16 Nov: 10C for everything, arrivals every 107–124 s,
+            // so the departures — which need about 165 s between two arrivals — waited 20 minutes and more): the arrival
+            // manager plans a departure gap between arrivals for each departure still to go, as a controller spaces the
+            // final for them.
+            var deps = DepRwys.Count > 0 ? DepRwys : DepRwy is null ? new List<RunwayEnd>() : new() { DepRwy };
+            var pending = deps.Any(d => d.Runway == g.Key) ? PendingDepartures(g.Key) : 0;
             foreach (var f in ordered)
             {
                 f.Seq = ++i;
                 var slot = f.EtaNominal;
-                if (prev is not null) slot = Math.Max(slot, prevSlot + ThresholdGapNeeded(prev, f, forDepartures: false) + 15);
+                if (prev is not null)
+                {
+                    var gapNeed = ThresholdGapNeeded(prev, f, forDepartures: false);
+                    if (pending > 0 && prev != UserArr && f != UserArr)
+                    {
+                        var occupancy = Math.Max(RunwayOccupancy(f.Rwy!, prev.P), _rotSeen.GetValueOrDefault(f.Rwy!)) + 10;
+                        gapNeed = Math.Max(gapNeed, DepartureGap(occupancy));
+                        pending--;
+                    }
+                    slot = Math.Max(slot, prevSlot + gapNeed + 15);
+                }
                 if (f == UserArr) { prev = f; prevSlot = slot; continue; }
                 f.Delay = slot - f.EtaNominal;
                 if (f.Frozen) f.FrozenSlot = Math.Max(f.FrozenSlot, slot);
@@ -3526,6 +3542,17 @@ public sealed partial class TrafficWorld
     /// final approach groundspeed, or the leader's runway occupancy (about 50 s to land and turn off) plus a margin,
     /// whichever is larger; more when departures are waiting to go between the arrivals.
     /// </summary>
+    /// <summary>
+    /// The gap a departure needs between two arrivals on its runway: the first one off the runway (occupancy), then as
+    /// long as line-up is allowed to take before the next arrival (LineUpAllowed: line-up 25 s, roll 50 s, 12 s margin,
+    /// at least 8 s of wake) and a few seconds to spare — about 165 s, some 6 nm on final.
+    /// </summary>
+    private static double DepartureGap(double occupancy) => occupancy + 8 + 25 + 50 + 12 + 10;
+
+    /// <summary>Departures for this runway still to go: taxiing, waiting at it, or due off the gate within 20 minutes.</summary>
+    private int PendingDepartures(int runway) => Flights.Count(o => o.Kind == "departure" && !o.Done && o.OnGround && o.Rwy is not null && o.Rwy.Runway == runway
+        && (!(o.Phase is "parked" or "boarding" or "at gate") || (!double.IsNaN(o.ReadyAt) && o.ReadyAt - Time < 1200)));
+
     private double ThresholdGapNeeded(Flight leader, Flight f, bool forDepartures = true)
     {
         var gs = Math.Max(90, f.P.Vapp - Wind.Headwind(f.Rwy!.Heading));
@@ -3538,7 +3565,7 @@ public sealed partial class TrafficWorld
         // crosses it) — not because some other runway has a queue.
         var mine = forDepartures && mixed && DeparturesFor(r => r == f.Rwy.Runway);
         var cross = forDepartures && !mine && crossing && DeparturesFor(r => deps.Any(d => d.Runway == r && Crossing(f.Rwy, d) is not null));
-        var need = Math.Max(wake, occupancy) + 10 + (mine ? 70 : cross ? 30 : 0);
+        var need = mine ? Math.Max(Math.Max(wake, occupancy) + 10, DepartureGap(occupancy)) : Math.Max(wake, occupancy) + 10 + (cross ? 30 : 0);
         // The human gets a generous gap either side (about 10–12 nm between the aircraft around them).
         return leader == UserArr || f == UserArr ? Math.Max(need, UserSideGapSec) : need;
     }
@@ -4115,7 +4142,7 @@ public sealed partial class TrafficWorld
     private void Unstick(Flight f, double dt)
     {
         var atHold = f.Stops.Any(st => !st.Cleared && Math.Abs(st.S - f.S) < 3);
-        if (f.Gs > 0.5 || atHold) { f.StuckFor = 0; return; }
+        if (f.Gs > 0.5 || atHold || InQueue(f)) { f.StuckFor = 0; return; }
         f.StuckFor += dt;
         // After 2 minutes on the way in, another gate comes first (it used to wait for a minute without a reroute,
         // which the reroutes every minute never allowed: DAL2225 was removed at MCO instead of going elsewhere).
@@ -4359,6 +4386,26 @@ public sealed partial class TrafficWorld
         }
         if (who is null) f.FloorFor = null;
         return floor;
+    }
+
+    /// <summary>
+    /// Waiting in a line, not stuck (KORD, 16 Nov: UAL416, UAL938 and UAL1819 were removed after 5 minutes in the queue
+    /// behind UAL1779, which was waiting its turn for runway 10C): the aircraft it's waiting for — or the one that one
+    /// waits for, and so on — is moving, holding short, lining up or at a hold line for a crossing. A ring of aircraft
+    /// each waiting for the next is a real jam and still counts.
+    /// </summary>
+    private bool InQueue(Flight f)
+    {
+        var seen = new HashSet<Flight> { f };
+        var x = f.BlockedBy;
+        for (var i = 0; i < 12 && x is not null; i++)
+        {
+            if (!seen.Add(x) || x.Done) return false;
+            if (!x.OnGround || x.Gs > 0.5 || x.Phase is "holding short" or "lining up" or "lined up" or "takeoff roll" or "landing roll") return true;
+            if (x.Stops.Any(st => !st.Cleared && Math.Abs(st.S - x.S) < 3)) return true;
+            x = x.BlockedBy;
+        }
+        return false;
     }
 
     /// <summary>The ring of ground aircraft each waiting for the next, back to this one (null if there's no ring).</summary>
