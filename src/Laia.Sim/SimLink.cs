@@ -101,9 +101,24 @@ internal sealed class SimLink : IDisposable
         ("ZULU TIME", "seconds"), ("ZULU DAY OF WEEK", "number"), ("PRESSURE ALTITUDE", "feet"),
     };
 
+    // SimConnect exceptions, at most 10 a minute in the log and then a count (16 Nov: MSFS closing with 49 AI aircraft
+    // gave 23,985 "exception 3" lines in one minute, as each one's updates failed).
+    private DateTime _excMinute = DateTime.MinValue;
+    private int _excCount;
+    private void LogException(uint code, uint id)
+    {
+        var now = DateTime.UtcNow;
+        if (now - _excMinute > TimeSpan.FromMinutes(1))
+        {
+            if (_excCount > 10) Log.Write($"SimConnect: {_excCount - 10} more exceptions in that minute not logged");
+            _excMinute = now; _excCount = 0;
+        }
+        if (++_excCount <= 10) Log.Write($"SimConnect exception {code} on request {id}");
+    }
+
     private async Task RegisterAsync(SimConnectClient sc)
     {
-        sc.SimException += (code, id) => Log.Write($"SimConnect exception {code} on request {id}");
+        sc.SimException += (code, id) => LogException(code, id);
         sc.Data += OnData;
         foreach (var (name, units) in Numbers) await sc.AddToDataDefinitionAsync(DefNumbers, name, units, SimDataType.Float64);
         await sc.AddToDataDefinitionAsync(DefStrings, "TITLE", null, SimDataType.String256);
