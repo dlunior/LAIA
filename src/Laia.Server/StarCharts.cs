@@ -137,18 +137,64 @@ public static class StarCharts
         return res;
     }
 
-    /// <summary>The page's straight lines (and the edges of its boxes), for the lines over and under altitudes.</summary>
+    /// <summary>
+    /// The page's straight lines (and the edges of its boxes), for the lines over and under altitudes. Worked out from
+    /// the page's drawing instructions here, following each "move the origin" (cm) before a line: the PDF reader's own
+    /// path list leaves those out, so FQM3's underlines ("q 1 0 0 1 249.96 361.03 cm 0 0 m 0 -20.88 l S Q") came out
+    /// at the page's corner.
+    /// </summary>
+    public static string? LastSegmentError;
+
     private static List<(double ang, PdfPoint a, PdfPoint b)> Segments(Page page)
     {
         var res = new List<(double, PdfPoint, PdfPoint)>();
         try
         {
-            foreach (var path in page.ExperimentalAccess.Paths)
-                foreach (var sub in path)
-                    foreach (var c in sub.Commands)
-                        if (c is PdfSubpath.Line ln) res.Add((0, ln.From, ln.To));
+            var ctm = new double[] { 1, 0, 0, 1, 0, 0 };
+            var stack = new Stack<double[]>();
+            PdfPoint T(double x, double y) => new(ctm[0] * x + ctm[2] * y + ctm[4], ctm[1] * x + ctm[3] * y + ctm[5]);
+            static double D(object v) => Convert.ToDouble(v, System.Globalization.CultureInfo.InvariantCulture);
+            PdfPoint cur = default, start = default;
+            foreach (var op in page.Operations)
+            {
+              try
+              {
+                dynamic d = op;
+                switch (op.Operator)
+                {
+                    case "q": stack.Push((double[])ctm.Clone()); break;
+                    case "Q": if (stack.Count > 0) ctm = stack.Pop(); break;
+                    case "cm":
+                    {
+                        var v = new List<double>();
+                        foreach (var x in (System.Collections.IEnumerable)d.Value) v.Add(D(x));
+                        if (v.Count < 6) break;
+                        // The new matrix times the current one.
+                        ctm = new[]
+                        {
+                            v[0] * ctm[0] + v[1] * ctm[2], v[0] * ctm[1] + v[1] * ctm[3],
+                            v[2] * ctm[0] + v[3] * ctm[2], v[2] * ctm[1] + v[3] * ctm[3],
+                            v[4] * ctm[0] + v[5] * ctm[2] + ctm[4], v[4] * ctm[1] + v[5] * ctm[3] + ctm[5],
+                        };
+                        break;
+                    }
+                    case "m": cur = start = T(D(d.X), D(d.Y)); break;
+                    case "l": { var p = T(D(d.X), D(d.Y)); res.Add((0, cur, p)); cur = p; break; }
+                    case "h": res.Add((0, cur, start)); cur = start; break;
+                    case "re":
+                    {
+                        double x0 = D(d.LowerLeftX), y0 = D(d.LowerLeftY), w = D(d.Width), h = D(d.Height);
+                        PdfPoint p1 = T(x0, y0), p2 = T(x0 + w, y0), p3 = T(x0 + w, y0 + h), p4 = T(x0, y0 + h);
+                        res.Add((0, p1, p2)); res.Add((0, p2, p3)); res.Add((0, p3, p4)); res.Add((0, p4, p1));
+                        cur = start = p1;
+                        break;
+                    }
+                }
+              }
+              catch (Exception ex) { LastSegmentError ??= op.Operator + ": " + ex.Message; }
+            }
         }
-        catch { }
+        catch (Exception ex) { LastSegmentError ??= ex.Message; }
         return res;
     }
 
@@ -299,7 +345,7 @@ public static class StarCharts
         foreach (var page in doc.GetPages())
         {
             var segsAll = Segments(page);
-            sb.Append($"paths {segsAll.Count} lines; ");
+            sb.Append($"paths {segsAll.Count} lines{(LastSegmentError is null ? "" : " (" + LastSegmentError + ")")}; ");
             foreach (var (ang, letters) in Frames(page))
             {
                 var segs = segsAll.Select(sg => (a: Frame(sg.a, ang), b: Frame(sg.b, ang))).ToList();
@@ -307,7 +353,7 @@ public static class StarCharts
                 {
                     var l0 = letters.First(l => l.Value == word[..1]);
                     sb.Append($"[{ang}°] {w.Text} x {w.X0:0.0}–{w.X1:0.0} y {w.Y:0.0} size {w.Size:0.0} (pt {l0.PointSize:0.0} font {l0.FontSize:0.0} rect {l0.GlyphRectangle.Width:0.0}x{l0.GlyphRectangle.Height:0.0}); near: ");
-                    foreach (var (a, b) in segs.Where(sg => Math.Abs(sg.a.y - w.Y) < 12 && Math.Max(sg.a.x, sg.b.x) > w.X0 - 5 && Math.Min(sg.a.x, sg.b.x) < w.X1 + 5).Take(8))
+                    foreach (var (a, b) in segs.Where(sg => Math.Abs(sg.a.y - w.Y) < 5 && Math.Max(sg.a.x, sg.b.x) > w.X0 - 5 && Math.Min(sg.a.x, sg.b.x) < w.X1 + 5).Take(8))
                         sb.Append($"({a.x:0.0},{a.y:0.0})-({b.x:0.0},{b.y:0.0}) ");
                     sb.Append("; ");
                 }
