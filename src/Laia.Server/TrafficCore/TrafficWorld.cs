@@ -1739,6 +1739,7 @@ public sealed partial class TrafficWorld
             foreach (var o in Flights)
             {
                 if (o == f || o.Done || !o.OnGround || o.Path is null || !(o.Phase is "pushback" or "taxi" or "taxi in" or "landing roll")) continue;
+                if (o.BlockedBy == f || (o.Gs < 0.5 && o.StuckFor > 60)) continue;   // waiting for this one, or not going anywhere soon
                 if ((o.Pos - s.P).Length > 1500) continue;
                 for (var d = 0.0; d <= 400; d += 15)
                 {
