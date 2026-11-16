@@ -292,6 +292,30 @@ public static class StarCharts
         return res;
     }
 
+    /// <summary>For the offline checks: how a word is seen (its frame position and size) and the straight lines near it.</summary>
+    public static string Diagnose(PdfDocument doc, string word)
+    {
+        var sb = new StringBuilder();
+        foreach (var page in doc.GetPages())
+        {
+            var segsAll = Segments(page);
+            sb.Append($"paths {segsAll.Count} lines; ");
+            foreach (var (ang, letters) in Frames(page))
+            {
+                var segs = segsAll.Select(sg => (a: Frame(sg.a, ang), b: Frame(sg.b, ang))).ToList();
+                foreach (var w in Words(letters, ang).Where(w => w.U == word))
+                {
+                    var l0 = letters.First(l => l.Value == word[..1]);
+                    sb.Append($"[{ang}°] {w.Text} x {w.X0:0.0}–{w.X1:0.0} y {w.Y:0.0} size {w.Size:0.0} (pt {l0.PointSize:0.0} font {l0.FontSize:0.0} rect {l0.GlyphRectangle.Width:0.0}x{l0.GlyphRectangle.Height:0.0}); near: ");
+                    foreach (var (a, b) in segs.Where(sg => Math.Abs(sg.a.y - w.Y) < 12 && Math.Max(sg.a.x, sg.b.x) > w.X0 - 5 && Math.Min(sg.a.x, sg.b.x) < w.X1 + 5).Take(8))
+                        sb.Append($"({a.x:0.0},{a.y:0.0})-({b.x:0.0},{b.y:0.0}) ");
+                    sb.Append("; ");
+                }
+            }
+        }
+        return sb.ToString();
+    }
+
     /// <summary>Whether a chart's list of airports ("Patrick SFB, Melbourne Orlando Intl, and Merritt Island") names this one.</summary>
     public static bool ListHas(string list, string aptName)
     {

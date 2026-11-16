@@ -1903,6 +1903,7 @@ Console.WriteLine("== STAR chart \"expect\" restrictions (BITHO7, FQM3; d-TPP 26
     using var fqm = UglyToad.PdfPig.PdfDocument.Open(Path.Combine(AppContext.BaseDirectory, "charts", "FQM3.pdf"));
     var ewr = Laia.Server.StarCharts.ReadExpects(fqm, new HashSet<string> { "FQM", "SLT", "MEGSS", "HAYED", "RACKI", "PENNS", "SWEET" }, "NEWARK LIBERTY INTL");
     Console.WriteLine("  Newark (FQM3): " + Show(ewr));
+    Console.WriteLine("  13000 as read: " + Laia.Server.StarCharts.Diagnose(fqm, "13000"));
     Check(ewr.Any(e => e.Fix == "RACKI" && e.MinFt == 13000 && e.MaxFt == 0), "sideways chart: RACKI at or above 13,000 (underlined)");
     Check(ewr.Any(e => e.Fix == "SWEET" && e.MinFt == 7000 && e.MaxFt == 0), "sideways chart: SWEET at or above 7,000 (underlined)");
     Check(ewr.Any(e => e.Fix == "HAYED" && e.MinFt == 18000), "HAYED at the lowest usable flight level (FL180)");
