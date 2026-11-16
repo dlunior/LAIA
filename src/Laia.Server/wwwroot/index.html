@@ -180,7 +180,7 @@ async function pollTraffic(){try{const r=await fetch("/api/traffic");const t=awa
     // En route (or no layout yet): the level is set; traffic starts at the next airport. Never a blocking box for this.
     $("tPrep").style.display="block";
     $("tPrep").innerHTML=st.destination?`<b>${esc(st.level==="real"?"Real world":st.level)} is set.</b> <span class="muted">En route: traffic near you in the air is drawn now; your destination is ${esc(st.destination)}.</span>`
-      :`<b>Traffic level set.</b> <span class="muted">${st.destinationPlanned?`Your destination ${esc(st.destinationPlanned)} is prepared once you're within 250 nm; until then, traffic in the air near you is drawn.`:"Traffic starts when you're near an airport LAIA has the layout of."}</span>`;
+      :`<b>Traffic level set.</b> <span class="muted">${st.destinationPlanned?`Your destination ${esc(st.destinationPlanned)} is prepared once you're within 300 nm (its runways, approach and the runway to expect show here); until then, traffic in the air near you is drawn.`:"Traffic starts when you're near an airport LAIA has the layout of."}</span>`;
   }
   else $("tPrep").style.display="none";
   // The box: shown after a traffic level is picked while data is still loading; closes itself once all is ready.

@@ -810,7 +810,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                     ? new { icao = ap0.Icao, ahead = true, seconds = (int)ap0.Secs, items = ap0.Items.Select(i => new { i.item, i.done, i.note }).ToList() } : null,
                 destinationPlanned = simBrief.Plan?.Destination,
                 airport = w?.Apt.Icao,
-                destination = _ahead is { } ah ? $"{ah.Apt.Icao} {ah.Apt.Name}: " + (_aheadPrep is { Ready: true } ? $"ready, {ah.Flights.Count(f => !f.Done && f.Kind != "parked")} flights running ahead of you"
+                destination = _ahead is { } ah ? $"{ah.Apt.Icao} {ah.Apt.Name}: " + (_aheadPrep is { Ready: true } ? $"ready — landing {string.Join(", ", ah.ArrRwys.Select(e => e.Ident).DefaultIfEmpty(ah.ArrRwy?.Ident ?? "?"))}{(ah.ApproachInUse is { Length: > 0 } aa ? $" ({aa})" : "")}{(ah.ExpectedRunway is { } er ? $"; expect runway {er}, {ah.ExpectedApproach}" : "")}; {ah.Flights.Count(f => !f.Done && f.Kind != "parked")} flights running ahead of you"
                     : _aheadPrep is { } ap ? "preparing (" + string.Join("; ", ap.Items.Where(i => !i.done).Select(i => i.item)) + ")" : "preparing") : null,
                 airportName = w?.Apt.Name,
                 layout = w is null ? null : $"{w.Apt.Spots.Count} parking spots, {w.Apt.Data.Departures.Count} SIDs, {w.Apt.Data.Arrivals.Count} STARs, {w.Apt.Data.Approaches.Count} approaches",
@@ -999,7 +999,8 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
 
     /// <summary>
     /// The destination, ready before the user gets there (user, 13 Nov: everything prepared first, quality over speed):
-    /// once the user is on the way and within 250 nm of the flight plan's destination, its world is created and
+    /// once the user is on the way and within 300 nm of the flight plan's destination (250 until 16 Nov; user: "to
+    /// allow the user to configure arriving runway and approach sooner"), its world is created and
     /// prepared exactly like the departure field (layout, schedule, ATIS, METAR, AAUP, charts, real tracks, runways,
     /// taxi flow, pushbacks, routes) and its traffic runs unseen; it's drawn as the user comes within range, and it
     /// becomes the traffic airport at 40 nm with its traffic already flowing (not started from nothing then).
@@ -1010,7 +1011,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         var dest = simBrief.Plan?.Destination;
         var model = dest is { Length: > 0 } ? airports.Model(dest) : null;
         var want = Level != TrafficLevel.Off && model is { HasGround: true } && !sim.OnGround && _world?.Apt != model
-                   && Geo2.DistanceNm(sim.Lat, sim.Lon, model.Data.Lat, model.Data.Lon) < 250;
+                   && Geo2.DistanceNm(sim.Lat, sim.Lon, model.Data.Lat, model.Data.Lon) < 300;
         if (_ahead is not null && (!want || _ahead.Apt != model))
         {
             log.LogInformation("Destination {icao} no longer ahead (flight plan changed or turned back): its traffic is dropped", _ahead.Apt.Icao);

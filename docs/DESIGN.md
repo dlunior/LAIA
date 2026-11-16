@@ -567,6 +567,8 @@ around. Airliners can't do that on a taxiway, and a real ground controller never
 
 **0.1.229 — the server PC's performance, measured (user, 16 Nov: "hows the performance of the server PC? is it handling the load adequately?"):** once a minute the log has a "Performance, last minute" line — the whole PC's processor and memory use, LAIA's own, the traffic updates (four a second: how many, average and longest, where the longest one's time went, and how many took over 250 ms), .NET's pauses, and the graphics card (nvidia-smi: use, memory, temperature) — and the status page shows it. A traffic update over a second (with its wait for the lock) is logged at once with its parts: the airport check, sharing between airports, en route, and each airport.
 
+**0.1.230 — the destination from 300 nm, with the runway to expect (user, 16 Nov: "set that to 300 to allow the user to configure arriving runway and approach sooner"):** the destination is prepared ahead from 300 nm (was 250). Once ready, the control page's "Destination ahead" line gives its landing runways and approaches and the runway the user can expect with its approach ("expect runway 27C, ILS 27C") — the landing runway on the user's side of the field, kept while it's in use. The runway the user is given at 80 nm is that one if it's still in use (and the one-change, never-below-10,000 ft rule is unchanged).
+
 Section 4 says *what* LAIA will do; this section says *in which order* it gets built. Each milestone is a set of
 releases that can be tested on its own before the next one starts. Every milestone also gets offline checks in
 `Laia.Tests`, so CI proves the rules before the user flies.

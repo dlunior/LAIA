@@ -75,9 +75,31 @@ public sealed partial class TrafficWorld
         return t;
     }
 
+    /// <summary>
+    /// The runway and approach the user can expect here, from as soon as this destination is prepared ahead (300 nm;
+    /// user, 16 Nov: "to allow the user to configure arriving runway and approach sooner"): the landing runway on their
+    /// side of the field, kept while it's in use, and its approach. The runway they're given at 80 nm is this one if
+    /// it's still in use.
+    /// </summary>
+    public string? ExpectedRunway { get; private set; }
+    public string? ExpectedApproach { get; private set; }
+    private RunwayEnd? _expected;
+
+    private void UpdateExpected()
+    {
+        if (UserPos is not { } u || UserOnGround || UserDestination is not { Length: > 0 } d || !d.Equals(Apt.Icao, StringComparison.OrdinalIgnoreCase))
+        { _expected = null; ExpectedRunway = ExpectedApproach = null; return; }
+        var arrs = ArrRwys.Count > 0 ? ArrRwys : ArrRwy is null ? new List<RunwayEnd>() : new() { ArrRwy };
+        if (UserArr?.Rwy is { } given) _expected = given;
+        else if (_expected is null || !arrs.Contains(_expected)) _expected = arrs.Count == 0 ? null : arrs.OrderBy(r => UserTrackNm(r, u)).First();
+        ExpectedRunway = _expected?.Ident;
+        ExpectedApproach = _expected is null ? null : ApproachFor(_expected) is { } a ? ApproachLabel(a) : "vectors to final";
+    }
+
     /// <summary>Called every step before the sequencing: keeps the user's place in the arrival sequence.</summary>
     private void UpdateUserArrival()
     {
+        UpdateExpected();
         if (!UserArriving() || UserPos is not { } u)
         {
             UserArr = null; Sequence = null; _userSlot = double.NaN; _seqSig = ""; _userRwyChanges = 0; _userHoldLogged = false; return;
@@ -92,7 +114,7 @@ public sealed partial class TrafficWorld
         // The runway: given once, on the user's side of the field. Changed at most once, and never below 10,000 ft
         // (user, 13 Nov: changed "at the last moment … no more than one runway change and never below 10000ft"):
         // otherwise the user keeps it even if the airport has stopped landing there, and LAIA's traffic works around them.
-        if (f.Rwy is null) f.Rwy = arrs.OrderBy(r => UserTrackNm(r, u)).First();
+        if (f.Rwy is null) f.Rwy = _expected is { } ex && arrs.Contains(ex) ? ex : arrs.OrderBy(r => UserTrackNm(r, u)).First();
         else if (!arrs.Contains(f.Rwy) && UserAltFt >= 10000 && _userRwyChanges < 1)
         {
             var old = f.Rwy;
