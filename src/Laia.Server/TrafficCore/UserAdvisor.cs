@@ -45,8 +45,12 @@ public sealed partial class TrafficWorld
     {
         if (UserPos is not { } u || UserOnGround) return false;
         var nm = u.Length / Geo2.MPerNm;
+        // With a flight plan to here: in the sequence from 200 nm, as far out as LAIA takes its own arrivals over, so
+        // the arrival manager slows the traffic behind in good time (user, 16 Nov, KGPI: "LAIA should be able to read
+        // my groundspeed and slow the other plane in time without having it to do a loop or hold" — the user joined
+        // the sequence at 80 nm, 45 s ahead of AAL1842's slot, which then got a loop and a hold).
+        if (UserDestination is { Length: > 0 } d) return nm <= 200 && d.Equals(Apt.Icao, StringComparison.OrdinalIgnoreCase);
         if (nm > 80) return false;
-        if (UserDestination is { Length: > 0 } d) return d.Equals(Apt.Icao, StringComparison.OrdinalIgnoreCase);
         // No plan: within 40 nm, below 15,000 ft above the field and coming closer.
         var toApt = (new V2(0, 0) - u).Bearing;
         return nm < 40 && UserAltFt < Apt.ElevationFt + 15000 && Math.Abs(Geo2.Diff(UserTrack, toApt)) < 100;
@@ -63,15 +67,21 @@ public sealed partial class TrafficWorld
         return (u - join).Length / Geo2.MPerNm + 9;
     }
 
-    /// <summary>Seconds to the threshold at about the speeds the user will fly: their speed now far out (at most 250 kt
-    /// below 10,000 ft), 210 kt inside 20 nm, 180 inside 12, the approach speed inside 6.</summary>
+    /// <summary>
+    /// Seconds to the threshold at about the speeds the user will fly, from their groundspeed now: that speed beyond
+    /// 100 nm (cruise), at most 330 kt from 100 to 40 nm (the descent), 260 from 40 to 20 (250 below 10,000 ft), 210
+    /// inside 20 nm, 180 inside 12, the approach speed inside 6. (Until 16 Nov far out was capped at 320 kt, which put
+    /// a user cruising at 480 kt minutes later than they'd be.)
+    /// </summary>
     private double UserEtaSec(double nm)
     {
         var vapp = Perf.For(UserType.Length > 0 ? UserType : "A320").Vapp;
         double t = 0, d = nm;
         void Leg(double from, double to, double kt) { var len = Math.Max(0, Math.Min(d, from) - to); if (len > 0) t += len / Math.Max(90, kt) * 3600; }
-        var far = Math.Clamp(UserGs > 60 ? UserGs : 250, 180, UserAltFt < 11000 ? 250 : 320);
-        Leg(double.MaxValue, 20, far); Leg(20, 12, Math.Min(far, 210)); Leg(12, 6, 180); Leg(6, 0, vapp + 5);
+        var gs = Math.Clamp(UserGs > 60 ? UserGs : 300, 150, 650);
+        if (UserAltFt < 11000) gs = Math.Min(gs, 260);
+        Leg(double.MaxValue, 100, gs); Leg(100, 40, Math.Min(gs, 330)); Leg(40, 20, Math.Min(gs, 260));
+        Leg(20, 12, Math.Min(gs, 210)); Leg(12, 6, Math.Min(gs, 180)); Leg(6, 0, vapp + 5);
         return t;
     }
 
