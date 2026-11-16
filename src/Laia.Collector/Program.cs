@@ -67,23 +67,22 @@ app.MapGet("/", () =>
 {
     var s = JsonSerializer.Serialize(Status(), new JsonSerializerOptions { WriteIndented = true });
     var days = db.Days();
-    var html = $$"""
-        <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-        <meta http-equiv="refresh" content="30"><title>LAIA Collector</title>
-        <style>body{font:15px system-ui,sans-serif;margin:24px;max-width:760px;color:#1d2330;background:#f6f7f9}
-        h1{font-size:20px}.card{background:#fff;border:1px solid #dde1e7;border-radius:8px;padding:14px 16px;margin:12px 0}
-        b{font-weight:600}pre{font-size:12px;overflow:auto;color:#555}
-        @media (prefers-color-scheme: dark){body{background:#15181d;color:#e6e8eb}.card{background:#1e2228;border-color:#30353d}pre{color:#9aa}}</style></head>
-        <body><h1>LAIA Collector {{version}}</h1>
-        <div class="card"><b>Now:</b> {{System.Net.WebUtility.HtmlEncode(collector.Now)}}</div>
-        <div class="card"><b>Last day collected:</b> {{System.Net.WebUtility.HtmlEncode(collector.Last ?? "none yet")}}</div>
-        <div class="card"><b>Days stored:</b> {{days.Count}} {{(days.Count > 0 ? $"({days[^1]} to {days[0]})" : "")}}<br>
-        <b>Airports watched:</b> {{collector.AirportCount}} ({{string.Join(" + ", options.Countries)}}) · <b>with tracks:</b> {{db.AirportCount()}}<br>
-        <b>Database:</b> {{db.SizeBytes() / 1e6:N0}} MB · kept {{options.KeepDays}} days</div>
-        <details><summary>Details</summary><pre>{{System.Net.WebUtility.HtmlEncode(s)}}</pre></details>
-        </body></html>
-        """;
-    return Results.Content(html, "text/html");
+    string H(string? x) => System.Net.WebUtility.HtmlEncode(x ?? "");
+    const string Css = "body{font:15px system-ui,sans-serif;margin:24px;max-width:760px;color:#1d2330;background:#f6f7f9}"
+        + "h1{font-size:20px}.card{background:#fff;border:1px solid #dde1e7;border-radius:8px;padding:14px 16px;margin:12px 0}"
+        + "b{font-weight:600}pre{font-size:12px;overflow:auto;color:#555}"
+        + "@media (prefers-color-scheme: dark){body{background:#15181d;color:#e6e8eb}.card{background:#1e2228;border-color:#30353d}pre{color:#9aa}}";
+    var range = days.Count > 0 ? $" ({days[^1]} to {days[0]})" : "";
+    var html = "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        + "<meta http-equiv=\"refresh\" content=\"30\"><title>LAIA Collector</title><style>" + Css + "</style></head><body>"
+        + $"<h1>LAIA Collector {H(version)}</h1>"
+        + $"<div class=\"card\"><b>Now:</b> {H(collector.Now)}</div>"
+        + $"<div class=\"card\"><b>Last day collected:</b> {H(collector.Last ?? "none yet")}</div>"
+        + $"<div class=\"card\"><b>Days stored:</b> {days.Count}{H(range)}<br>"
+        + $"<b>Airports watched:</b> {collector.AirportCount} ({H(string.Join(" + ", options.Countries))}) · <b>with tracks:</b> {db.AirportCount()}<br>"
+        + $"<b>Database:</b> {db.SizeBytes() / 1e6:N0} MB · kept {options.KeepDays} days</div>"
+        + $"<details><summary>Details</summary><pre>{H(s)}</pre></details></body></html>";
+    return Results.Content(html, "text/html; charset=utf-8");
 });
 
 app.Run();
