@@ -25,7 +25,8 @@ public sealed class AirportProfile
     public List<TaxiTrack> Taxi { get; set; } = new();
     /// <summary>What the profile holds: 2 = with taxi tracks; 3 = airline passenger jets only; 4 = three days. Older ones are learned again.</summary>
     public int Version { get; set; }
-    public const int CurrentVersion = 8;   // 7: more days when one flow wasn't seen (KATL);   // 5: landings seen only down to a few hundred feet count (KMCI); 6: arrival samples kept (KMCI)
+    public const int CurrentVersion = 9;   // 9: landings and take-offs seen only well above the runway (KGPI)
+    // 8: thin flows;   // 7: more days when one flow wasn't seen (KATL);   // 5: landings seen only down to a few hundred feet count (KMCI); 6: arrival samples kept (KMCI)
 
     public sealed class TaxiTrack
     {
@@ -138,6 +139,16 @@ public static class TrackLearner
                         if (r is not null && i + 1 < tr.Count && tr[i + 1].T - tr[i].T < 30 && tr[i + 1].AltFt is { } an && an < al && an > elevFt + 300) r = null;
                     }
                 }
+                // Where the receivers lose them well above the runway (KGPI, 16 Nov, in the mountains: 24 tracks in 3 days,
+                // not one seen below 1,500 ft — "nothing usable", no real tracks on the map): the last of the track, up to
+                // 15 nm out, below 5,000 ft above the field and no higher than a steep approach, coming down, lined up with
+                // a runway's final (inside a 6° cone), with nothing more of it for two minutes — a landing on that runway.
+                if (r is null && tr[i].AltFt is { } al2 && al2 < elevFt + 5000 && tr[i - 1].AltFt is { } ap2 && ap2 > al2
+                    && (i + 1 == tr.Count || tr[i + 1].T - tr[i].T > 120))
+                    r = ends.FirstOrDefault(e => e.Along(xy[i]) > -15 * Nm && e.Along(xy[i]) < 0
+                        && Math.Abs(e.Offset(xy[i])) < 300 + 0.1 * -e.Along(xy[i])
+                        && Math.Abs(Geo2.Diff(tr[i].Track, e.Heading)) < 15
+                        && al2 - elevFt < 1500 + 500 * (-e.Along(xy[i]) / Nm));
                 if (r is null) continue;
                 // It must have been flying, a minute before.
                 var j0 = Back(tr, i, 60);
@@ -158,12 +169,21 @@ public static class TrackLearner
                 while (i < tr.Count && (tr[i].AltFt is null || tr[i].AltFt < elevFt + 2000)) i++;
             }
             // ---- take-offs
-            for (var i = 1; i < tr.Count; i++)
+            for (var i = 0; i < tr.Count; i++)
             {
-                if (tr[i - 1].AltFt is not null && tr[i - 1].AltFt > elevFt + 200) continue;
-                if (tr[i].AltFt is null || tr[i].AltFt > elevFt + 1200) continue;
-                var r = ends.FirstOrDefault(e => e.Along(xy[i]) > e.LengthM * 0.2 && e.Along(xy[i]) < e.LengthM + 3 * Nm && Math.Abs(e.Offset(xy[i])) < 300
-                    && Math.Abs(Geo2.Diff(tr[i].Track, e.Heading)) < 20);
+                RunwayEnd? r = null;
+                if (i >= 1 && !(tr[i - 1].AltFt is not null && tr[i - 1].AltFt > elevFt + 200) && tr[i].AltFt is { } a1 && a1 <= elevFt + 1200)
+                    r = ends.FirstOrDefault(e => e.Along(xy[i]) > e.LengthM * 0.2 && e.Along(xy[i]) < e.LengthM + 3 * Nm && Math.Abs(e.Offset(xy[i])) < 300
+                        && Math.Abs(Geo2.Diff(tr[i].Track, e.Heading)) < 20);
+                // First seen already climbing out (KGPI: the receivers pick departures up only well above the runway):
+                // the start of the track, up to 15 nm past the runway's end, below 5,000 ft above the field and no higher
+                // than a steep climb, going up, on the runway's extended centreline (inside a 6° cone), heading out.
+                if (r is null && (i == 0 || tr[i].T - tr[i - 1].T > 120) && tr[i].AltFt is { } a2 && a2 < elevFt + 5000
+                    && i + 1 < tr.Count && tr[i + 1].AltFt is { } an2 && an2 > a2)
+                    r = ends.FirstOrDefault(e => e.Along(xy[i]) > e.LengthM * 0.5 && e.Along(xy[i]) < e.LengthM + 15 * Nm
+                        && Math.Abs(e.Offset(xy[i])) < 300 + 0.1 * Math.Max(0, e.Along(xy[i]) - e.LengthM)
+                        && Math.Abs(Geo2.Diff(tr[i].Track, e.Heading)) < 15
+                        && a2 - elevFt < 1500 + 700 * (Math.Max(0, e.Along(xy[i]) - e.LengthM) / Nm));
                 if (r is null) continue;
                 Taxi("departure", r.Ident, tr, xy, i, -1);
                 var path = new List<V2> { r.Threshold + r.Dir * r.LengthM };

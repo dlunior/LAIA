@@ -247,6 +247,24 @@ public sealed class AdsbHistory(ILogger<AdsbHistory> log, SettingsStore settings
                         prof = TrackLearner.Learn(a.Icao, a.Map, a.ElevationFt, a.Ends, tracks, "LAIA Collector", DaysText());
                     }
                 }
+                // A quiet airport (KGPI, 16 Nov: 24 tracks in 3 days): more of the stored days, newest first, until
+                // there are 30 real arrivals and 30 departures or every stored day is in.
+                int Seen(string kind) => prof.Samples.Count(x => x.Kind == kind);
+                if (Seen("arrival") < 30 || Seen("departure") < 30)
+                {
+                    var more = days.Where(d => !used.Contains(d)).ToList();
+                    var added = 0;
+                    foreach (var d in more)
+                    {
+                        await Add(d); added++;
+                        if (added % 3 == 0 || d == more[^1])
+                        {
+                            prof = TrackLearner.Learn(a.Icao, a.Map, a.ElevationFt, a.Ends, tracks, "LAIA Collector", DaysText());
+                            if (Seen("arrival") >= 30 && Seen("departure") >= 30) break;
+                        }
+                    }
+                    if (added > 0) log.LogInformation("{icao}: a quiet airport — {n} more stored day(s) learned ({arr} arrivals, {dep} departures now)", a.Icao, added, Seen("arrival"), Seen("departure"));
+                }
                 Directory.CreateDirectory(Dir);
                 await File.WriteAllTextAsync(Path.Combine(Dir, a.Icao + ".json"), JsonSerializer.Serialize(prof, Json), ct);
                 lock (_gate) _profiles[a.Icao] = prof;

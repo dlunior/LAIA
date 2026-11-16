@@ -1376,6 +1376,14 @@ Console.WriteLine("== M6: learning an airport from real tracks (synthetic adsb.l
         var ac = pc.Arrivals.GetValueOrDefault("27");
         Console.WriteLine($"  arrivals not seen below 900 ft: {ac?.Count ?? 0} of 12 learned");
         Check(ac is not null && ac.Count == 12, "landings seen only down to about 900 ft are learned too");
+        // In the mountains (KGPI, 16 Nov): arrivals lost at 1,800 ft above the field, about 7 nm out on final, and
+        // departures first seen at 2,000 ft, 2½ nm past the runway's end.
+        var high = tracks.Take(12).Select(t => (IReadOnlyList<TrackPoint>)t.Where(q => q.AltFt is { } a0 && a0 > apt.ElevationFt + 1800).ToList())
+            .Concat(tracks.Skip(12).Select(t => (IReadOnlyList<TrackPoint>)t.Where(q => q.AltFt is { } a0 && a0 > apt.ElevationFt + 2000).ToList())).ToList();
+        var ph = TrackLearner.Learn("TEST", map, apt.ElevationFt, apt.Ends, high, "test", "2026-11-10");
+        var ha = ph.Samples.Count(x => x.Kind == "arrival" && x.Runway == "27"); var hd = ph.Samples.Count(x => x.Kind == "departure" && x.Runway == "27");
+        Console.WriteLine($"  seen only well above the runway: {ha} of 12 arrivals and {hd} of 10 departures learned");
+        Check(ha == 12 && hd == 10, "arrivals lost and departures first seen well above the runway, lined up with it, are learned too");
     }
     var a27 = prof.Arrivals.GetValueOrDefault("27");
     Check(a27 is not null && a27.Count == 12 && Math.Abs(a27.JoinP50 - 10) < 1 && Math.Abs(a27.InterceptDeg - 30) < 8 && Math.Abs(a27.DownwindNm - 4) < 0.7 && Math.Abs(a27.BaseNm - 14) < 1.5,
