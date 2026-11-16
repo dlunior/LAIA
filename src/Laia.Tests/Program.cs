@@ -99,7 +99,7 @@ Console.WriteLine("== One hour of busy traffic, runway 27 in use (wind 270/12)")
 {
     var apt = new AirportModel(TestAirport.Build(false));
     var log = new List<string>();
-    var world = new TrafficWorld(apt, new TestSource(), seed: 42) { Level = TrafficLevel.Busy, Wind = new Wind(270, 12) };
+    var world = new TrafficWorld(apt, new TestSource(), seed: 42) { Level = TrafficLevel.Busy, Wind = new Wind(270, 12), SafetyLogic = true };
     world.Log = s => log.Add($"{TimeSpan.FromSeconds(world.Time):hh\\:mm\\:ss} {s}");
     world.UserPos = new V2(-1200, -600); // user parked off to the side
     world.UserOnGround = true;
@@ -138,8 +138,17 @@ Console.WriteLine("== One hour of busy traffic, runway 27 in use (wind 270/12)")
             if (f.Kind == "departure" && !f.OnGround && f.Rwy is not null && airborneSeen.Add(f.Id)) liftoffs.Add((world.Time, f.Rwy.Runway, f.Wake, f.Callsign));
             prevIas[f.Id] = f.Ias;
         }
-        // Runway: at most one aircraft on it (departures that have lifted off don't count).
-        var onRwy = fl.Where(f => f.OnRunway >= 0 && !(f.Kind == "departure" && !f.OnGround)).GroupBy(f => f.OnRunway).Where(g => g.Count() > 1).ToList();
+        // Runway: at most one aircraft on it (departures that have lifted off don't count) — except one lining up or
+        // waiting behind a take-off roll or a landing rolling out ahead of it, the same way (line up and wait, 3-9-4).
+        bool LuawPair(IGrouping<int, Flight> g)
+        {
+            var waiting = g.Where(f => f.Kind == "departure" && f.Phase is "lining up" or "lined up").ToList();
+            if (waiting.Count != 1) return false;
+            var w = waiting[0];
+            return g.Where(f => f != w).All(o => o.Phase is "takeoff roll" or "landing roll" && o.Rwy is { } r && w.Rwy is { } wr
+                && Math.Abs(Geo2.Diff(r.Heading, wr.Heading)) < 90 && wr.Along(o.Pos) > wr.Along(w.Pos) + 200);
+        }
+        var onRwy = fl.Where(f => f.OnRunway >= 0 && !(f.Kind == "departure" && !f.OnGround)).GroupBy(f => f.OnRunway).Where(g => g.Count() > 1 && !LuawPair(g)).ToList();
         if (onRwy.Count > 0)
         {
             runwayConflicts++;

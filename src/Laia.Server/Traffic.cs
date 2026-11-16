@@ -86,6 +86,18 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     private Prep? _aheadPrep;
     private List<string> _aheadNeighbourWant = new();
 
+    /// <summary>
+    /// Towers with runway safety logic: the 35 ASDE-X airports and the civil ASSC airports (FAA surface surveillance) —
+    /// where line up and wait is allowed with an aircraft cleared to land (7110.65 3-9-4 c).
+    /// </summary>
+    private static readonly HashSet<string> SafetyLogicAirports = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "KATL", "KBDL", "KBOS", "KBWI", "KCLT", "KDCA", "KDEN", "KDFW", "KDTW", "KEWR", "KFLL", "PHNL", "KHOU", "KIAD", "KIAH",
+        "KJFK", "KLAS", "KLAX", "KLGA", "KMCO", "KMDW", "KMEM", "KMIA", "KMKE", "KMSP", "KORD", "KPHL", "KPHX", "KPVD", "KSAN",
+        "KSDF", "KSEA", "KSLC", "KSNA", "KSTL",
+        "KSFO", "KCLE", "KPDX", "KMCI", "KCVG", "KMSY", "KPIT", "PANC",
+    };
+
     /// <summary>Each STAR's fix names (for reading its chart).</summary>
     private static Dictionary<string, HashSet<string>> StarFixes(AirportModel apt) =>
         apt.Data.Arrivals.GroupBy(a => a.Name, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.SelectMany(a => a.Legs
@@ -1137,6 +1149,8 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                             // above it), since it's the wind where the user is; otherwise the last wind stays.
                             var dNm = Geo2.DistanceNm(sim!.Lat, sim.Lon, w.Apt.Data.Lat, w.Apt.Data.Lon);
                             if (metar.Wind(w.Apt.Icao) is { } mw) w.Wind = new Wind(mw.dir ?? w.Wind.FromDeg, mw.kt);
+                            w.LowWeather = metar.LowWeather(w.Apt.Icao);
+                            w.SafetyLogic = SafetyLogicAirports.Contains(w.Apt.Icao);
                             else if (dNm < 15 && sim.AltitudeFt < w.Apt.ElevationFt + 5000) w.Wind = new Wind(sim.WindDirection, sim.WindSpeed);
                             w.UserPos = w.Apt.Map.ToXY(sim.Lat, sim.Lon);
                             w.UserOnGround = sim.OnGround;

@@ -1985,10 +1985,49 @@ public sealed partial class TrafficWorld
         return false;
     }
 
+    /// <summary>
+    /// The tower has runway safety logic (ASDE-X or ASSC): line up and wait is allowed while another aircraft is cleared
+    /// to land on the runway (7110.65 3-9-4 c), except when the ceiling is below 800 ft or the visibility below 2 miles.
+    /// </summary>
+    public bool SafetyLogic;
+    /// <summary>Ceiling below 800 ft or visibility below 2 miles (the METAR): no line up and wait with landing traffic.</summary>
+    public bool LowWeather;
+
+    /// <summary>
+    /// An aircraft on the runway a departure may line up and wait behind (7110.65 3-9-4; user, 16 Nov: "any method to help
+    /// cut down that time while preserving realism"): a departure ahead already on its take-off roll, or — with runway
+    /// safety logic, in fair weather — a landing aircraft rolling out ahead of the entry point, the same way.
+    /// </summary>
+    private bool MayLineUpBehind(Flight o, Flight f)
+    {
+        if (o.Rwy is not { } or || f.Rwy is not { } fr || or.Runway != fr.Runway || Math.Abs(Geo2.Diff(or.Heading, fr.Heading)) > 90) return false;
+        var entry = f.EntryNode >= 0 ? fr.Along(Apt.Nodes[f.EntryNode]) : 0;
+        var ahead = fr.Along(o.Pos) > entry + 300;
+        if (o.Kind == "departure" && o.OnGround && o.Phase == "takeoff roll") return ahead;
+        if (o.Kind == "arrival" && o.OnGround && o.Phase == "landing roll") return ahead && SafetyLogic && !LowWeather;
+        return false;
+    }
+
+    /// <summary>
+    /// Seconds from starting its roll until a departure is airborne and 6,000 ft down the runway — when the next arrival
+    /// may cross the threshold behind it (7110.65 3-10-3, category III) — from where it lines up.
+    /// </summary>
+    private double TimeToClearForArrival(Flight f)
+    {
+        var rwy = f.Rwy!;
+        var start = f.Phase is "lined up" or "takeoff roll" ? rwy.Along(f.Pos) : f.EntryNode >= 0 ? Math.Max(0, rwy.Along(Apt.Nodes[f.EntryNode])) : 0;
+        var a = Math.Max(0.5, f.P.RollAccel * 0.5144);
+        var liftoff = (f.P.Vr + 7) * 0.5144;
+        var dLift = liftoff * liftoff / (2 * a);
+        return RollTime(f, Math.Max(dLift, 1829 - start));
+    }
+
     private bool LineUpAllowed(Flight f)
     {
         var r = f.Rwy!.Runway;
-        if (RunwayBusy(r, f)) return false;
+        // Line up and wait behind a take-off roll, or behind a landing rolling out (safety logic, fair weather).
+        var behind = Flights.Where(o => o != f && !o.Done && (o.Reserve == r || (o.OnRunway == r && !(o.Kind == "departure" && !o.OnGround)))).ToList();
+        if (UserOnRunway(r) || behind.Any(o => !MayLineUpBehind(o, f))) return false;
         // During a runway change, no departures the new way while arrivals still come in the old way (the opposite
         // direction) within 30 nm: the airport turns round once the last of them has landed.
         if (Flights.Any(a => a.Kind == "arrival" && !a.Done && !a.OnGround && a.Rwy is { } ar && Math.Abs(Geo2.Diff(ar.Heading, f.Rwy.Heading)) > 90
@@ -1996,9 +2035,11 @@ public sealed partial class TrafficWorld
         if (!Released(f)) return false;
         // Only line up if the takeoff can follow without delaying the next arrival.
         var eta = ArrivalEta(r);
-        // Line-up ~25 s, short wait, takeoff roll ~55 s, and the departure must be off the runway well before the arrival.
-        // (US practice: the departure must be airborne before the arrival crosses the threshold.)
-        var needed = Math.Max(WakeRemaining(f), 8) + 25 + 50 + 12;
+        // Line-up ~25 s (overlapping the wait for the one ahead), then the roll until it's airborne and 6,000 ft down
+        // the runway, before the next arrival crosses the threshold (3-10-3), with a few seconds to spare; behind a
+        // landing still rolling out, about 20 s more for it to turn off.
+        var rollOut = behind.Any(o => o.Kind == "arrival") ? 20 : 0;
+        var needed = Math.Max(25 + rollOut, WakeRemaining(f)) + TimeToClearForArrival(f) + 8;
         if (eta < needed) return false;
         // Don't line up and wait on the runway while arrivals to a crossing runway keep the takeoff from happening:
         // only line up when the takeoff can follow the line-up (about 30 s later).
@@ -2011,7 +2052,8 @@ public sealed partial class TrafficWorld
     {
         var r = f.Rwy!.Runway;
         if (RunwayBusy(r, f)) return false;
-        if (ArrivalEta(r) < 45) return false;
+        // Airborne and 6,000 ft down the runway before the next arrival crosses the threshold (3-10-3), a few seconds spare.
+        if (ArrivalEta(r) < TimeToClearForArrival(f) + 5) return false;
         if (!CrossingRunwayClearForTakeoff(f)) return false;
         return WakeRemaining(f) <= 0;
     }
@@ -3543,11 +3585,12 @@ public sealed partial class TrafficWorld
     /// whichever is larger; more when departures are waiting to go between the arrivals.
     /// </summary>
     /// <summary>
-    /// The gap a departure needs between two arrivals on its runway: the first one off the runway (occupancy), then as
-    /// long as line-up is allowed to take before the next arrival (LineUpAllowed: line-up 25 s, roll 50 s, 12 s margin,
-    /// at least 8 s of wake) and a few seconds to spare — about 165 s, some 6 nm on final.
+    /// The gap a departure needs between two arrivals on its runway: the first one off the runway (occupancy) — the
+    /// departure lining up and waiting behind it as it rolls out, where the tower has runway safety logic and the
+    /// weather is fair (3-9-4), else lining up after it (about 25 s) — then the roll until it's airborne and 6,000 ft
+    /// down the runway (about 40 s for a jet, 3-10-3), and 10 s to spare: about 105 s (4 nm at 140 kt), or 130 s.
     /// </summary>
-    private static double DepartureGap(double occupancy) => occupancy + 8 + 25 + 50 + 12 + 10;
+    private double DepartureGap(double occupancy) => occupancy + (SafetyLogic && !LowWeather ? 0 : 25) + 40 + 10;
 
     /// <summary>Departures for this runway still to go: taxiing, waiting at it, or due off the gate within 20 minutes.</summary>
     private int PendingDepartures(int runway) => Flights.Count(o => o.Kind == "departure" && !o.Done && o.OnGround && o.Rwy is not null && o.Rwy.Runway == runway
