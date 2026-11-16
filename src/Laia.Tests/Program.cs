@@ -1883,7 +1883,7 @@ Console.WriteLine("== LAIA Collector track store");
     Check(TrackStore.Facing(land, 280) == 1 && TrackStore.Facing(land, 90) == 0, "days are told apart by which way their landings faced");
 }
 
-Console.WriteLine("== STAR chart \"expect\" boxes (BITHO7, d-TPP 2611)");
+Console.WriteLine("== STAR chart \"expect\" restrictions (BITHO7, FQM3; d-TPP 2611)");
 {
     using var doc = UglyToad.PdfPig.PdfDocument.Open(Path.Combine(AppContext.BaseDirectory, "charts", "BITHO7.pdf"));
     var fixes = new HashSet<string> { "OMN", "LAMMA", "JESUP", "COZMO", "BITHO" };
@@ -1898,6 +1898,14 @@ Console.WriteLine("== STAR chart \"expect\" boxes (BITHO7, d-TPP 2611)");
     Console.WriteLine("  Melbourne Orlando Intl: " + Show(mlb));
     Check(mlb.Any(e => e.Fix == "LAMMA" && e.MinFt == 15000) && mlb.Any(e => e.Fix == "BITHO" && e.MinFt == 8000) && !mlb.Any(e => e.Fix == "COZMO") && !mlb.Any(e => e.MinFt == 12000),
         "Melbourne: LAMMA at 15,000 and BITHO at 8,000 only");
+    // Williamsport Three into Newark (user, 15 Nov): printed sideways; "Expect 13000" (underlined: at or above) under
+    // RACKI and "Expect 7000" under SWEET, and HAYED "Expect clearance to cross at lowest usable flight level."
+    using var fqm = UglyToad.PdfPig.PdfDocument.Open(Path.Combine(AppContext.BaseDirectory, "charts", "FQM3.pdf"));
+    var ewr = Laia.Server.StarCharts.ReadExpects(fqm, new HashSet<string> { "FQM", "SLT", "MEGSS", "HAYED", "RACKI", "PENNS", "SWEET" }, "NEWARK LIBERTY INTL");
+    Console.WriteLine("  Newark (FQM3): " + Show(ewr));
+    Check(ewr.Any(e => e.Fix == "RACKI" && e.MinFt == 13000 && e.MaxFt == 0), "sideways chart: RACKI at or above 13,000 (underlined)");
+    Check(ewr.Any(e => e.Fix == "SWEET" && e.MinFt == 7000 && e.MaxFt == 0), "sideways chart: SWEET at or above 7,000 (underlined)");
+    Check(ewr.Any(e => e.Fix == "HAYED" && e.MinFt == 18000), "HAYED at the lowest usable flight level (FL180)");
     Check(TrafficWorld.ExpectApplies("rwy:18", "18L", 175) && !TrafficWorld.ExpectApplies("rwy:18", "36R", 355) && !TrafficWorld.ExpectApplies("rwy:1", "18L", 175),
         "a runway expect applies to 18L/18R, not 36R");
     Check(TrafficWorld.ExpectApplies("dir:S", "17R", 172) && !TrafficWorld.ExpectApplies("dir:S", "35L", 352), "a landing-south expect applies to 17R, not 35L");

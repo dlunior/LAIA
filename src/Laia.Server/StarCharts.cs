@@ -20,15 +20,18 @@ public static class StarCharts
     private static readonly Regex KtTok = new(@"^(\d{3})(K|KT|KTS|KIAS)$");
 
     /// <summary>
-    /// The expects on one chart, for the airport aptName (its FAA name, e.g. "MELBOURNE ORLANDO INTL"), in three layouts:
+    /// The expects on one chart, for the airport aptName (its FAA name, e.g. "MELBOURNE ORLANDO INTL"), in these layouts:
     /// <list type="bullet">
     /// <item>the "TURBOJET VERTICAL NAVIGATION PLANNING INFORMATION" boxes under a fix (BITHO7, user, 15 Nov):
     /// "Expect clearance to cross at 15000' landing Patrick SFB, Melbourne Orlando Intl, and Merritt Island." — only
     /// for the airports listed; "… landing Orlando Intl Rwy 18." for that runway; "NOTE: Orlando Intl Landing South:
     /// Expect clearance to cross at 250K." for that flow;</item>
-    /// <item>the notes: "EXPECT TO CROSS BUGGZ AT 11000";</item>
-    /// <item>"Expect 11000 / 250K" printed beside a fix on the plan view.</item>
+    /// <item>the same sentence under a fix's name on the plan view: HAYED "Expect clearance to cross at lowest usable
+    /// flight level." (FQM3, user, 15 Nov);</item>
+    /// <item>"Expect 13000" under a fix's name (FQM3's RACKI) — underlined, "at or above"; overlined, "at or below";</item>
+    /// <item>the notes: "EXPECT TO CROSS BUGGZ AT 11000".</item>
     /// </list>
+    /// Charts printed sideways (FQM3) are read along their text, whichever way it runs.
     /// </summary>
     public static List<StarExpect> ReadExpects(PdfDocument doc, HashSet<string> fixes, string aptName)
     {
@@ -36,35 +39,14 @@ public static class StarCharts
         var text = new StringBuilder();
         foreach (var page in doc.GetPages())
         {
-            var words = page.GetWords().ToList();
-            text.AppendLine(string.Join(" ", words.Select(w => w.Text)));
-            var at = new List<(double x, double y)>();
-            res.AddRange(PlanningBoxes(page, fixes, aptName, at));
-            for (var i = 0; i < words.Count; i++)
+            List<(double ang, PdfPoint a, PdfPoint b)>? pageSegs = null;
+            foreach (var (ang, letters) in Frames(page))
             {
-                var w = words[i];
-                if (!w.Text.ToUpperInvariant().StartsWith("EXPECT")) continue;
-                if (at.Any(p => Math.Abs(p.x - w.BoundingBox.Left) < 4 && Math.Abs(p.y - (page.Height - w.BoundingBox.Bottom)) < 4)) continue;   // a planning box's, read above
-                var b = w.BoundingBox;
-                var h = Math.Max(4, b.Height);
-                // The words right after it: on its line to the right, or the line just below, starting near it.
-                var after = words.Where(o => o != w && (
-                        (Math.Abs(o.BoundingBox.Bottom - b.Bottom) < h * 0.6 && o.BoundingBox.Left >= b.Left && o.BoundingBox.Left - b.Right < 90)
-                        || (b.Bottom - o.BoundingBox.Top is >= -1 and < 1.8 * 14 && Math.Abs(o.BoundingBox.Left - b.Left) < 40)))
-                    .OrderBy(o => -o.BoundingBox.Bottom).ThenBy(o => o.BoundingBox.Left).Take(6).Select(o => o.Text.ToUpperInvariant().Trim(',', '.', '/')).ToList();
-                if (after.Count > 0 && (after[0] is "TO" or "CLEARANCE" or "RADAR" or "VECTORS" or "FILED" or "DEPARTURE")) continue;   // a note, read below
-                var alts = after.Select(t => AltTok.Match(t)).Where(m => m.Success).Select(m => double.Parse(m.Groups[2].Value) * (m.Groups[1].Success ? 100 : 1))
-                    .Where(a => a is >= 1000 and <= 45000).Take(2).ToList();
-                var kt = after.Select(t => KtTok.Match(t)).Where(m => m.Success).Select(m => double.Parse(m.Groups[1].Value)).FirstOrDefault();
-                if (alts.Count == 0 && kt == 0) continue;
-                var fix = words.Where(o => fixes.Contains(o.Text.ToUpperInvariant().Trim(',', '.')))
-                    .Select(o => (o, d: Math.Sqrt(Math.Pow(o.BoundingBox.Centroid.X - b.Centroid.X, 2) + Math.Pow(o.BoundingBox.Centroid.Y - b.Centroid.Y, 2))))
-                    .Where(x => x.d < 160).OrderBy(x => x.d).Select(x => x.o.Text.ToUpperInvariant().Trim(',', '.')).FirstOrDefault();
-                if (fix is null) continue;
-                double mn = 0, mx = 0;
-                if (alts.Count == 2) { mn = Math.Min(alts[0], alts[1]); mx = Math.Max(alts[0], alts[1]); }
-                else if (alts.Count == 1) mn = mx = alts[0];
-                res.Add(new StarExpect(fix, mn, mx, kt, "", "plan view"));
+                var words = Words(letters, ang);
+                text.AppendLine(string.Join(" ", words.OrderBy(w => w.Y).ThenBy(w => w.X0).Select(w => w.Text)));
+                pageSegs ??= Segments(page);
+                var segs = pageSegs.Select(sg => (a: Frame(sg.a, ang), b: Frame(sg.b, ang))).ToList();
+                res.AddRange(Read(words, segs, fixes, aptName));
             }
         }
         // The notes: "EXPECT TO CROSS BUGGZ AT 11000", "... AT OR ABOVE FL240", "... AT 250 KT".
@@ -85,44 +67,69 @@ public static class StarCharts
         return res.GroupBy(e => (e.Fix, e.When)).Select(g => g.Last()).ToList();
     }
 
-    /// <summary>A word built from the page's letters: text, left and right, baseline (down from the top of the page), size.</summary>
+    /// <summary>A word in its text's own frame: text, start and end along the line, baseline (increasing down the text), size.</summary>
     private sealed record Wd(string Text, double X0, double X1, double Y, double Size)
     {
         public string U => Text.ToUpperInvariant();
         public double Cx => (X0 + X1) / 2;
     }
 
+    /// <summary>A page point in the frame of text running at this angle (degrees from the page's x axis).</summary>
+    private static (double x, double y) Frame(PdfPoint p, double ang)
+    {
+        var r = ang * Math.PI / 180;
+        double ux = Math.Cos(r), uy = Math.Sin(r);
+        return (p.X * ux + p.Y * uy, -(p.X * -uy + p.Y * ux));
+    }
+
+    /// <summary>The page's letters by the way their text runs (0°, 90°, 180°, 270°), each group of 10 or more.</summary>
+    private static List<(double ang, List<Letter> letters)> Frames(Page page)
+    {
+        var groups = new Dictionary<int, List<Letter>>();
+        foreach (var l in page.Letters)
+        {
+            double dx = l.EndBaseLine.X - l.StartBaseLine.X, dy = l.EndBaseLine.Y - l.StartBaseLine.Y;
+            if (Math.Abs(dx) + Math.Abs(dy) < 0.01) continue;
+            var k = ((int)Math.Round(Math.Atan2(dy, dx) * 180 / Math.PI / 90) % 4 + 4) % 4 * 90;
+            (groups.TryGetValue(k, out var g) ? g : groups[k] = new()).Add(l);
+        }
+        return groups.Where(g => g.Value.Count >= 10).Select(g => ((double)g.Key, g.Value)).ToList();
+    }
+
     /// <summary>
-    /// The page's words, put together from its letters: letters on one baseline, split at spaces and gaps. Built here
-    /// rather than taken from the PDF reader's own word list because the chart boxes' letters are stretched sideways and
+    /// Words put together from letters running one way: letters on one baseline, split at spaces and gaps. Built here
+    /// rather than taken from the PDF reader's own word list because chart boxes' letters are stretched sideways and
     /// drawn out of order (BITHO7's COZMO box came out one letter per word).
     /// </summary>
-    private static List<Wd> Words(Page page)
+    private static List<Wd> Words(List<Letter> letters, double ang)
     {
-        var rows = new List<(double y, List<Letter> ls)>();
-        foreach (var l in page.Letters.Where(l => Math.Abs(l.EndBaseLine.Y - l.StartBaseLine.Y) < 0.5 && l.EndBaseLine.X >= l.StartBaseLine.X).OrderBy(l => page.Height - l.StartBaseLine.Y))
+        var ls = letters.Select(l =>
         {
-            var y = page.Height - l.StartBaseLine.Y;
-            if (rows.Count > 0 && y - rows[^1].y < 1.0) rows[^1].ls.Add(l);
-            else rows.Add((y, new List<Letter> { l }));
+            var a = Frame(l.StartBaseLine, ang); var b = Frame(l.EndBaseLine, ang);
+            var size = l.PointSize > 0 ? l.PointSize : Math.Max(3, Math.Min(l.GlyphRectangle.Height, l.GlyphRectangle.Width));
+            return (v: l.Value, s: Math.Min(a.x, b.x), e: Math.Max(a.x, b.x), y: a.y, size);
+        }).OrderBy(l => l.y).ToList();
+        var rows = new List<(double y, List<(string v, double s, double e, double y, double size)> ls)>();
+        foreach (var l in ls)
+        {
+            if (rows.Count > 0 && l.y - rows[^1].y < 1.0) rows[^1].ls.Add(l);
+            else rows.Add((l.y, new() { l }));
         }
         var res = new List<Wd>();
-        foreach (var (y, ls) in rows)
+        foreach (var (y, row) in rows)
         {
-            ls.Sort((a, b) => a.StartBaseLine.X.CompareTo(b.StartBaseLine.X));
-            var cur = new List<Letter>();
+            row.Sort((a, b) => a.s.CompareTo(b.s));
+            var cur = new List<(string v, double s, double e, double y, double size)>();
             void Flush()
             {
                 if (cur.Count == 0) return;
-                var size = cur.Max(c => c.PointSize > 0 ? c.PointSize : Math.Max(3, c.GlyphRectangle.Height));
-                res.Add(new Wd(string.Concat(cur.Select(c => c.Value)), cur[0].StartBaseLine.X, cur.Max(c => Math.Max(c.EndBaseLine.X, c.GlyphRectangle.Right)), y, size));
+                res.Add(new Wd(string.Concat(cur.Select(c => c.v)), cur[0].s, cur.Max(c => c.e), y, cur.Max(c => c.size)));
                 cur.Clear();
             }
-            foreach (var l in ls)
+            foreach (var l in row)
             {
-                if (string.IsNullOrWhiteSpace(l.Value)) { Flush(); continue; }
-                var size = l.PointSize > 0 ? l.PointSize : Math.Max(3, l.GlyphRectangle.Height);
-                if (cur.Count > 0 && l.StartBaseLine.X - Math.Max(cur[^1].EndBaseLine.X, cur[^1].GlyphRectangle.Right) > 0.25 * size) Flush();
+                if (string.IsNullOrWhiteSpace(l.v)) { Flush(); continue; }
+                if (cur.Count > 0 && l.s - cur.Max(c => c.e) > 0.25 * l.size) Flush();
                 cur.Add(l);
             }
             Flush();
@@ -130,19 +137,47 @@ public static class StarCharts
         return res;
     }
 
-    /// <summary>
-    /// The planning boxes: a fix name with "TURBOJET VERTICAL NAVIGATION PLANNING INFORMATION" under it, then one or more
-    /// "Expect clearance to cross at …" sentences, each read across its lines up to the full stop. at: where each
-    /// "Expect" read here is (x, baseline from the top), so the other layouts don't read it again.
-    /// </summary>
-    private static List<StarExpect> PlanningBoxes(Page page, HashSet<string> fixes, string aptName, List<(double x, double y)> at)
+    /// <summary>The page's straight lines (and the edges of its boxes), for the lines over and under altitudes.</summary>
+    private static List<(double ang, PdfPoint a, PdfPoint b)> Segments(Page page)
+    {
+        var res = new List<(double, PdfPoint, PdfPoint)>();
+        try
+        {
+            foreach (var path in page.ExperimentalAccess.Paths)
+                foreach (var sub in path)
+                    foreach (var c in sub.Commands)
+                        if (c is PdfSubpath.Line ln) res.Add((0, ln.From, ln.To));
+        }
+        catch { }
+        return res;
+    }
+
+    /// <summary>Whether a word has a line under it and/or over it (a chart's "at or above" / "at or below").</summary>
+    private static (bool under, bool over) Marks(Wd w, List<((double x, double y) a, (double x, double y) b)> segs)
+    {
+        bool under = false, over = false;
+        var len = w.X1 - w.X0;
+        foreach (var (a, b) in segs)
+        {
+            if (Math.Abs(a.y - b.y) > 0.6) continue;
+            double lo = Math.Min(a.x, b.x), hi = Math.Max(a.x, b.x);
+            var cover = Math.Max(0, Math.Min(hi, w.X1) - Math.Max(lo, w.X0));
+            if (cover < 0.7 * len || hi - lo > 3 * len + 4) continue;
+            var dy = a.y - w.Y;
+            if (dy > 0 && dy < 0.7 * w.Size) under = true;
+            if (dy < -0.7 * w.Size && dy > -1.6 * w.Size) over = true;
+        }
+        return (under, over);
+    }
+
+    /// <summary>The expects among one frame's words: sentences ("Expect clearance to cross at …") and plan view labels ("Expect 13000").</summary>
+    private static List<StarExpect> Read(List<Wd> words, List<((double x, double y) a, (double x, double y) b)> segs, HashSet<string> fixes, string aptName)
     {
         var res = new List<StarExpect>();
-        var words = Words(page);
+        string Fx(Wd w) => w.U.Trim(',', '.', ':');
+        var fixWords = words.Where(w => fixes.Contains(Fx(w))).ToList();
         var turbojet = words.Where(w => w.U == "TURBOJET").ToList();
-        var headers = words.Where(w => fixes.Contains(w.U.Trim(',', '.', ':'))
-                && turbojet.Any(tj => tj.Y - w.Y is > 0 and < 22 && Math.Abs(tj.Cx - w.Cx) < 90)).ToList();
-        if (headers.Count == 0) return res;
+        var headers = fixWords.Where(w => turbojet.Any(tj => tj.Y - w.Y is > 0 and < 22 && Math.Abs(tj.Cx - w.Cx) < 90)).ToList();
         // The lines of text, top to bottom, each left to right.
         var lines = new List<(double y, List<Wd> words)>();
         foreach (var w in words.OrderBy(w => w.Y))
@@ -173,7 +208,7 @@ public static class StarCharts
             var sentence = first.GetRange(idx, first.Count - idx).ToList();
             var left = first[0].X0;
             var lastY = lines[li].y;
-            for (var lj = li + 1; lj < lines.Count && !sentence[^1].Text.EndsWith('.'); lj++)
+            for (var lj = li + 1; lj < lines.Count && !sentence[^1].Text.EndsWith('.') && sentence.Count < 40; lj++)
             {
                 if (lines[lj].y - lastY > e.Size * 2.2) break;
                 var startW = lines[lj].words.FirstOrDefault(w => Math.Abs(w.X0 - left) < 6);
@@ -182,42 +217,77 @@ public static class StarCharts
                 lastY = lines[lj].y;
             }
             var s = Regex.Replace(string.Join(" ", sentence.Select(w => w.U)), @"\s+", " ");
-            var m = Regex.Match(s, @"^EXPECT (?:CLEARANCE )?TO CROSS AT (OR ABOVE |OR BELOW )?(?:FL(\d{3})|(\d{4,5})(?:['’]|FT)?|(\d{3}) ?(?:K|KT|KTS)\b)(?:,? (?:AND|AT) (\d{3}) ?(?:K|KT|KTS)\b)?(?<rest>.*)$");
-            if (!m.Success) continue;
-            // The fix: the nearest planning box header above this sentence, over the same column.
-            var hdr = headers.Where(h => h.Y < e.Y && e.Y - h.Y < 170 && Math.Abs(h.Cx - (left + 75)) < 110)
-                .OrderBy(h => e.Y - h.Y).FirstOrDefault();
-            if (hdr is null) continue;
-            at.Add((e.X0, e.Y));
-            var fix = hdr.U.Trim(',', '.', ':');
-            double mn = 0, mx = 0, kt = 0;
-            var how = m.Groups[1].Value.Trim();
-            double alt = m.Groups[2].Success ? double.Parse(m.Groups[2].Value) * 100 : m.Groups[3].Success ? double.Parse(m.Groups[3].Value) : 0;
-            if (alt is > 0 and (< 1000 or > 45000)) continue;
-            if (alt > 0) { mn = how == "OR BELOW" ? 0 : alt; mx = how == "OR ABOVE" ? 0 : alt; }
-            if (m.Groups[4].Success) kt = double.Parse(m.Groups[4].Value);
-            if (m.Groups[5].Success) kt = double.Parse(m.Groups[5].Value);
-            if (alt == 0 && kt == 0) continue;
-            var when = "";
-            // "… landing Patrick SFB, Melbourne Orlando Intl, and Merritt Island." — for these airports only.
-            var rest = m.Groups["rest"].Value.Trim().TrimEnd('.');
-            var lm = Regex.Match(rest, @"^LANDING (.+)$");
-            if (lm.Success)
+            var m = Regex.Match(s, @"^EXPECT (?:CLEARANCE )?TO CROSS AT (OR ABOVE |OR BELOW )?(?:FL(\d{3})|(\d{4,5})(?:['’]|FT)?|(\d{3}) ?(?:K|KT|KTS)\b|(LOWEST USABLE FLIGHT LEVEL))(?:,? (?:AND|AT) (\d{3}) ?(?:K|KT|KTS)\b)?(?<rest>.*)$");
+            if (m.Success)
             {
-                var list = lm.Groups[1].Value;
-                var rw = Regex.Match(list, @"\s+(?:RWYS?|RUNWAYS?) (\d{1,2}[LCR]?)$");
-                if (rw.Success) { when = "rwy:" + rw.Groups[1].Value; list = list[..rw.Index]; }
-                if (!ListHas(list, aptName)) continue;
+                // The fix: the planning box header above this sentence, over the same column; else a fix's name just
+                // above it (a label on the plan view).
+                var hdr = headers.Where(h => h.Y < e.Y && e.Y - h.Y < 170 && Math.Abs(h.Cx - (left + 75)) < 110).OrderBy(h => e.Y - h.Y).FirstOrDefault()
+                    ?? fixWords.Where(h => e.Y - h.Y > 0 && e.Y - h.Y < e.Size * 3.5 && h.Cx > left - 30 && h.Cx < left + 150).OrderBy(h => e.Y - h.Y).FirstOrDefault();
+                if (hdr is null) continue;
+                double mn = 0, mx = 0, kt = 0;
+                var how = m.Groups[1].Value.Trim();
+                // The lowest usable flight level: FL180 (higher only when the altimeter is low).
+                double alt = m.Groups[2].Success ? double.Parse(m.Groups[2].Value) * 100 : m.Groups[3].Success ? double.Parse(m.Groups[3].Value) : m.Groups[5].Success ? 18000 : 0;
+                if (alt is > 0 and (< 1000 or > 45000)) continue;
+                if (alt > 0) { mn = how == "OR BELOW" ? 0 : alt; mx = how == "OR ABOVE" ? 0 : alt; }
+                if (m.Groups[4].Success) kt = double.Parse(m.Groups[4].Value);
+                if (m.Groups[6].Success) kt = double.Parse(m.Groups[6].Value);
+                if (alt == 0 && kt == 0) continue;
+                var when = "";
+                // "… landing Patrick SFB, Melbourne Orlando Intl, and Merritt Island." — for these airports only.
+                var rest = m.Groups["rest"].Value.Trim().TrimEnd('.');
+                var lm = Regex.Match(rest, @"^LANDING (.+)$");
+                if (lm.Success)
+                {
+                    var list = lm.Groups[1].Value;
+                    var rw = Regex.Match(list, @"\s+(?:RWYS?|RUNWAYS?) (\d{1,2}[LCR]?)$");
+                    if (rw.Success) { when = "rwy:" + rw.Groups[1].Value; list = list[..rw.Index]; }
+                    if (!ListHas(list, aptName)) continue;
+                }
+                // "NOTE: Orlando Intl Landing South: Expect …" — for that airport, in that flow.
+                var pre = string.Join(" ", prefix).Replace("NOTE:", "").Trim().TrimEnd(':');
+                var pm = Regex.Match(pre, @"^(.*?)\s*LANDING (NORTH|SOUTH|EAST|WEST)$");
+                if (pm.Success)
+                {
+                    if (pm.Groups[1].Value.Length > 0 && !ListHas(pm.Groups[1].Value, aptName)) continue;
+                    when = "dir:" + pm.Groups[2].Value[0];
+                }
+                res.Add(new StarExpect(Fx(hdr), mn, mx, kt, when, headers.Contains(hdr) ? "planning box" : "plan view"));
+                continue;
             }
-            // "NOTE: Orlando Intl Landing South: Expect …" — for that airport, in that flow.
-            var pre = string.Join(" ", prefix).Replace("NOTE:", "").Trim().TrimEnd(':');
-            var pm = Regex.Match(pre, @"^(.*?)\s*LANDING (NORTH|SOUTH|EAST|WEST)$");
-            if (pm.Success)
+            // "Expect 13000", "Expect FL240", "Expect 11000 / 250K" beside a fix: the words right after it on its line
+            // (or, if none, starting the line below), the altitude's line under it meaning "or above", over it "or below".
+            var after = lines[li].words.Where(w => w.X0 >= e.X1 - 1 && w.X0 - e.X1 < 20).Take(4).ToList();
+            if (after.Count == 0 && li + 1 < lines.Count && lines[li + 1].y - lines[li].y < e.Size * 2.2)
+                after = lines[li + 1].words.Where(w => Math.Abs(w.X0 - e.X0) < 20).Take(4).ToList();
+            double? altFt = null; Wd? altW = null; double ktV = 0;
+            foreach (var w in after)
             {
-                if (pm.Groups[1].Value.Length > 0 && !ListHas(pm.Groups[1].Value, aptName)) continue;
-                when = "dir:" + pm.Groups[2].Value[0];
+                foreach (var part in w.U.Split('/', StringSplitOptions.RemoveEmptyEntries))
+                {
+                    var tok = part.Trim(',', '.');
+                    if (altFt is null && AltTok.Match(tok) is { Success: true } am)
+                    {
+                        var v = double.Parse(am.Groups[2].Value) * (am.Groups[1].Success ? 100 : 1);
+                        if (v is >= 1000 and <= 45000) { altFt = v; altW = w; }
+                    }
+                    else if (KtTok.Match(tok) is { Success: true } km) ktV = double.Parse(km.Groups[1].Value);
+                }
+                if (altFt is null && ktV == 0) break;   // "Expect vectors …": not a restriction
             }
-            res.Add(new StarExpect(fix, mn, mx, kt, when, "planning box"));
+            if (altFt is null && ktV == 0) continue;
+            var fix = fixWords.Select(o => (o, d: Math.Sqrt(Math.Pow(o.Cx - e.Cx, 2) + Math.Pow(o.Y - e.Y, 2))))
+                .Where(x => x.d < 160).OrderBy(x => x.d).Select(x => Fx(x.o)).FirstOrDefault();
+            if (fix is null) continue;
+            double mn2 = 0, mx2 = 0;
+            if (altFt is { } av)
+            {
+                var (under, over) = altW is null ? (false, false) : Marks(altW, segs);
+                mn2 = over && !under ? 0 : av;
+                mx2 = under && !over ? 0 : av;
+            }
+            res.Add(new StarExpect(fix, mn2, mx2, ktV, "", "plan view"));
         }
         return res;
     }
