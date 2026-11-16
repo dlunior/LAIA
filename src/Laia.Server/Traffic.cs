@@ -627,7 +627,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
             var res = new List<Laia.Common.SimConnect.NoticeDto>();
             foreach (var w in Worlds())
                 foreach (var n in w.Notices)
-                    res.Add(new() { Id = w.Apt.Icao + ":" + n.Id, Text = n.Text, Warning = n.Warning });
+                    res.Add(new() { Id = w.Apt.Icao + ":" + n.Id, Text = n.Text, Warning = n.Warning, Clear = n.Clear });
             return res.Take(5).ToList();
         }
     }

@@ -53,4 +53,6 @@ public sealed class NoticeDto
     public string Id { get; set; } = "";
     public string Text { get; set; } = "";
     public bool Warning { get; set; }
+    /// <summary>An all-clear (green): "Clear — continue taxi", "Runway 27C clear — safe to take off".</summary>
+    public bool Clear { get; set; }
 }

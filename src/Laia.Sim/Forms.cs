@@ -121,7 +121,7 @@ internal sealed class RadioLogForm : Form
 /// <summary>
 /// Smart traffic notices (M8): a small always-on-top window that shows only what matters now — traffic on final or on
 /// the runway, traffic crossing downfield, a runway or taxiway about to be busy, traffic waiting for you, and your place
-/// in the arrival sequence. Never instructions. Warnings in amber, the rest in blue; empty when there's nothing.
+/// in the arrival sequence. Never instructions. Warnings in amber, all-clears in green, the rest in blue; empty when there's nothing.
 /// </summary>
 internal sealed class NoticesForm : Form
 {
@@ -170,7 +170,7 @@ internal sealed class NoticesForm : Form
             _list.Controls.Add(new Label
             {
                 Text = n.Text, AutoSize = true, MaximumSize = new Size(Math.Max(200, _list.ClientSize.Width - 24), 0),
-                ForeColor = n.Warning ? Color.FromArgb(245, 165, 36) : Color.FromArgb(76, 195, 255),
+                ForeColor = n.Clear ? Color.FromArgb(52, 211, 120) : n.Warning ? Color.FromArgb(245, 165, 36) : Color.FromArgb(76, 195, 255),
                 Font = new Font("Segoe UI", 11.5f, FontStyle.Bold), Margin = new Padding(4, 4, 4, 6),
             });
         _list.ResumeLayout();

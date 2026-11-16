@@ -1,7 +1,7 @@
 namespace Laia.Server.TrafficCore;
 
 /// <summary>A notice for the user in Smart traffic mode: never an instruction, only something that matters now.</summary>
-public sealed record Notice(string Id, string Text, bool Warning);
+public sealed record Notice(string Id, string Text, bool Warning, bool Clear = false);
 
 /// <summary>The user's place in the arrival sequence as the traffic manager plans it.</summary>
 public sealed record UserSequence(string Runway, int Number, string? AheadCallsign, string? AheadType, string? AheadWhere,
@@ -258,7 +258,8 @@ public sealed partial class TrafficWorld
         // Traffic waiting for the user.
         foreach (var o in Flights.Where(o => !o.Done && o.OnGround && o.BlockedByUser && o.BlockedFor > 5))
             list.Add(new Notice("wait-" + o.Id, $"{o.Callsign} ({o.Type}) is {(o.Phase == "boarding" || o.Phase == "pushback" ? "waiting to push back" : "holding")} for you", false));
-        Notices = list.GroupBy(n => n.Id).Select(g => g.First()).Take(4).ToList();
+        AllClear(u, list);
+        Notices = list.GroupBy(n => n.Id).Select(g => g.First()).OrderBy(n => n.Clear).Take(4).ToList();
     }
 
     /// <summary>
@@ -309,6 +310,53 @@ public sealed partial class TrafficWorld
                 list.Add(new Notice("gw-" + o.Id, $"{o.Callsign} ({o.Type}) from the {side} gives way to you ({sU:0} m ahead)", false));
         }
     }
+
+    /// <summary>
+    /// The all-clear, in green (user, 16 Nov: "when the user is given a notice for traffic, a continue taxi or safe to
+    /// take off in green"). On the ground, once the taxiway traffic the user was told about has gone (give way, hold
+    /// short for a taxiing aircraft, traffic coming the other way, a pushback): "Clear — continue taxi (DAL123 has
+    /// passed)" for 12 s. Lined up on a runway, or stopped holding short near its end: when nothing is on it, nothing
+    /// within 6 nm on final and nothing crossing it — "Runway 27C clear — safe to take off" / "— safe to line up".
+    /// Advice from what LAIA's traffic is doing, not a clearance.
+    /// </summary>
+    private void AllClear(V2 u, List<Notice> list)
+    {
+        static bool Taxiway(Notice n) => n.Id.StartsWith("gw-") || n.Id.StartsWith("headon-") || n.Id.StartsWith("tw-") || n.Id.StartsWith("push-") || n.Id.StartsWith("hs-");
+        var warns = list.Where(n => n.Warning && Taxiway(n)).ToList();
+        if (warns.Count > 0) { _clearUntil = 0; _lastWarn = warns.Select(n => n.Text.Split(' ').FirstOrDefault(w => w.Length > 3 && w.Any(char.IsDigit) && w.All(char.IsLetterOrDigit)) ?? "").Where(c => c.Length > 0).Distinct().ToList(); }
+        else if (_lastWarn is not null)
+        {
+            _clearUntil = Time + 12;
+            _clearText = "Clear — continue taxi" + (_lastWarn.Count == 1 ? $" ({_lastWarn[0]} has passed)" : "");
+            _lastWarn = null;
+        }
+        if (Time < _clearUntil && warns.Count == 0) list.Add(new Notice("clear-taxi", _clearText, false, true));
+        // The runway: lined up on it, or stopped holding short near its end.
+        if (UserGs > 5) return;
+        var nm = Geo2.MPerNm;
+        foreach (var r in Apt.Ends)
+        {
+            var along = r.Along(u); var off = Math.Abs(r.Offset(u));
+            var lined = off < 30 && along > -60 && along < r.LengthM / 2 && Math.Abs(Geo2.Diff(UserTrack, r.Heading)) < 30;
+            var holding = !lined && off >= 30 && off < 110 && along > -150 && along < r.LengthM / 3;
+            if (!lined && !holding) continue;
+            if (list.Any(n => n.Warning && (n.Id.StartsWith("final-") || n.Id.StartsWith("rwy-") || n.Id.StartsWith("cross-") || n.Id == "hs-" + r.Runway))) return;
+            var busy = Flights.Any(o => !o.Done && o.Rwy?.Runway == r.Runway && (
+                (o.Kind == "arrival" && !o.OnGround && o.Phase is "final" or "approach" or "flare" && (o.ThrS - o.S) / nm < 6)
+                || (o.OnGround && o.Phase is "landing roll" or "takeoff roll" or "lined up" or "lining up")))
+                || Flights.Any(o => !o.Done && o.OnGround && o != null && Math.Abs(r.Offset(o.Pos)) < 35 && r.Along(o.Pos) > -60 && r.Along(o.Pos) < r.LengthM + 60 && o.Phase is not ("landing roll" or "takeoff roll"));
+            if (busy) return;
+            // Facing this end's direction when lined up; holding short, the end nearer to the user.
+            if (holding && Apt.Ends.Any(e => e.Runway == r.Runway && e != r && e.Along(u) > -150 && e.Along(u) < along)) continue;
+            list.Add(new Notice("clear-rwy-" + r.Runway, lined
+                ? $"Runway {r.Ident} clear — nothing on final within 6 nm, safe to take off"
+                : $"Runway {r.Ident}{RunwayPair(r)} clear — nothing on final within 6 nm, safe to line up", false, true));
+            return;
+        }
+    }
+    private double _clearUntil;
+    private string _clearText = "";
+    private List<string>? _lastWarn;
 
     /// <summary>Stopped on the ground: an aircraft pushing back within 80 m of the user (behind or beside them).</summary>
     private void PushNearby(V2 u, List<Notice> list)
