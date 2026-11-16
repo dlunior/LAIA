@@ -378,7 +378,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     private int _aroundUser;
     private HashSet<string> _thinned = new();
 
-    private static string LevelName(TrafficLevel l) => l switch { TrafficLevel.RealWorld => "Real world", _ => l.ToString() };
+    private static string LevelTitle(TrafficLevel l) => l switch { TrafficLevel.RealWorld => "Real world", _ => l.ToString() };
 
     /// <summary>Why a whole-sky flight isn't drawn in the sim (for the map's details), or null when it is.</summary>
     private string? WhyNotDrawn(Laia.Server.TrafficCore.NetLeg l, double lat, double lon, double altFt)
@@ -394,7 +394,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         if (altFt < 8000) return "below 8,000 ft, near an airport whose traffic isn't run here";
         var dz = altFt - UserLevelFt(sim);
         if (Math.Abs(dz) > DrawBandFt) return $"{Math.Abs(dz):N0} ft {(dz > 0 ? "above" : "below")} you (drawn within {DrawBandFt:N0} ft)";
-        if (_thinned.Contains(l.Id)) return $"thinned out by the {LevelName(Level)} level ({_aroundUser} aircraft around you; all are drawn below {QuietSky})";
+        if (_thinned.Contains(l.Id)) return $"thinned out by the {LevelTitle(Level)} level ({_aroundUser} aircraft around you; all are drawn below {QuietSky})";
         return $"not among the nearest {MaxDrawn}, or joining shortly (one a second)";
     }
 
