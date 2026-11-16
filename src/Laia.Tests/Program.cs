@@ -1857,6 +1857,32 @@ Console.WriteLine("== The whole sky: scheduled flights fly logically between the
         $"the schedule file reads back the same ({back.Count} flights)");
 }
 
+Console.WriteLine("== LAIA Collector track store");
+{
+    const double aLat = 33.64, aLon = -84.43, elev = 1000;
+    var lonNm = 1 / (60 * Math.Cos(aLat * Math.PI / 180));
+    // An arrival from the east on a 270° final: 12 nm out at 4,000 ft above the field down to the threshold.
+    var arr = new List<TrackPoint>();
+    for (var i = 0; i <= 60; i++) { var d = 12 - i * 0.2; arr.Add(new TrackPoint(1000 + i * 6, aLat, aLon + d * lonNm, elev + Math.Max(0, d * 320), 270)); }
+    // A departure the other way: from the field climbing out west.
+    var dep = new List<TrackPoint>();
+    for (var i = 0; i <= 60; i++) { var d = i * 0.2; dep.Add(new TrackPoint(5000 + i * 6, aLat, aLon - d * lonNm, elev + d * 400, 270)); }
+    var far = new List<TrackPoint>();
+    for (var i = 0; i < 10; i++) far.Add(new TrackPoint(i, aLat + 2, aLon, 3000, 0));
+    Check(TrackStore.Near(arr, aLat, aLon, elev) is { Count: > 50 }, "an arrival near the field is kept");
+    Check(TrackStore.Near(far, aLat, aLon, elev) is null, "a track 120 nm away is not");
+    using var ms = new MemoryStream();
+    using (var w = new System.Text.Json.Utf8JsonWriter(ms)) { w.WriteStartArray(); TrackStore.Write(w, arr); TrackStore.Write(w, dep); w.WriteEndArray(); }
+    var back = TrackStore.Read(ms.ToArray());
+    Check(back.Count == 2 && back[0].Count == arr.Count && Math.Abs(back[0][10].Lon - arr[10].Lon) < 1e-4 && Math.Abs((back[1][5].AltFt ?? 0) - (dep[5].AltFt ?? 0)) < 1,
+        $"tracks are stored and read back the same ({back.Count} tracks)");
+    var land = new Dictionary<int, int>();
+    TrackStore.CountLandings(arr, aLat, aLon, elev, land);
+    TrackStore.CountLandings(dep, aLat, aLon, elev, land);
+    Check(land.Count == 1 && land.GetValueOrDefault(270) == 1, $"the arrival counts as one landing facing 270, the departure doesn't ({string.Join(", ", land.Select(kv => kv.Key + ": " + kv.Value))})");
+    Check(TrackStore.Facing(land, 280) == 1 && TrackStore.Facing(land, 90) == 0, "days are told apart by which way their landings faced");
+}
+
 Console.WriteLine(failures.Count == 0 ? "TRAFFIC CHECKS PASSED" : $"TRAFFIC CHECKS FAILED: {failures.Count}");
 return failures.Count == 0 ? 0 : 1;
 

@@ -14,7 +14,7 @@ public sealed class SettingsStore
 {
     private static readonly byte[] Entropy = Encoding.UTF8.GetBytes("LAIA settings v1");
     private static readonly string[] Secrets = { "airlabs_key", "aeroapi_key" };
-    private static readonly string[] Plain = { "simbrief_user", "schedule_source", "traffic_level" };
+    private static readonly string[] Plain = { "simbrief_user", "schedule_source", "traffic_level", "track_source" };
     private readonly object _gate = new();
     private readonly string _path = Path.Combine(Paths.DataDir, "settings.json");
     private JsonObject _data;

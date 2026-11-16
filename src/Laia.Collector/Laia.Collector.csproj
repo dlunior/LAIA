@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>Laia.Collector</RootNamespace>
+    <AssemblyName>Laia.Collector</AssemblyName>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\Laia.Server\TrafficCore\*.cs" Link="TrafficCore\%(Filename)%(Extension)" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.10" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Laia.Common\Laia.Common.csproj" />
+  </ItemGroup>
+</Project>

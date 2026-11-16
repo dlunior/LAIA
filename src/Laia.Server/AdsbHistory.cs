@@ -12,8 +12,12 @@ namespace Laia.Server;
 /// track passing within 45 nm of the airports wanted, low enough to be arriving or departing, kept and learned from
 /// (<see cref="TrackLearner"/>). Each airport is learned once, then refreshed after 60 days; saved in data/learned.
 /// Only airline passenger jets are kept (user, 13 Nov), and only airports with airline passenger service are learned.
+/// The LAIA Collector (15 Nov) is asked first: a container on the user's NAS that collects every new adsb.lol day for
+/// all US and Canadian airline airports and keeps 90 days, reached through the Cloudflare tunnel at
+/// laia-data.sageks.dev (or the address in the "track_source" setting). From it an airport is learned in seconds,
+/// with the days that show both flows; the download here is only for when it can't be reached or hasn't the airport.
 /// </summary>
-public sealed class AdsbHistory(ILogger<AdsbHistory> log)
+public sealed class AdsbHistory(ILogger<AdsbHistory> log, SettingsStore settings)
 {
     public static JsonSerializerOptions Json => AdsbTrace.Json;
     private readonly Dictionary<string, AirportProfile> _profiles = new(StringComparer.OrdinalIgnoreCase);
@@ -42,7 +46,11 @@ public sealed class AdsbHistory(ILogger<AdsbHistory> log)
         {
             if (_running is { IsCompleted: false }) return;
             var need = airports.Where(a => Profile(a.Icao) is not { } p || p.Version < AirportProfile.CurrentVersion || DateTime.UtcNow - p.LearnedUtc > TimeSpan.FromDays(60)).ToList();
-            if (need.Count == 0) return;
+            // A week old: refreshed from the collector's newer days (only from it — never a download for this).
+            var refresh = airports.Where(a => !need.Contains(a) && Profile(a.Icao) is { } p && DateTime.UtcNow - p.LearnedUtc > TimeSpan.FromDays(7)).ToList();
+            if (need.Count == 0 && refresh.Count == 0) return;
+            var refreshOnly = refresh.Select(a => a.Icao).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            need.AddRange(refresh);
             // Not tried again within 6 hours — with the same rules: after an update that changes how airports are learned,
             // the airport and its neighbours are learned again together, at once (KMCI, 15 Nov: the pair had been tried
             // an hour before under the old rules, so they were learned one at a time, the main airport second, and its
@@ -51,7 +59,7 @@ public sealed class AdsbHistory(ILogger<AdsbHistory> log)
             if (_lastTry.TryGetValue(key, out var at) && DateTime.UtcNow - at < TimeSpan.FromHours(6)) return;
             _lastTry[key] = DateTime.UtcNow;
             _learning = need.Select(a => a.Icao).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            _running = Task.Run(() => LearnAsync(need, CancellationToken.None));
+            _running = Task.Run(() => LearnAsync(need, refreshOnly, CancellationToken.None));
         }
     }
     private readonly Dictionary<string, DateTime> _lastTry = new();
@@ -66,8 +74,10 @@ public sealed class AdsbHistory(ILogger<AdsbHistory> log)
     /// <summary>The last attempt to learn this airport ended without a profile (no history day found, or it failed).</summary>
     public bool Gave(string icao) { lock (_gate) return _running is not { IsCompleted: false } && _lastTry.Keys.Any(k => k.Split('|')[0].Split(',').Contains(icao, StringComparer.OrdinalIgnoreCase)) && !Current(icao); }
 
-    private async Task LearnAsync(List<AirportModel> apts, CancellationToken ct)
+    private async Task LearnAsync(List<AirportModel> all, HashSet<string> refreshOnly, CancellationToken ct)
     {
+        var apts = (await FromCollector(all, ct)).Where(a => !refreshOnly.Contains(a.Icao)).ToList();
+        if (apts.Count == 0) return;
         var names = string.Join(", ", apts.Select(a => a.Icao));
         try
         {
@@ -159,7 +169,7 @@ public sealed class AdsbHistory(ILogger<AdsbHistory> log)
                     // arrivals at all — no tracks on the map, no real vectors): more days, up to seven, until it is.
                     if (MissingFlow(prof, t.a.Ends) is { } miss && di + 1 < rels.Count)
                     {
-                        log.LogInformation("{icao}: {miss}; learning another day for it", t.a.Icao, miss);
+                        log.LogInformation("{icao}: {miss}; learning another day for it", t.a.Icao, miss.text);
                         stillShort.Add(t);
                     }
                 }
@@ -174,11 +184,91 @@ public sealed class AdsbHistory(ILogger<AdsbHistory> log)
         }
     }
 
+    public const string DefaultSource = "https://laia-data.sageks.dev";
+    private sealed record CollectorDay(
+        [property: JsonPropertyName("day")] string Day,
+        [property: JsonPropertyName("tracks")] int Tracks,
+        [property: JsonPropertyName("landings")] Dictionary<int, int>? Landings);
+
+    /// <summary>
+    /// Learns what it can from the LAIA Collector: each airport from its three newest days, plus — when one flow is
+    /// hardly seen in them — up to four more days whose landings faced that way (picked from all 90, so no guessing
+    /// which days to fetch). Returns the airports it couldn't learn (collector not reachable, or it hasn't them yet).
+    /// </summary>
+    private async Task<List<AirportModel>> FromCollector(List<AirportModel> apts, CancellationToken ct)
+    {
+        var src = (settings.Get("track_source") ?? "").Trim();
+        if (src.Length == 0) src = DefaultSource;
+        if (src.Equals("off", StringComparison.OrdinalIgnoreCase)) return apts;
+        src = src.TrimEnd('/');
+        var left = new List<AirportModel>();
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(90) };
+        http.DefaultRequestHeaders.UserAgent.ParseAdd("LAIA-Server");
+        var reachable = true;
+        foreach (var a in apts)
+        {
+            if (!reachable) { left.Add(a); continue; }
+            try
+            {
+                Status = $"learning {a.Icao} from the LAIA Collector";
+                var days = JsonSerializer.Deserialize<List<CollectorDay>>(await http.GetStringAsync($"{src}/api/days/{a.Icao}", ct)) ?? new();
+                days = days.Where(d => d.Tracks > 0).OrderByDescending(d => d.Day, StringComparer.Ordinal).ToList();
+                if (days.Count == 0) { log.LogInformation("LAIA Collector has no days for {icao} yet", a.Icao); left.Add(a); continue; }
+                var used = new List<CollectorDay>();
+                var tracks = new List<IReadOnlyList<TrackPoint>>();
+                async Task Add(CollectorDay d)
+                {
+                    var bytes = await http.GetByteArrayAsync($"{src}/api/tracks/{a.Icao}/{d.Day}", ct);
+                    if (bytes.Length > 2 && bytes[0] == 0x1f && bytes[1] == 0x8b)
+                    {
+                        using var gz = new GZipStream(new MemoryStream(bytes), CompressionMode.Decompress);
+                        using var raw = new MemoryStream();
+                        await gz.CopyToAsync(raw, ct);
+                        bytes = raw.ToArray();
+                    }
+                    tracks.AddRange(TrackStore.Read(bytes));
+                    used.Add(d);
+                }
+                string DaysText()
+                {
+                    var dl = used.Select(d => d.Day).OrderBy(x => x, StringComparer.Ordinal).ToList();
+                    return dl.Count == 1 ? dl[0] : $"{dl[0]}–{dl[^1]} ({dl.Count} days)";
+                }
+                foreach (var d in days.Take(3)) await Add(d);
+                var prof = TrackLearner.Learn(a.Icao, a.Map, a.ElevationFt, a.Ends, tracks, "LAIA Collector", DaysText());
+                if (MissingFlow(prof, a.Ends) is { } miss)
+                {
+                    var extra = days.Skip(3).Where(d => TrackStore.Facing(d.Landings, miss.heading) >= 10)
+                        .OrderByDescending(d => TrackStore.Facing(d.Landings, miss.heading)).Take(4).ToList();
+                    log.LogInformation("{icao}: {miss}; {n} stored day(s) have landings that way", a.Icao, miss.text, extra.Count);
+                    if (extra.Count > 0)
+                    {
+                        foreach (var d in extra) await Add(d);
+                        prof = TrackLearner.Learn(a.Icao, a.Map, a.ElevationFt, a.Ends, tracks, "LAIA Collector", DaysText());
+                    }
+                }
+                Directory.CreateDirectory(Dir);
+                await File.WriteAllTextAsync(Path.Combine(Dir, a.Icao + ".json"), JsonSerializer.Serialize(prof, Json), ct);
+                lock (_gate) _profiles[a.Icao] = prof;
+                log.LogInformation("Learned {icao} from {n} real tracks (LAIA Collector, {days}): {what}", a.Icao, tracks.Count, DaysText(), prof.Describe());
+                Status = $"learned {a.Icao} from the LAIA Collector ({DaysText()})";
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+            {
+                // Not reachable (no tunnel yet, NAS or internet down): the rest go straight to the download.
+                if (ex is HttpRequestException or TaskCanceledException or JsonException) reachable = false;
+                log.LogInformation("LAIA Collector not used for {icao} ({src}): {msg}", a.Icao, src, ex.Message);
+                left.Add(a);
+            }
+        }
+        return left;
+    }
+
     /// <summary>
     /// A flow the real tracks hardly cover: the runways facing the other way from the most used ones had fewer than 20
     /// arrivals while the most used way had 20 or more. Null when both ways are covered (or neither is busy enough to tell).
     /// </summary>
-    private static string? MissingFlow(AirportProfile prof, IReadOnlyList<Laia.Server.TrafficCore.RunwayEnd> ends)
+    private static (string text, double heading)? MissingFlow(AirportProfile prof, IReadOnlyList<Laia.Server.TrafficCore.RunwayEnd> ends)
     {
         if (prof.Arrivals.Count == 0) return null;
         var top = prof.Arrivals.OrderByDescending(kv => kv.Value.Count).First();
@@ -189,7 +279,7 @@ public sealed class AdsbHistory(ILogger<AdsbHistory> log)
         var other = Count(e => Math.Abs(Geo2.Diff(e.Heading, topEnd.Heading + 180)) < 60);
         if (same < 20 || other >= 20) return null;
         var otherIdents = string.Join("/", ends.Where(e => Math.Abs(Geo2.Diff(e.Heading, topEnd.Heading + 180)) < 60).Select(e => e.Ident).Distinct());
-        return $"the other flow ({otherIdents}) has only {other} real arrivals against {same}";
+        return ($"the other flow ({otherIdents}) has only {other} real arrivals against {same}", (topEnd.Heading + 180) % 360);
     }
 
     /// <summary>The release's parts (.tar.aa, .tar.ab, …) read one after another as one stream, without storing them.</summary>

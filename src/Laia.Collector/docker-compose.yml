@@ -1,0 +1,15 @@
+# LAIA Collector — paste this into Container Manager → Project → Create (see docs/COLLECTOR.md).
+services:
+  laia-collector:
+    image: ghcr.io/dlunior/laia-collector:latest
+    container_name: laia-collector
+    restart: unless-stopped
+    ports:
+      - "47900:47900"
+    volumes:
+      - /volume1/docker/laia-collector:/data
+    environment:
+      - TZ=America/New_York
+      - KEEP_DAYS=90
+      - FIRST_DAYS=14
+      - COUNTRIES=US,CA
