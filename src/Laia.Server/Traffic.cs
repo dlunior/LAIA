@@ -1149,9 +1149,9 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                             // above it), since it's the wind where the user is; otherwise the last wind stays.
                             var dNm = Geo2.DistanceNm(sim!.Lat, sim.Lon, w.Apt.Data.Lat, w.Apt.Data.Lon);
                             if (metar.Wind(w.Apt.Icao) is { } mw) w.Wind = new Wind(mw.dir ?? w.Wind.FromDeg, mw.kt);
+                            else if (dNm < 15 && sim.AltitudeFt < w.Apt.ElevationFt + 5000) w.Wind = new Wind(sim.WindDirection, sim.WindSpeed);
                             w.LowWeather = metar.LowWeather(w.Apt.Icao);
                             w.SafetyLogic = SafetyLogicAirports.Contains(w.Apt.Icao);
-                            else if (dNm < 15 && sim.AltitudeFt < w.Apt.ElevationFt + 5000) w.Wind = new Wind(sim.WindDirection, sim.WindSpeed);
                             w.UserPos = w.Apt.Map.ToXY(sim.Lat, sim.Lon);
                             w.UserOnGround = sim.OnGround;
                             w.UserAltFt = UserLevelFt(sim); w.UserGs = sim.GroundSpeed; w.UserTrack = sim.HeadingTrue; w.UserVs = sim.VerticalSpeed;
