@@ -100,7 +100,7 @@ public static class StarCharts
     private static List<Wd> Words(Page page)
     {
         var rows = new List<(double y, List<Letter> ls)>();
-        foreach (var l in page.Letters.Where(l => l.TextDirection == TextDirection.Horizontal).OrderBy(l => page.Height - l.StartBaseLine.Y))
+        foreach (var l in page.Letters.Where(l => Math.Abs(l.EndBaseLine.Y - l.StartBaseLine.Y) < 0.5 && l.EndBaseLine.X >= l.StartBaseLine.X).OrderBy(l => page.Height - l.StartBaseLine.Y))
         {
             var y = page.Height - l.StartBaseLine.Y;
             if (rows.Count > 0 && y - rows[^1].y < 1.0) rows[^1].ls.Add(l);
