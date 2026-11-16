@@ -252,21 +252,76 @@ public sealed partial class TrafficWorld
                 if (busy is not null)
                     list.Add(new Notice("hs-" + r.Runway, $"Hold short of {r.Ident}{RunwayPair(r)}: {busy.Callsign} ({busy.Type}) {(busy.Kind == "arrival" && !busy.OnGround ? "landing" : busy.Phase == "lined up" ? "lined up to depart" : busy.Phase == "takeoff roll" ? "departing" : "on the runway")}", true));
             }
-            foreach (var o in Flights)
-            {
-                if (o.Done || !o.OnGround || o.Gs < 3 || o.Phase is "landing roll" or "takeoff roll") continue;
-                var v = o.Pos - u;
-                if (v.Length > 180 || v.Length < 30) continue;
-                var bearing = Geo2.Diff(v.Bearing, UserTrack);
-                var crossing = Math.Abs(Math.Sin((o.Heading - UserTrack) * Math.PI / 180)) > 0.6;
-                if (Math.Abs(bearing) < 70 && crossing)
-                    list.Add(new Notice("tw-" + o.Id, $"Hold short: {o.Callsign} ({o.Type}) taxiing across from the {(bearing < 0 ? "left" : "right")}", true));
-            }
+            GiveWay(u, list);
         }
+        else PushNearby(u, list);
         // Traffic waiting for the user.
         foreach (var o in Flights.Where(o => !o.Done && o.OnGround && o.BlockedByUser && o.BlockedFor > 5))
             list.Add(new Notice("wait-" + o.Id, $"{o.Callsign} ({o.Type}) is {(o.Phase == "boarding" || o.Phase == "pushback" ? "waiting to push back" : "holding")} for you", false));
         Notices = list.GroupBy(n => n.Id).Select(g => g.First()).Take(4).ToList();
+    }
+
+    /// <summary>
+    /// Give way on the taxiways (user, 16 Nov: "does LAIA notify the user if they need to give way to another aircraft
+    /// on a taxiway?"). For each of LAIA's aircraft moving on the ground within 600 m: where its own route ahead crosses
+    /// the user's way (straight on at their speed), and who gets there first. If it does — or they'd get there within
+    /// 15 s of each other and it's already the closer — the user is told to give way ("Give way: DAL123 (A321) crossing
+    /// ahead from the right, about 120 m, in 12 s"); if the user is first, that it's giving way to them. Traffic coming
+    /// the other way on the user's taxiway, and an aircraft pushing back across the user's way, are called out too.
+    /// </summary>
+    private void GiveWay(V2 u, List<Notice> list)
+    {
+        var fwd = V2.FromBearing(UserTrack);
+        var ums = Math.Max(UserGs, 5) * 0.5144;
+        foreach (var o in Flights)
+        {
+            if (o.Done || !o.OnGround || o.Path is null || o.Phase is "landing roll" or "takeoff roll" or "lined up" or "lining up" or "parked" or "boarding" or "at gate") continue;
+            var v = o.Pos - u;
+            if (v.Length > 600 || v.Length < 20) continue;
+            var side = Geo2.Diff(v.Bearing, UserTrack) < 0 ? "left" : "right";
+            // Coming the other way on the user's taxiway: ahead, nearly on the user's line, heading back at them.
+            var ahead = V2.Dot(v, fwd); var lateral = Math.Abs(v.X * fwd.Y - v.Y * fwd.X);
+            if (ahead > 0 && ahead < 400 && lateral < 30 && Math.Abs(Geo2.Diff(o.Heading, UserTrack)) > 150 && o.Phase != "pushback")
+            {
+                list.Add(new Notice("headon-" + o.Id, $"Traffic ahead coming the other way: {o.Callsign} ({o.Type}), {ahead:0} m — hold position, it will turn off or wait for you", true));
+                continue;
+            }
+            // Where its route ahead first comes within 30 m of the user's way ahead.
+            var oms = Math.Max(o.Gs, o.Phase == "pushback" ? 1.5 : 6) * 0.5144;
+            var dir = o.Reverse ? -1 : 1;
+            double sA = double.NaN, sU = 0;
+            for (var d = 0.0; d <= 400; d += 6)
+            {
+                var sAt = o.S + dir * d;
+                if (sAt < 0 || sAt > o.Path.Length) break;
+                var q = o.Path.At(sAt).p - u;
+                var al = V2.Dot(q, fwd);
+                if (al < 10 || al > 450) continue;
+                if (Math.Abs(q.X * fwd.Y - q.Y * fwd.X) < 30) { sA = d; sU = al; break; }
+            }
+            if (double.IsNaN(sA)) continue;
+            double tA = sA / oms, tU = sU / ums;
+            if (Math.Min(tA, tU) > 45 || Math.Abs(tA - tU) > 20) continue;
+            var what = o.Phase == "pushback" ? "pushing back" : "crossing";
+            if (tA <= tU || (Math.Abs(tA - tU) < 15 && sA < sU))
+                list.Add(new Notice("gw-" + o.Id, $"Give way: {o.Callsign} ({o.Type}) {what} ahead from the {side}, about {sU:0} m, in {tA:0} s", true));
+            else if (o.Phase != "pushback")
+                list.Add(new Notice("gw-" + o.Id, $"{o.Callsign} ({o.Type}) from the {side} gives way to you ({sU:0} m ahead)", false));
+        }
+    }
+
+    /// <summary>Stopped on the ground: an aircraft pushing back within 80 m of the user (behind or beside them).</summary>
+    private void PushNearby(V2 u, List<Notice> list)
+    {
+        foreach (var o in Flights)
+        {
+            if (o.Done || o.Phase != "pushback") continue;
+            var d = (o.Pos - u).Length;
+            if (d > 80) continue;
+            var side = Geo2.Diff((o.Pos - u).Bearing, UserTrack);
+            var where = Math.Abs(side) < 45 ? "ahead" : Math.Abs(side) > 135 ? "behind you" : side < 0 ? "on your left" : "on your right";
+            list.Add(new Notice("push-" + o.Id, $"{o.Callsign} ({o.Type}) pushing back {where}, {d:0} m", true));
+        }
     }
 
     private string RunwayPair(RunwayEnd r)

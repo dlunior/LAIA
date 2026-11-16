@@ -1741,6 +1741,19 @@ public sealed partial class TrafficWorld
             var pushPts = new List<V2>();
             for (var d = 0.0; d <= pg.Length; d += 10) pushPts.Add(pg.At(d).p);
             pushPts.Add(pg.At(pg.Length).p);
+            // Nor the user taxiing through it, or sitting in it (user, 16 Nov: give way on the ground — LAIA's push
+            // waits for the user, as ground control would hold it).
+            if (UserOnGround && UserPos is { } up)
+            {
+                var ufwd = V2.FromBearing(UserTrack);
+                var ums = Math.Max(UserGs, 0) * 0.5144;
+                for (var t = 0.0; t <= 30; t += 2)
+                {
+                    var q = up + ufwd * (ums * t);
+                    if (pushPts.Any(pp => (pp - q).Length < 45)) return false;
+                    if (ums < 0.5) break;
+                }
+            }
             foreach (var o in Flights)
             {
                 if (o == f || o.Done || !o.OnGround || o.Path is null || !(o.Phase is "pushback" or "taxi" or "taxi in" or "landing roll")) continue;
