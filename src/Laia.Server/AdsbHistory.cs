@@ -178,13 +178,13 @@ public sealed class AdsbHistory(ILogger<AdsbHistory> log)
     /// A flow the real tracks hardly cover: the runways facing the other way from the most used ones had fewer than 20
     /// arrivals while the most used way had 20 or more. Null when both ways are covered (or neither is busy enough to tell).
     /// </summary>
-    private static string? MissingFlow(AirportProfile prof, IReadOnlyList<RunwayEnd> ends)
+    private static string? MissingFlow(AirportProfile prof, IReadOnlyList<Laia.Server.TrafficCore.RunwayEnd> ends)
     {
         if (prof.Arrivals.Count == 0) return null;
         var top = prof.Arrivals.OrderByDescending(kv => kv.Value.Count).First();
         var topEnd = ends.FirstOrDefault(e => e.Ident == top.Key);
         if (topEnd is null) return null;
-        int Count(Func<RunwayEnd, bool> way) => prof.Arrivals.Where(kv => ends.FirstOrDefault(e => e.Ident == kv.Key) is { } e && way(e)).Sum(kv => kv.Value.Count);
+        int Count(Func<Laia.Server.TrafficCore.RunwayEnd, bool> way) => prof.Arrivals.Where(kv => ends.FirstOrDefault(e => e.Ident == kv.Key) is { } e && way(e)).Sum(kv => kv.Value.Count);
         var same = Count(e => Math.Abs(Geo2.Diff(e.Heading, topEnd.Heading)) < 60);
         var other = Count(e => Math.Abs(Geo2.Diff(e.Heading, topEnd.Heading + 180)) < 60);
         if (same < 20 || other >= 20) return null;
