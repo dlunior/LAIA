@@ -78,7 +78,7 @@ public sealed partial class TrafficWorld
         var vapp = Perf.For(UserType.Length > 0 ? UserType : "A320").Vapp;
         double t = 0, d = nm;
         void Leg(double from, double to, double kt) { var len = Math.Max(0, Math.Min(d, from) - to); if (len > 0) t += len / Math.Max(90, kt) * 3600; }
-        var gs = Math.Clamp(UserGs > 60 ? UserGs : 300, 150, 650);
+        var gs = Math.Clamp(UserGs > 60 ? UserGs : 300, 180, 650);
         if (UserAltFt < 11000) gs = Math.Min(gs, 260);
         Leg(double.MaxValue, 100, gs); Leg(100, 40, Math.Min(gs, 330)); Leg(40, 20, Math.Min(gs, 260));
         Leg(20, 12, Math.Min(gs, 210)); Leg(12, 6, Math.Min(gs, 180)); Leg(6, 0, vapp + 5);
