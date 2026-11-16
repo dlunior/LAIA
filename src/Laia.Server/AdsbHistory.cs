@@ -266,7 +266,7 @@ public sealed class AdsbHistory(ILogger<AdsbHistory> log, SettingsStore settings
 
     /// <summary>
     /// A flow the real tracks hardly cover: the runways facing the other way from the most used ones had fewer than 20
-    /// arrivals while the most used way had 20 or more. Null when both ways are covered (or neither is busy enough to tell).
+    /// arrivals, or under a quarter as many, while the most used way had 20 or more. Null when both ways are covered (or neither is busy enough to tell).
     /// </summary>
     private static (string text, double heading)? MissingFlow(AirportProfile prof, IReadOnlyList<Laia.Server.TrafficCore.RunwayEnd> ends)
     {
@@ -277,7 +277,10 @@ public sealed class AdsbHistory(ILogger<AdsbHistory> log, SettingsStore settings
         int Count(Func<Laia.Server.TrafficCore.RunwayEnd, bool> way) => prof.Arrivals.Where(kv => ends.FirstOrDefault(e => e.Ident == kv.Key) is { } e && way(e)).Sum(kv => kv.Value.Count);
         var same = Count(e => Math.Abs(Geo2.Diff(e.Heading, topEnd.Heading)) < 60);
         var other = Count(e => Math.Abs(Geo2.Diff(e.Heading, topEnd.Heading + 180)) < 60);
-        if (same < 20 || other >= 20) return null;
+        // Thin as well as missing (KORD, 16 Nov: 12–14 Nov west flow, ~2,500 arrivals, against a few dozen landing east
+        // from a short switch — enough to pass "20", not enough to show or fly the east flow that night): under a quarter
+        // of the main flow's arrivals.
+        if (same < 20 || other >= Math.Max(20, same / 4)) return null;
         var otherIdents = string.Join("/", ends.Where(e => Math.Abs(Geo2.Diff(e.Heading, topEnd.Heading + 180)) < 60).Select(e => e.Ident).Distinct());
         return ($"the other flow ({otherIdents}) has only {other} real arrivals against {same}", (topEnd.Heading + 180) % 360);
     }
