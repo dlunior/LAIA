@@ -252,6 +252,7 @@ async function updateReal() {
 
 // The taxi flow (one-way stretches worked out from the layout for the runways in use), with arrows.
 let flowAt = 0, flowKey = "";
+const flowCanvas = L.canvas({ padding: 0.3 });
 async function updateFlow() {
   if (!$("tFlow").checked) { layers.flow.clearLayers(); flowAt = 0; flowKey = ""; return; }
   if (Date.now() - flowAt < 20000) return;
@@ -263,16 +264,37 @@ async function updateFlow() {
     if (d.key + d.stretches.length === flowKey) return;
     flowKey = d.key + d.stretches.length;
     layers.flow.clearLayers();
+    // Lighter (user, 16 Nov: "are the taxi ADSB data optimized for the live map like the arrivals and departures?"):
+    // the stretches as six lines on a canvas (by use, and real or worked out) instead of one each, and an arrow about
+    // every 300 m of a stretch instead of on every short piece — O'Hare's 400-odd stretches had thousands of arrows.
+    const groups = new Map();
+    for (const st of d.stretches) {
+      const k = st.use + "|" + (st.real ? 1 : 0);
+      if (!groups.has(k)) groups.set(k, { use: st.use, real: st.real, lines: [] });
+      groups.get(k).lines.push(st.points);
+    }
+    for (const g of groups.values()) {
+      const col = g.use === "departures" ? "#2dd4bf" : g.use === "arrivals" ? "#a78bfa" : "#e5e7eb";
+      // Solid: decided by real taxi tracks; dashed: worked out from the layout.
+      L.polyline(g.lines, { renderer: flowCanvas, color: col, weight: 3, opacity: .55, dashArray: g.real ? null : "6 6", interactive: false }).addTo(layers.flow);
+    }
     for (const st of d.stretches) {
       const col = st.use === "departures" ? "#2dd4bf" : st.use === "arrivals" ? "#a78bfa" : "#e5e7eb";
-      // Solid: decided by real taxi tracks; dashed: worked out from the layout.
-      L.polyline(st.points, { color: col, weight: 3, opacity: .55, dashArray: st.real ? null : "6 6", interactive: false }).addTo(layers.flow);
-      for (let i = 0; i + 1 < st.points.length; i++) {
-        const [a, b] = [st.points[i], st.points[i + 1]];
-        const brg = Math.atan2((b[1] - a[1]) * Math.cos(a[0] * Math.PI / 180), b[0] - a[0]) * 180 / Math.PI;
+      const arrow = (a, b) => {
+        const dy = (b[0] - a[0]) * 111320, dx = (b[1] - a[1]) * 111320 * Math.cos(a[0] * Math.PI / 180);
+        const brg = Math.atan2(dx, dy) * 180 / Math.PI;
         const icon = L.divIcon({ className: "", iconSize: [14, 14], iconAnchor: [7, 7], html: `<div style="transform:rotate(${brg}deg);color:${col};font-size:13px;line-height:14px;text-align:center">▲</div>` });
         L.marker([(a[0] + b[0]) / 2, (a[1] + b[1]) / 2], { icon, interactive: false, keyboard: false }).addTo(layers.flow);
+      };
+      let run = 150, placed = false;   // the first arrow 150 m in, then every 300 m; at least one per stretch
+      for (let i = 0; i + 1 < st.points.length; i++) {
+        const [a, b] = [st.points[i], st.points[i + 1]];
+        run -= Math.hypot((b[0] - a[0]) * 111320, (b[1] - a[1]) * 111320 * Math.cos(a[0] * Math.PI / 180));
+        if (run > 0) continue;
+        run = 300; placed = true;
+        arrow(a, b);
       }
+      if (!placed && st.points.length >= 2) { const m = Math.floor((st.points.length - 1) / 2); arrow(st.points[m], st.points[m + 1]); }
     }
   } catch { }
 }

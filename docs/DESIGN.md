@@ -571,6 +571,8 @@ around. Airliners can't do that on a taxiway, and a real ground controller never
 
 **0.1.231 — 1,000 ft is separation in RVSM (user, 16 Nov: "1000ft of separation is okay in RVSM airspace as long as planes are following east-west altitude rules"):** the whole-sky flights already cruise on their side's levels (odd thousands eastbound, even westbound). But one 1,000 ft from the user was moved 2,000 ft away (SWA3049 at FL370 put up to FL380 for the user at FL360) because the user's altitude read a few feet above 36,000, making the gap 980 ft. The user's (or an airport aircraft's) altitude is now allowed 200 ft either way of its level: within 800 ft is a conflict, and the level given is at least 1,000 ft from the other's level.
 
+**0.1.232 — the taxi flow on the map, lighter (user, 16 Nov: "are the taxi ADSB data optimized for the live map like the arrivals and departures?"):** the map drew each one-way stretch as its own line and an arrow on every short piece of it — at O'Hare 400-odd lines and thousands of arrows, all rebuilt when the flow changed. Now the stretches are six lines on a canvas (arrivals, departures, both; real or worked out) and an arrow about every 300 m (at least one per stretch). The taxi flow was already for the runways in use: only the real taxi-ins from the landing runways and taxi-outs to the departure runways decide it, and it is worked out again when the runways change.
+
 Section 4 says *what* LAIA will do; this section says *in which order* it gets built. Each milestone is a set of
 releases that can be tested on its own before the next one starts. Every milestone also gets offline checks in
 `Laia.Tests`, so CI proves the rules before the user flies.
