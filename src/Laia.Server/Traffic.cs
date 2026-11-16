@@ -570,18 +570,31 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         }
     }
 
-    /// <summary>Real tracks (adsb.lol) learned for the airport, for the map: a sample of arrivals and departures per runway.</summary>
+    /// <summary>Real tracks (adsb.lol) learned for the airport, for the map: every arrival and departure for the runways in use.</summary>
     public object? RealTracks()
     {
         // The departure field and the destination prepared ahead (user, 13 Nov, CYWG–CYYC: "not showing the real
         // track or taxi flow for my arrival airport").
         List<TrafficWorld> ws;
         lock (_gate) ws = MapAirports().ToList();
-        var all = new List<object>();
-        var icaos = new List<string>();
+        var parts = new List<(TrafficWorld w, AirportProfile p, string key)>();
         foreach (var w in ws)
         {
             if (history.Profile(w.Apt.Icao) is not { } p) continue;
+            var key = $"{p.Icao}@{p.LearnedUtc:O}:{string.Join("/", w.ArrRwys.Select(e => e.Ident))}:{string.Join("/", w.DepRwys.Select(e => e.Ident))}";
+            parts.Add((w, p, key));
+        }
+        if (parts.Count == 0) return null;
+        var all = string.Join("|", parts.Select(x => x.key));
+        lock (_realGate)
+        {
+            // Worked out once per airport, profile and runways in use, not on every request.
+            if (_realCache is { } c && c.key == all) return c.result;
+        }
+        var tracks = new List<object>();
+        var icaos = new List<string>();
+        foreach (var (w, p, _) in parts)
+        {
             // Every real arrival to the landing runways and departure from the departure runways, the part below FL200
             // (user, 15 Nov: "all arrival and departure tracks lower than FL200 should be shown" — no longer an equal
             // number of each).
@@ -599,13 +612,43 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
             {
                 var arrival = t.Kind == "arrival";
                 if (!(arrival ? arrRw.Count == 0 || arrRw.Contains(t.Runway) : depRw.Count == 0 || depRw.Contains(t.Runway))) continue;
-                var pts = Below(t.Points, arrival);
-                if (pts.Count >= 2) all.Add(new { kind = t.Kind, runway = t.Runway, points = pts, icao = p.Icao });
+                var pts = Thin(Below(t.Points, arrival));
+                if (pts.Count >= 2) tracks.Add(new { kind = t.Kind, points = pts });
             }
             icaos.Add($"{p.Icao} {p.Day}");
         }
-        if (icaos.Count == 0) return null;
-        return new { icao = string.Join(", ", icaos), tracks = all };
+        var result = new { key = all, icao = string.Join(", ", icaos), tracks };
+        lock (_realGate) _realCache = (all, result);
+        return result;
+    }
+    private readonly object _realGate = new();
+    private (string key, object result)? _realCache;
+
+    /// <summary>
+    /// A track with only the points the map needs: a point is dropped when the line from the last kept point to the
+    /// next one passes within about 40 m of it (straight stretches become one segment, turns keep their shape).
+    /// Positions only, rounded to about a metre.
+    /// </summary>
+    private static List<double[]> Thin(List<double[]> pts)
+    {
+        var res = new List<double[]>();
+        if (pts.Count == 0) return res;
+        const double Tol = 0.00036;   // degrees of latitude, about 40 m
+        double[] P(double[] q) => new[] { Math.Round(q[0], 5), Math.Round(q[1], 5) };
+        var anchor = pts[0];
+        res.Add(P(anchor));
+        for (var i = 1; i < pts.Count - 1; i++)
+        {
+            var next = pts[i + 1];
+            var cos = Math.Cos(anchor[0] * Math.PI / 180);
+            double ax = anchor[1] * cos, ay = anchor[0], bx = next[1] * cos, by = next[0], px = pts[i][1] * cos, py = pts[i][0];
+            double dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy;
+            var u = len2 > 0 ? Math.Clamp(((px - ax) * dx + (py - ay) * dy) / len2, 0, 1) : 0;
+            var off = Math.Sqrt(Math.Pow(ax + u * dx - px, 2) + Math.Pow(ay + u * dy - py, 2));
+            if (off > Tol) { anchor = pts[i]; res.Add(P(anchor)); }
+        }
+        if (pts.Count > 1) res.Add(P(pts[^1]));
+        return res;
     }
 
     /// <summary>The airports the map shows learned data for: the traffic airport and the destination prepared ahead.</summary>

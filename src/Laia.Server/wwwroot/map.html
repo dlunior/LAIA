@@ -227,17 +227,26 @@ function skyDetailsHtml(f) {
 }
 
 // Real tracks learned from adsb.lol (M6), drawn faintly under LAIA's traffic to compare: arrivals violet, departures teal.
-let realAt = 0;
+// All of them as two lines on one canvas (user, 15 Nov: "the map performance is rough with the learned track turned
+// on" — hundreds of separate lines, rebuilt every minute), and only redrawn when the tracks themselves change.
+let realAt = 0, realKey = "";
+const realCanvas = L.canvas({ padding: 0.3 });
 async function updateReal() {
-  if (!$("tReal").checked) { layers.real.clearLayers(); realAt = 0; return; }
+  if (!$("tReal").checked) { layers.real.clearLayers(); realAt = 0; realKey = ""; return; }
   if (Date.now() - realAt < 60000) return;
   realAt = Date.now();
   try {
     const r = await fetch("/api/map/real", { cache: "no-store" });
-    layers.real.clearLayers();
-    if (!r.ok) return;
+    if (!r.ok) { layers.real.clearLayers(); realKey = ""; return; }
     const d = await r.json();
-    for (const t of d.tracks) L.polyline(t.points.map(p => [p[0], p[1]]), { color: t.kind === "arrival" ? "#a78bfa" : "#2dd4bf", weight: 1.2, opacity: .35, interactive: false }).addTo(layers.real);
+    if (d.key === realKey) return;
+    realKey = d.key;
+    layers.real.clearLayers();
+    const arr = [], dep = [];
+    for (const t of d.tracks) (t.kind === "arrival" ? arr : dep).push(t.points);
+    const opt = { renderer: realCanvas, weight: 1.2, opacity: .35, interactive: false, smoothFactor: 1.5 };
+    if (arr.length) L.polyline(arr, { ...opt, color: "#a78bfa" }).addTo(layers.real);
+    if (dep.length) L.polyline(dep, { ...opt, color: "#2dd4bf" }).addTo(layers.real);
   } catch { }
 }
 
