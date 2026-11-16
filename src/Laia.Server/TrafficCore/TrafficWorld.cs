@@ -869,6 +869,8 @@ public sealed partial class TrafficWorld
     /// </summary>
     internal Flight? SpawnFromNetwork(ScheduleLeg l, NetPos np)
     {
+        // Never taken over just off the ground far away (it would be flown on from there at that height).
+        if (np.AltFt < 3000 && Geo2.DistanceNm(Apt.Data.Lat, Apt.Data.Lon, np.Lat, np.Lon) > 25) return null;
         var plan = RoutePlan(Key(l, 'A')) ?? PlanArrival(l.Dep, l.Type);
         var f = SpawnArrival(0, false, l, plan, entry: (Apt.Map.ToXY(np.Lat, np.Lon), np.AltFt, np.CruiseFt));
         // The whole sky flies every leg on its own, so two arrivals can be almost on top of each other when they're
@@ -1034,6 +1036,9 @@ public sealed partial class TrafficWorld
                 // 60 nm from MLB — by then 45 nm north of MCO, still a whole-sky dot: not drawn, not on its STAR, no
                 // restrictions). From the hand-over it flies its STAR, restrictions and approach like any arrival.
                 if (dist > HandoverNm) continue;
+                // Still climbing out of its own field: later, as at the main airport (16 Nov, MDW: SWA1696 taken over
+                // 119 nm out at 30 ft, just off the ground, and flown there at 30 ft until it went around 12 nm out).
+                if (dist > 25 && np.Phase == "climbing" && np.AltFt < Math.Min(10000, np.CruiseFt) - 200) continue;
                 _done.Add(Key(l, 'A'));
                 if (dist > 12 && SpawnFromNetwork(l, np) is not null) { active++; Movements++; }
             }
@@ -4709,6 +4714,10 @@ public sealed partial class TrafficWorld
     private double ProbeUserLevel(Flight f)
     {
         if (UserTraffic() is not { } me || f.Path is null) return double.NaN;
+        // Only up high (cruise, early descent): lower down the departures' climb stops and the descent probes keep
+        // arrivals and the user apart (16 Nov: UAL12 on a 5 nm final was told to descend "early to 0 ft" below the user
+        // climbing out at 1,211 ft).
+        if (me.AltFt < 10000 || f.AltFt < 10000) return double.NaN;
         if ((me.Pos - f.Pos).Length > 60 * Geo2.MPerNm || Math.Abs(f.AltFt - me.AltFt) >= 1000) return double.NaN;
         if (f.AltFt < me.AltFt - 200) return double.NaN;   // already below and descending away
         for (var t = 0.0; t <= 300; t += 15)
