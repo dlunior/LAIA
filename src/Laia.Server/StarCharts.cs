@@ -345,6 +345,7 @@ public static class StarCharts
         foreach (var page in doc.GetPages())
         {
             var segsAll = Segments(page);
+            sb.Append("ops " + string.Join(",", page.Operations.GroupBy(o => o.Operator).Where(g => g.Key is "cm" or "m" or "l" or "re" or "q" or "Do").Select(g => g.Key + "=" + g.Count())) + "; ");
             sb.Append($"paths {segsAll.Count} lines{(LastSegmentError is null ? "" : " (" + LastSegmentError + ")")}; ");
             foreach (var (ang, letters) in Frames(page))
             {
@@ -353,7 +354,9 @@ public static class StarCharts
                 {
                     var l0 = letters.First(l => l.Value == word[..1]);
                     sb.Append($"[{ang}°] {w.Text} x {w.X0:0.0}–{w.X1:0.0} y {w.Y:0.0} size {w.Size:0.0} (pt {l0.PointSize:0.0} font {l0.FontSize:0.0} rect {l0.GlyphRectangle.Width:0.0}x{l0.GlyphRectangle.Height:0.0}); near: ");
-                    foreach (var (a, b) in segs.Where(sg => Math.Abs(sg.a.y - w.Y) < 5 && Math.Max(sg.a.x, sg.b.x) > w.X0 - 5 && Math.Min(sg.a.x, sg.b.x) < w.X1 + 5).Take(8))
+                    sb.Append($"marks {Marks(w, segs)}; ");
+                    foreach (var (a, b) in segs.Where(sg => Math.Abs(sg.a.y - w.Y) < 5 && Math.Max(sg.a.x, sg.b.x) > w.X0 - 5 && Math.Min(sg.a.x, sg.b.x) < w.X1 + 5)
+                                 .OrderByDescending(sg => Math.Abs(sg.a.x - sg.b.x) - 3 * Math.Abs(sg.a.y - sg.b.y)).Take(6))
                         sb.Append($"({a.x:0.0},{a.y:0.0})-({b.x:0.0},{b.y:0.0}) ");
                     sb.Append("; ");
                 }
