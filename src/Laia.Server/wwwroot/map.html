@@ -219,7 +219,7 @@ function skyDetailsHtml(f) {
     ["Cruise level", "FL" + Math.round(f.cruise / 100)],
     ["Ground speed", `${f.gs} kt`],
     ["Lands in", f.eta >= 60 ? `${Math.floor(f.eta / 60)} h ${f.eta % 60} min` : `${f.eta} min`],
-    ["Drawn in the sim", "no (flying on its schedule)"],
+    ["Drawn in the sim", f.why ? `no — ${f.why}` : "no (flying on its schedule)"],
   ];
   return `<h2>${f.cs} <small>${f.airline}</small></h2>
     <dl>${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>

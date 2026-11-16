@@ -320,12 +320,13 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         var worlds = Worlds().ToList();
         var exclude = new HashSet<string>(worlds.SelectMany(x => x.Flights).Select(f => f.Reg).Where(r => r.Length > 0), StringComparer.OrdinalIgnoreCase);
         var callsigns = worlds.SelectMany(x => x.Flights).Where(f => !f.Done).Select(f => f.Callsign).ToHashSet();
-        var res = new List<Laia.Server.TrafficCore.NetLeg>();
+        var cand = new List<(Laia.Server.TrafficCore.NetLeg l, bool keep, bool near)>();
+        var userFt = UserLevelFt(sim);
         foreach (var p in network.Around(NetClock, sim.Lat, sim.Lon, DrawRadiusNm + 40, exclude, 400))
         {
             var l = p.Leg;
             if (p.AltFt < 8000 || TrafficWorld.IsCargo(l.Airline) || TrafficWorld.IsCargo(l.Operator) || Perf.For(l.Type).Family == "turboprop") continue;
-            if (!TrafficWorld.KeepAtLevel(Level, l.Reg.Length > 0 ? l.Reg : l.Callsign)) continue;   // the level thins it, as at the airports
+            var keep = TrafficWorld.KeepAtLevel(Level, l.Reg.Length > 0 ? l.Reg : l.Callsign);   // the level thins it, as at the airports
             if (callsigns.Contains(l.Callsign)) continue;
             var owned = false;
             foreach (var wd in worlds)
@@ -334,8 +335,31 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 var ours = l.Dep.Equals(wd.Apt.Icao, StringComparison.OrdinalIgnoreCase) || l.Arr.Equals(wd.Apt.Icao, StringComparison.OrdinalIgnoreCase);
                 if (d < 30 || (ours && d < wd.HandoverNm + 10)) { owned = true; break; }
             }
-            if (!owned) res.Add(l);
+            if (!owned) cand.Add((l, keep, Geo2.DistanceNm(sim.Lat, sim.Lon, p.Lat, p.Lon) <= DrawRadiusNm && Math.Abs(p.AltFt - userFt) <= DrawBandFt));
         }
+        // A quiet sky isn't thinned (user, 15 Nov, MCO–ORD at FL360 on Medium: a United 1,000 ft above, beside the one
+        // Southwest drawn, was left out — "if the amount of aircraft in the area of the user is less than 15, they all
+        // get drawn"): the level only thins when 15 or more aircraft are around the user (within 60 nm and 10,000 ft,
+        // en route and the airports' moving traffic together). Back to thinning above 18, so it doesn't flip each time
+        // one comes or goes.
+        var around = cand.Count(c => c.near);
+        foreach (var wd in worlds)
+            foreach (var f in wd.Flights)
+            {
+                if (f.Done || (f.OnGround && f.Phase is "parked" or "boarding" or "at gate")) continue;
+                var (la, lo) = wd.Apt.Map.ToLatLon(f.Pos);
+                if (Geo2.DistanceNm(sim.Lat, sim.Lon, la, lo) <= DrawRadiusNm && (f.OnGround || Math.Abs(f.AltFt - userFt) <= DrawBandFt)) around++;
+            }
+        if (_quietSky ? around > QuietSky + 3 : around < QuietSky) _quietSky = !_quietSky;
+        _aroundUser = around;
+        var res = new List<Laia.Server.TrafficCore.NetLeg>();
+        var thinned = new HashSet<string>();
+        foreach (var c in cand)
+        {
+            if (c.keep || _quietSky) res.Add(c.l);
+            else thinned.Add(c.l.Id);
+        }
+        _thinned = thinned;
         // Remember which drawn ones are which aircraft (for the take-over); forget aliases of flights now gone.
         foreach (var l in res) if (l.Reg.Length > 0 && _drawnLast.Contains(l.Id)) _netDrawnRegs[l.Reg] = l.Id;
         if (_alias.Count > 0)
@@ -349,6 +373,30 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     }
 
     private readonly EnRouteSeparation _sep = new();
+    private const int QuietSky = 15;
+    private bool _quietSky;
+    private int _aroundUser;
+    private HashSet<string> _thinned = new();
+
+    private static string LevelName(TrafficLevel l) => l switch { TrafficLevel.RealWorld => "Real world", _ => l.ToString() };
+
+    /// <summary>Why a whole-sky flight isn't drawn in the sim (for the map's details), or null when it is.</summary>
+    private string? WhyNotDrawn(Laia.Server.TrafficCore.NetLeg l, double lat, double lon, double altFt)
+    {
+        if (_drawnLast.Contains(l.Id)) return null;
+        var sim = state.Sim;
+        if (sim is null || !sim.Connected) return "MSFS isn't connected";
+        if (Level == TrafficLevel.Off) return "traffic is off";
+        if (TrafficWorld.IsCargo(l.Airline) || TrafficWorld.IsCargo(l.Operator)) return "cargo (only passenger jets are drawn)";
+        if (Perf.For(l.Type).Family == "turboprop") return "turboprop (only passenger jets are drawn)";
+        var nm = Geo2.DistanceNm(sim.Lat, sim.Lon, lat, lon);
+        if (nm > DrawRadiusNm) return $"{nm:0} nm from you (drawn within {DrawRadiusNm:0} nm)";
+        if (altFt < 8000) return "below 8,000 ft, near an airport whose traffic isn't run here";
+        var dz = altFt - UserLevelFt(sim);
+        if (Math.Abs(dz) > DrawBandFt) return $"{Math.Abs(dz):N0} ft {(dz > 0 ? "above" : "below")} you (drawn within {DrawBandFt:N0} ft)";
+        if (_thinned.Contains(l.Id)) return $"thinned out by the {LevelName(Level)} level ({_aroundUser} aircraft around you; all are drawn below {QuietSky})";
+        return $"not among the nearest {MaxDrawn}, or joining shortly (one a second)";
+    }
 
     /// <summary>A whole-sky flight's altitude as drawn (its schedule's altitude, unless separation changed it).</summary>
     private double NetAlt(Laia.Server.TrafficCore.NetLeg l, double clock, double baseAlt) => _sep.Alt(l, clock, baseAlt);
@@ -551,6 +599,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 lat = Math.Round(p.Lat, 4), lon = Math.Round(p.Lon, 4), alt = Math.Round(NetAlt(p.Leg, NetClock, p.AltFt) / 100) * 100, gs = Math.Round(p.GsKt),
                 hdg = Math.Round(p.Heading), phase = p.Phase, cruise = p.CruiseFt, eta = Math.Round(p.EtaMin), reg = p.Leg.Reg, title = p.Leg.Title,
                 drawn = _drawnLast.Contains(p.Leg.Id),
+                why = WhyNotDrawn(p.Leg, p.Lat, p.Lon, NetAlt(p.Leg, NetClock, p.AltFt)),
             });
         }
         return list;
