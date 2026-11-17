@@ -155,6 +155,8 @@ public sealed class Flight
     /// <summary>The STAR (with its entry transition) or SID (with its exit) chosen with the runway, so the two match.</summary>
     public (Procedure p, Transition? t)? StarPick, SidPick;
     public double LastHold = -999;
+    /// <summary>When the base turn was last moved (the trombone), and how far out it is now (nm; NaN: no downwind ahead).</summary>
+    public double LastTrombone = -999, BaseTurnNm = double.NaN, TromboneLoggedNm = double.NaN, TromboneLeft = double.NaN;
 
     public double AglFt(double groundFt) => OnGround ? 0 : Math.Max(0, AltFt - groundFt);
 
@@ -3876,6 +3878,94 @@ public sealed partial class TrafficWorld
         return true;
     }
 
+
+    /// <summary>
+    /// The trombone (user, 17 Nov: "a downwind to final is very fluid and dynamic … LAIA has to use more of its forms of
+    /// creating separation and adjust better"): an arrival with a downwind and base still ahead has its base turn moved
+    /// all the time — further out to lose time behind the aircraft ahead, earlier to close up a gap that's too big —
+    /// rather than being held or vectored off. The downwind and the final each get longer (or shorter) by the same
+    /// amount; the base stays at right angles to the final, the intercept angle as before, the join on the final where it
+    /// was. The base turn stays at least 1 nm ahead of the aircraft, beyond the join, and no more than 25 nm out.
+    /// Returns the seconds it could NOT absorb (0 when done; NaN when there's no downwind and base ahead).
+    /// </summary>
+    private double Trombone(Flight f, double addSec, string why)
+    {
+        var path = f.Path!; var rwy = f.Rwy!;
+        var nm = Geo2.MPerNm;
+        var pts0 = path.Points; var keptS = path.KeptS;
+        var first = -1;
+        for (var i = 0; i < pts0.Count; i++) if (keptS[i] > f.S + 1) { first = i; break; }
+        if (first < 0) return double.NaN;
+        // The base leg ahead: turn base (A), end of base (B), the join on the final (C).
+        var ia = -1;
+        for (var i = first; i + 2 < pts0.Count; i++)
+        {
+            V2 A = pts0[i], B = pts0[i + 1], C = pts0[i + 2];
+            double aA = rwy.Along(A), aB = rwy.Along(B), aC = rwy.Along(C), oA = rwy.Offset(A), oB = rwy.Offset(B);
+            if (Math.Abs(rwy.Offset(C)) > 0.3 * nm || aC > -1 * nm) continue;
+            if (Math.Abs(aA - aB) > 0.6 * nm || Math.Abs(oA) - Math.Abs(oB) < 0.8 * nm || Math.Sign(oA) != Math.Sign(oB) || aA > aC) continue;
+            // Reached along a downwind: the leg into the base turn runs away from the runway, beside it.
+            var prev = i > first ? pts0[i - 1] : f.Pos;
+            var leg = A - prev;
+            if (leg.Length > 300 && V2.Dot(leg.Unit, rwy.Dir) > -0.5) continue;
+            ia = i; break;
+        }
+        if (ia < 0) { f.BaseTurnNm = double.NaN; return double.NaN; }
+        V2 pA = pts0[ia], pB = pts0[ia + 1], pC = pts0[ia + 2];
+        var side = Math.Sign(rwy.Offset(pA));
+        var dw = Math.Abs(rwy.Offset(pA));
+        var baseNm = -rwy.Along(pA) / nm;
+        var joinNm = -rwy.Along(pC) / nm;
+        var tanI = Math.Abs(rwy.Offset(pB)) / Math.Max(0.5 * nm, rwy.Along(pC) - rwy.Along(pB));
+        f.BaseTurnNm = baseNm;
+        // Ground speed over the stretch it changes: downwind and final speeds.
+        var gs = Math.Max(140, (Math.Min(f.Gs, 230) + f.P.Vapp + 20) / 2) * Kt;
+        var minNm = Math.Max(joinNm + 1.5, -rwy.Along(f.Pos) / nm + 1.0);
+        var maxNm = 25.0;
+        var wantNm = baseNm + addSec * gs / 2 / nm;
+        var newNm = Math.Clamp(wantNm, minNm, maxNm);
+        if (Math.Abs(newNm - baseNm) < 0.3) return Math.Abs(wantNm - newNm) * 2 * nm / gs * Math.Sign(addSec);
+        var left = new V2(-rwy.Dir.Y, rwy.Dir.X);
+        var thr = rwy.Threshold;
+        var endOff = Math.Clamp((newNm - joinNm) * nm * tanI, 0.8 * nm, 4 * nm);
+        var nA = thr + left * (side * dw) - rwy.Dir * (newNm * nm);
+        var nB = thr + left * (side * endOff) - rwy.Dir * (newNm * nm);
+        var pts = new List<V2> { f.Pos };
+        for (var i = first; i < ia; i++)
+            if (rwy.Along(pts0[i]) > rwy.Along(nA) + 200) pts.Add(pts0[i]);   // downwind points beyond the new base turn go
+        var newA = pts.Count;
+        pts.Add(nA); pts.Add(nB);
+        for (var i = ia + 2; i < pts0.Count; i++) pts.Add(pts0[i]);
+        var oldAS = keptS[ia];
+        var thrIndex = pts.Count - 2;
+        var oldS = f.S;
+        var oldLimits = f.SpeedLimits.Where(l => l.S > oldS).ToList();
+        var oldAlt = f.AltLimits.Where(c => c.S > oldS).ToList();
+        var oldChecks = f.Checks.Where(c => c.S > oldS).ToList();
+        var oldFixes = f.Fixes.Where(c => c.S > oldS).ToList();
+        f.Path = AirPath(pts, i => i >= thrIndex ? 1 : i == 0 ? Math.Max(f.Ias, 160) : 200, f.AltFt);
+        var newAS = f.Path.KeptS[newA];
+        double Map(double sOld) => sOld <= oldAS ? sOld - oldS : sOld - oldAS + newAS;
+        f.SpeedLimits = oldLimits.Select(l => (Map(l.S), l.Kt)).ToList();
+        f.AltLimits = oldAlt.Select(c => (Map(c.S), c.Min, c.Max)).ToList();
+        f.Checks = oldChecks.Select(c => (Map(c.S), c.Fix, c.Min, c.Max, c.Kt)).ToList();
+        f.Fixes = oldFixes.Select(c => (Map(c.S), c.Fix)).ToList();
+        f.ThrS = f.Path.PointS[thrIndex];
+        f.S = 0;
+        f.EtaAt = -99;
+        f.LastTrombone = Time;
+        f.BaseTurnNm = newNm;
+        f.Mgr = newNm > baseNm ? "downwind extended" : "base turn early";
+        if (Math.Abs(newNm - f.TromboneLoggedNm) >= 1.5 || double.IsNaN(f.TromboneLoggedNm))
+        {
+            f.TromboneLoggedNm = newNm;
+            _trombones++;
+            Log($"{f.Callsign}: {(newNm > baseNm ? "downwind extended" : "turn base earlier")}, base turn now {newNm:0.0} nm out (was {baseNm:0.0}) — {why}");
+        }
+        return (wantNm - newNm) * 2 * nm / gs;
+    }
+    private int _trombones;
+
     private int _vectors, _speedAssigns, _holds, _orbits, _breakoffs;
     private readonly Dictionary<int, (Flight f, double t)> _lastLanding = new();
     private readonly List<double> _gapExcess = new();
@@ -5090,13 +5180,26 @@ public sealed partial class TrafficWorld
                 if (!tooCloseNow(gap, needNm)) short_ -= Math.Max(0, dth - 20) * (3600 / 210.0 - 3600 / 250.0) + (dth > 12 ? 30 : 0);
                 var tooClose = tooCloseNow(gap, needNm);
                 f.GapNm = gap; f.GapSec = gapSec;
+                // The trombone first: with a downwind and base ahead, the base turn moves so it lands the gap needed
+                // (plus 10 s) behind the one ahead — further out, or earlier when the gap is bigger than it needs to be.
+                // Looked at every 8 s, so the downwind keeps following how the traffic ahead (and the user) actually
+                // flies. While it can absorb the shortfall, no vectors off, holds, 360s or break-offs.
+                if (dth > 4 && Time - f.LastTrombone > 8 && Time - f.LastVector > 30)
+                {
+                    f.LastTrombone = Time;
+                    var wantGap = ThresholdGapNeeded(leader, f, forDepartures: false) + 10;
+                    var add = wantGap - gapSec;
+                    f.TromboneLeft = Trombone(f, add > 10 || add < -25 ? add : 0, $"{gapSec:0} s behind {leader.Callsign} at the runway, {wantGap:0} wanted");
+                }
+                if (dth <= 4) f.TromboneLeft = double.NaN;
+                var trombone = !double.IsNaN(f.TromboneLeft) && f.TromboneLeft < 40 && !tooClose;
                 // Vectors before a hold or a 360 (path stretching): a detour as long as the time to lose, when there's
                 // route left to do it; a hold only for long delays (over 4 minutes) or when no detour fits.
-                if ((short_ > 45 || tooClose) && dth > 13 && short_ <= 240 && Time - f.LastVector > 150 && Time - f.LastOrbit > 120
+                if (!trombone && (short_ > 45 || tooClose) && dth > 13 && short_ <= 240 && Time - f.LastVector > 150 && Time - f.LastOrbit > 120
                     && Vector(f, Math.Max(short_, 45) + 15, $"{gap:0.0} nm behind {leader.Callsign}, {short_:0} s short at the runway")) return;
-                if ((short_ > 45 || tooClose) && dth > 15 && Time - f.LastHold > 300 && Time - f.LastOrbit > 120 && Time - f.LastVector > 90) { Hold(f, $"{gap:0.0} nm behind {leader.Callsign}, {short_:0} s short at the runway"); return; }
-                if ((short_ > 45 || tooClose) && dth > 12 && dth <= 15 && Time - f.LastOrbit > 240 && Time - f.LastVector > 90) { Orbit(f, $"{gap:0.0} nm behind {leader.Callsign}"); return; }
-                if ((short_ > 40 || tooClose) && dth > 5 && dth <= 12 && Time - f.LastOrbit > 240) { BreakOff(f, $"{gap:0.0} nm behind {leader.Callsign}, {short_:0} s short at the runway"); return; }
+                if (!trombone && (short_ > 45 || tooClose) && dth > 15 && Time - f.LastHold > 300 && Time - f.LastOrbit > 120 && Time - f.LastVector > 90) { Hold(f, $"{gap:0.0} nm behind {leader.Callsign}, {short_:0} s short at the runway"); return; }
+                if (!trombone && (short_ > 45 || tooClose) && dth > 12 && dth <= 15 && Time - f.LastOrbit > 240 && Time - f.LastVector > 90) { Orbit(f, $"{gap:0.0} nm behind {leader.Callsign}"); return; }
+                if (!trombone && (short_ > 40 || tooClose) && dth > 5 && dth <= 12 && Time - f.LastOrbit > 240) { BreakOff(f, $"{gap:0.0} nm behind {leader.Callsign}, {short_:0} s short at the runway"); return; }
             }
             if (f.Phase == "flare") target = f.P.Vapp - 5;
             // Energy: it slows only as fast as its configuration and descent allow (descend OR slow, not both).

@@ -885,6 +885,42 @@ Console.WriteLine("== Airport rules read from the FAA's AAUP text (any airport, 
     }
 }
 
+Console.WriteLine("== The trombone: arrivals bunched on the downwind are spaced by moving their base turns — no holds, no 360s (CYYZ, 17 Nov)");
+{
+    var data = TestAirport.Build(false);
+    var world = new TrafficWorld(new AirportModel(data), new TestSource(), seed: 5) { Automatic = false, Wind = new Wind(270, 10) };
+    var log = new List<string>(); world.Log = s2 => log.Add($"{world.Time:0} {s2}");
+    world.SelectRunways(true);
+    var rwy = world.ArrRwy!;
+    var left = new V2(-rwy.Dir.Y, rwy.Dir.X);
+    var nm = Geo2.MPerNm;
+    Laia.Common.Airports.ScheduleLeg L(string reg, string fl) => new() { Airline = "DAL", Operator = "DAL", Type = "A321", Reg = reg, Flight = fl, Dep = "KXXX", Arr = "TEST" };
+    var fl3 = new List<Flight>();
+    foreach (var (k, along) in new[] { (1, 11.0), (2, 13.0), (3, 15.0) })
+    {
+        var pos = rwy.Threshold + rwy.Dir * (along * nm) + left * (6 * nm);
+        var f = world.SpawnArrival(30, false, L($"N{k}", $"{k}{k}"), entry: (pos, 7000, 7000));
+        if (f is not null) fl3.Add(f);
+    }
+    var lands = new Dictionary<string, double>();
+    for (var t = 0.0; t < 3600 && lands.Count < fl3.Count; t += 0.5)
+    {
+        world.Step(0.5);
+        foreach (var f in fl3) if (f.OnGround && !lands.ContainsKey(f.Callsign)) lands[f.Callsign] = world.Time;
+    }
+    var order = lands.OrderBy(x => x.Value).ToList();
+    var gaps = order.Zip(order.Skip(1), (a, b) => b.Value - a.Value).ToList();
+    var holds = log.Count(l => l.Contains("holding for spacing")); var orbits = log.Count(l => l.Contains("360")); var breaks = log.Count(l => l.Contains("breaking off"));
+    var vecs = log.Count(l => l.Contains("vectors for spacing")); var tromb = log.Where(l => l.Contains("base turn now")).ToList();
+    var gas = log.Count(l => l.Contains("going around"));
+    Console.WriteLine($"  {fl3.Count} spawned, {lands.Count} landed; gaps {string.Join(", ", gaps.Select(g => $"{g:0} s"))}; trombone moves {tromb.Count}, vectors {vecs}, holds {holds}, 360s {orbits}, break-offs {breaks}, go-arounds {gas}");
+    foreach (var l in tromb.Take(6)) Console.WriteLine("    " + l);
+    Check(fl3.Count == 3 && lands.Count == 3, "all three land");
+    Check(gaps.All(g => g >= 80) && gas == 0, "spaced at the runway (at least 80 s apart), no go-around");
+    Check(tromb.Count > 0 && holds == 0 && orbits == 0 && breaks == 0, "the downwind is extended for them: no hold, 360 or break-off");
+    Check(gaps.All(g => g <= 200), "and not spread out more than needed (under 200 s apart)");
+}
+
 Console.WriteLine("== Winds aloft: the FD forecast read, and the user's own sim wind is the reference near them (17 Nov)");
 {
     var fd = string.Join("\n", new[]
