@@ -3528,10 +3528,11 @@ public sealed partial class TrafficWorld
     /// they join the final — a different place for each flight, within the middle half of the real spread — the base
     /// turn, the downwind's distance and the intercept angle), or the generic numbers until the airport is learned.
     /// </summary>
-    private VectorShape ShapeFor(RunwayEnd rwy)
+    private VectorShape ShapeFor(RunwayEnd rwy, double? fixedJoin = null)
     {
-        if (Learned?.Arrivals.TryGetValue(rwy.Ident, out var a) != true || a!.Count < 5 || double.IsNaN(a.JoinP50)) return VectorShape.Default;
-        var join = Math.Clamp(a.JoinP25 + (a.JoinP75 - a.JoinP25) * Rng.NextDouble(), 6, 16);
+        if (Learned?.Arrivals.TryGetValue(rwy.Ident, out var a) != true || a!.Count < 5 || double.IsNaN(a.JoinP50))
+            return fixedJoin is { } fj0 ? VectorShape.Default with { JoinNm = fj0, BaseNm = Math.Max(VectorShape.Default.BaseNm, fj0 + 2) } : VectorShape.Default;
+        var join = fixedJoin ?? Math.Clamp(a.JoinP25 + (a.JoinP75 - a.JoinP25) * Rng.NextDouble(), 6, 16);
         var bas = double.IsNaN(a.BaseNm) ? join + 3 : Math.Clamp(a.BaseNm, join + 1.5, join + 10);
         var dw = double.IsNaN(a.DownwindNm) ? double.NaN : Math.Clamp(a.DownwindNm, 2, 10);
         var icpt = double.IsNaN(a.InterceptDeg) ? 28 : Math.Clamp(a.InterceptDeg, 15, 45);

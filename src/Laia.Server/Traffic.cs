@@ -1200,6 +1200,9 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                             w.UserCallsign = plan?.Callsign is { Length: > 0 } pc ? pc : (sim.AtcAirline + " " + sim.AtcFlightNumber).Trim() is { Length: > 0 } ac ? ac : sim.AtcId;
                             w.UserType = plan?.Aircraft ?? "";
                             w.UserDestination = plan?.Destination;
+                            w.UserStar = plan?.Star;
+                            w.UserStarFrom = plan?.Star is { Length: > 0 } pst && plan.Route.Split(' ', StringSplitOptions.RemoveEmptyEntries) is { Length: > 1 } toks
+                                && Array.FindLastIndex(toks, x => x.Equals(pst, StringComparison.OrdinalIgnoreCase)) is > 0 and var si ? toks[si - 1] : null;
                         }
                         if (w == _world || w == _ahead || _neighbours.Contains(w))
                         {
