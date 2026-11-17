@@ -208,6 +208,9 @@ Console.WriteLine("== One hour of busy traffic, runway 27 in use (wind 270/12)")
     Check(landings >= 6, $"arrivals land ({landings})");
     Check(parkedArrivals >= 3, $"arrivals taxi to gates ({parkedArrivals})");
     Check(goArounds <= 2, $"few go-arounds ({goArounds})");
+    var luawGoArounds = log.Count(l => l.Contains("going around") && l.Contains("lined up"));
+    Console.WriteLine($"  long waits lined up: {log.Count(l => l.Contains(": lined up on "))}");
+    Check(luawGoArounds == 0, $"no arrival goes around for a departure lined up on the runway (CYYZ, 17 Nov) ({luawGoArounds})");
     Check(!log.Any(l => l.Contains("not stable")), "every arrival is stable by 1,000 ft (AIM 5-4)");
     Check(slowFar == 0, $"no jet slowed below 210 kt beyond 20 miles (7110.65 5-7-3) ({slowFar})");
     Check(slowNear == 0, $"no jet slowed below 170 kt between 5 and 20 miles (7110.65 5-7-3) ({slowNear})");

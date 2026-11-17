@@ -121,6 +121,8 @@ public sealed class Flight
     public double UserCeiling = double.NaN;
     /// <summary>Waiting at the runway for a release (an arrival being vectored across the way out); since when.</summary>
     public double ReleaseWaitSince = double.NaN;
+    /// <summary>A long wait lined up on the runway has been logged (with why).</summary>
+    public bool LinedUpWaitLogged;
     public string? ReleaseWaitFor;
     /// <summary>Held at the gate for its departure slot since (world time; NaN: not held), and whether that's over.</summary>
     public double GateHeldSince = double.NaN;
@@ -409,7 +411,7 @@ public sealed partial class TrafficWorld
         if (RealConfig(usable) is { } rc)
         {
             var differs = !ArrRwys.SequenceEqual(rc.arr) || !DepRwys.SequenceEqual(rc.dep);
-            if (differs && ArrRwys.Count > 0 && rc.why.StartsWith("from live traffic"))
+            if (differs && ArrRwys.Count > 0 && rc.why.Contains("live traffic"))
             {
                 // Live traffic flickers between configurations (CYYC, 13 Nov: 17R → 17R+17L → 17L → 17L+17R in 4 minutes,
                 // as the last few arrivals happened to use one or the other). A change from it must be seen for 10
@@ -492,13 +494,6 @@ public sealed partial class TrafficWorld
     {
         List<RunwayEnd> Map(IEnumerable<string> ids) => ids.Select(id => usable.FirstOrDefault(e => e.Ident == id)).Where(e => e is not null).Select(e => e!).Distinct().ToList();
         var la = Map(LiveLanding); var ld = Map(LiveDeparting);
-        if (la.Count > 0 || ld.Count > 0)
-        {
-            if (la.Count == 0) la = ld.Take(1).ToList();
-            if (ld.Count == 0) ld = la.ToList();
-            return (la, ld, "from live traffic, adsb.lol");
-        }
-        if (Learned is null) return null;
         bool Ok(RunwayEnd e) => Wind.Kt < 4 || (Wind.Headwind(e.Heading) >= -10 && Crosswind(e.Heading) <= 25);
         List<RunwayEnd> Top(IEnumerable<(string id, int n)> counts)
         {
@@ -508,6 +503,26 @@ public sealed partial class TrafficWorld
             var top = c[0];
             return c.Where(x => x.e == top.e || (x.n * 4 >= top.n && Math.Abs(Geo2.Diff(x.e!.Heading, top.e!.Heading)) < 30)).Select(x => x.e!).ToList();
         }
+        if (la.Count > 0 || ld.Count > 0)
+        {
+            if (la.Count == 0) la = ld.Take(1).ToList();
+            var why = "from live traffic, adsb.lol";
+            if (ld.Count == 0)
+            {
+                // Live traffic shows the landings only: departures off the runways the learned days departed from the
+                // same way round, not on top of the landings (CYYZ, 17 Nov: landing and departing 24R at Busy, while
+                // real traffic departs 23 — go-arounds, vectors and holds followed).
+                if (Learned is not null)
+                {
+                    var lv = Top(Learned.Departures.Select(kv => (kv.Key, kv.Value.Count)))
+                        .Where(d => la.Any(a => Math.Abs(Geo2.Diff(a.Heading, d.Heading)) < 60)).ToList();
+                    if (lv.Count > 0) { ld = lv; why = "landing from live traffic (adsb.lol), departing as the learned days did"; }
+                }
+                if (ld.Count == 0) ld = la.ToList();
+            }
+            return (la, ld, why);
+        }
+        if (Learned is null) return null;
         var arr = Top(Learned.Arrivals.Select(kv => (kv.Key, kv.Value.Count)));
         var dep = Top(Learned.Departures.Select(kv => (kv.Key, kv.Value.Count)));
         if (arr.Count == 0) return null;
@@ -1918,7 +1933,16 @@ public sealed partial class TrafficWorld
     {
         var l = f.Rwy is null ? null : _lastDep.GetValueOrDefault(f.Rwy.Runway);
         if (l is null || l.Done || l.Rwy is null || f.Rwy is null || l.Rwy.Runway != f.Rwy.Runway) return 0;
-        if (l.OnGround) return 30;                                      // still rolling
+        if (l.OnGround)
+        {
+            // Still rolling: the time until it lifts off, then the wake time behind it from then (CYYZ, 17 Nov: WJA669
+            // lined up behind ITY651's roll counting 30 s, waited the heavy's 2 minutes on the runway, and WJA660 had
+            // to go around).
+            var acc = Math.Max(0.5, l.P.RollAccel * 0.5144);
+            var vLift = (l.P.Vr + 7) * 0.5144;
+            var toLift = Math.Max(0, (vLift - l.Gs * 0.5144) / acc) + (l.Phase == "takeoff roll" ? 0 : 10);
+            return Math.Max(30, toLift + Cwt.DepartureSeconds(l.Wake, f.Wake));
+        }
         var since = Time - l.LiftoffTime;
         var wake = Cwt.DepartureSeconds(l.Wake, f.Wake) - since;
         if (double.IsNaN(f.DepCourse)) PlanDeparture(f);
@@ -4139,6 +4163,21 @@ public sealed partial class TrafficWorld
                 f.Lights = Nav | Beacon | Logo | Taxi | Strobes | Landing;
                 f.Timer -= dt;
                 if (f.Timer <= 0 && (f.Test || TakeoffAllowed(f))) StartTakeoff(f);
+                else if (f.Timer <= 0 && Time - f.PhaseTime > 45 && !f.LinedUpWaitLogged)
+                {
+                    f.LinedUpWaitLogged = true;
+                    var r = f.Rwy!.Runway;
+                    var why = new List<string>();
+                    if (UserOnRunway(r)) why.Add("you're on the runway");
+                    foreach (var o in Flights.Where(o => o != f && !o.Done && (o.Reserve == r || (o.OnRunway == r && !(o.Kind == "departure" && !o.OnGround)))))
+                        why.Add($"{o.Callsign} on the runway ({o.Phase})");
+                    var eta = ArrivalEta(r);
+                    if (eta < TimeToClearForArrival(f) + 5) why.Add($"the next arrival {eta:0} s out (needs {TimeToClearForArrival(f) + 5:0})");
+                    if (!CrossingRunwayClearForTakeoff(f)) why.Add("traffic on a crossing runway");
+                    var wk = WakeRemaining(f);
+                    if (wk > 0) why.Add($"wake/spacing behind {_lastDep.GetValueOrDefault(r)?.Callsign} ({wk:0} s more)");
+                    Log($"{f.Callsign}: lined up on {f.Rwy.Ident} for {Time - f.PhaseTime:0} s, waiting: {(why.Count > 0 ? string.Join("; ", why) : "nothing found")}");
+                }
                 break;
             case "takeoff roll":
                 f.Lights = Nav | Beacon | Logo | Strobes | Landing;
