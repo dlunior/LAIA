@@ -9,7 +9,7 @@ namespace Laia.Server;
 /// Without a layout (or for the test buttons at an airport not read yet) a simple runway-only world is used.
 /// </summary>
 public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportStore airports, FlightSource source, SettingsStore settings,
-    SimBriefService simbrief, ServerState state, ScheduleStore schedules, NetworkStore network, WorldAirports worldAirports, RoutesDb routesDb, NasrDb nasrDb, AdsbHistory history, MetarReader metar, LiveRunways liveRunways, SimBriefService simBrief, PerfMonitor perf, ILogger<TrafficEngine> log) : BackgroundService
+    SimBriefService simbrief, ServerState state, ScheduleStore schedules, NetworkStore network, WorldAirports worldAirports, RoutesDb routesDb, NasrDb nasrDb, AdsbHistory history, MetarReader metar, WindsAloftReader winds, LiveRunways liveRunways, SimBriefService simBrief, PerfMonitor perf, ILogger<TrafficEngine> log) : BackgroundService
 {
     private readonly object _gate = new();
     private readonly List<TrafficWorld> _neighbours = new();
@@ -383,6 +383,34 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         if (_netDrawnRegs.Count > 300) _netDrawnRegs.Clear();
         SeparateEnRoute(sim, res);
         return res;
+    }
+
+    private double _windsAt = -99, _windsLogAt = -9999;
+
+    /// <summary>
+    /// The wind MSFS gives the user goes into the winds-aloft field as they fly, and every 15 s each airport's traffic
+    /// gets the wind at every level over it (user, 17 Nov: LAIA's aircraft and the user in the same air, so the same
+    /// airspeed gives the same ground speed).
+    /// </summary>
+    private void UpdateWinds(AircraftState sim, double now)
+    {
+        var field = winds.Field;
+        var sfc = _world?.Wind ?? new Wind(sim.WindDirection, sim.WindSpeed);
+        var sfcElev = _world?.Apt.ElevationFt ?? Math.Max(0, sim.AltitudeFt - sim.AglFt);
+        field.AddUserSample(DateTime.UtcNow, sim.Lat, sim.Lon, sim.AltitudeFt, sim.WindDirection, sim.WindSpeed, sfc, sfcElev);
+        if (now - _windsAt < 15) return;
+        _windsAt = now;
+        var known = field.StationCount > 0 || field.SampleCount > 0;
+        foreach (var w in Worlds().ToList())
+            w.Aloft = known ? field.Profile(DateTime.UtcNow, w.Apt.Data.Lat, w.Apt.Data.Lon, w.Wind, w.Apt.ElevationFt) : null;
+        if (now - _windsLogAt > 1800 && _world is { Aloft: { } a } mw)
+        {
+            _windsLogAt = now;
+            string At(double ft) { var x = WindsAloft.FromProfile(a, ft); return $"{ft / 1000:0}k {x.FromDeg:000}/{x.Kt:0}"; }
+            log.LogInformation("Winds aloft over {icao}: {w} (surface {sd:000}/{sk:0}; {what}); you: {ud:000}/{uk:0} at {ua:N0} ft",
+                mw.Apt.Icao, string.Join(", ", new[] { 3000.0, 6000, 10000, 18000, 24000, 34000, 39000 }.Select(At)), mw.Wind.FromDeg, mw.Wind.Kt,
+                field.Describe(DateTime.UtcNow), sim.WindDirection, sim.WindSpeed, sim.AltitudeFt);
+        }
     }
 
     private readonly EnRouteSeparation _sep = new();
@@ -1151,6 +1179,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                     if (now - _othersAt > 1) { _othersAt = now; ShareTraffic(); Part("sharing between airports"); }
                     if (live) UpdateFlCorrection(sim!);
                     if (live && now - _enrouteAt > 2) { _enrouteAt = now; _enroute = EnRoute(sim!); Part("en route"); }
+                    if (live) UpdateWinds(sim!, now);
                     foreach (var w in Worlds().ToList())
                     {
                         partSw.Restart();

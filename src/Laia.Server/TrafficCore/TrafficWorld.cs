@@ -179,7 +179,17 @@ public sealed partial class TrafficWorld
     public Action<string> Log { get; set; } = _ => { };
     public List<Flight> Flights { get; } = new();
     public double Time { get; private set; }
+    /// <summary>The surface wind (the METAR): it picks the runways and is used on the ground.</summary>
     public Wind Wind { get; set; }
+    /// <summary>
+    /// The wind every 500 ft from 0 to 45,000 ft MSL here (WindsAloft: the user's own sim wind where they've flown,
+    /// the winds-aloft forecast elsewhere), so LAIA's aircraft fly in the same air as the user — at the same airspeed
+    /// they have the same ground speed (user, 17 Nov). Null: the surface wind at every level.
+    /// </summary>
+    public Wind[]? Aloft { get; set; }
+
+    /// <summary>The wind at an altitude (feet MSL).</summary>
+    public Wind WindAt(double altFt) => Aloft is { Length: > 1 } a ? WindsAloft.FromProfile(a, altFt) : Wind;
     /// <summary>The traffic level. Changing it re-picks the runways (a busy airport may use a second, crossing runway).</summary>
     public TrafficLevel Level
     {
@@ -3643,7 +3653,14 @@ public sealed partial class TrafficWorld
             if (f.WentAround) v = Math.Min(v, 200);
             var alt = Profile(f.Rwy!, d);
             if (f.CruiseFt > 0) alt = Math.Min(alt, f.CruiseFt);
-            var gs = Wind.Tas(v, alt) - (d < 15 ? hw : hw * 0.5);
+            double gs;
+            if (Aloft is not null && f.Path is { } fp && f.Rwy is not null)
+            {
+                // In the wind at the altitude it'll be there, along the way it'll be going there.
+                var dir = d < 0.3 ? f.Rwy.Heading : fp.At(Math.Clamp(f.ThrS - d * Geo2.MPerNm, 0, fp.Length)).dir;
+                gs = WindAt(alt).Solve(dir, Wind.Tas(v, alt)).groundSpeed;
+            }
+            else gs = Wind.Tas(v, alt) - (d < 15 ? hw : hw * 0.5);
             t += Math.Min(step, d) / Math.Max(60, gs) * 3600;
         }
         while (marks is not null && mk < marks.Length) { at![mk] = t; mk++; }
@@ -3669,7 +3686,7 @@ public sealed partial class TrafficWorld
 
     private double ThresholdGapNeeded(Flight leader, Flight f, bool forDepartures = true)
     {
-        var gs = Math.Max(90, f.P.Vapp - Wind.Headwind(f.Rwy!.Heading));
+        var gs = Math.Max(90, f.P.Vapp - WindAt(f.Rwy!.ElevationFt + 1000).Headwind(f.Rwy.Heading));
         var wake = Cwt.MilesBehind(leader.Wake, f.Wake) / gs * 3600;
         var occupancy = Math.Max(RunwayOccupancy(f.Rwy!, leader.P), _rotSeen.GetValueOrDefault(f.Rwy!)) + 10;
         var deps = DepRwys.Count > 0 ? DepRwys : DepRwy is null ? new List<RunwayEnd>() : new() { DepRwy };
@@ -5119,11 +5136,12 @@ public sealed partial class TrafficWorld
     private void MoveAir(Flight f, double dt)
     {
         var tas = Wind.Tas(f.Ias, f.AltFt);
+        var air = f.OnGround || f.Phase == "takeoff roll" ? Wind : WindAt(f.AltFt);
         var (_, dir0, _) = f.Path!.At(f.S);
-        var (_, gs0) = Wind.Solve(dir0, tas);
+        var (_, gs0) = air.Solve(dir0, tas);
         f.S += gs0 * Kt * dt;
         var (p, dir, k) = f.Path.At(f.S);
-        var (hdg, gs) = Wind.Solve(dir, tas);
+        var (hdg, gs) = air.Solve(dir, tas);
         f.Pos = p;
         f.Heading = f.OnGround || f.Phase == "takeoff roll" ? dir : hdg;
         f.Gs = gs;

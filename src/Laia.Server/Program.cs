@@ -36,6 +36,8 @@ builder.Services.AddHostedService<RoutesUpdater>();
 builder.Services.AddSingleton<NasrDb>();
 builder.Services.AddSingleton<AdsbHistory>();
 builder.Services.AddSingleton<MetarReader>();
+builder.Services.AddSingleton<WindsAloftReader>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<WindsAloftReader>());
 builder.Services.AddSingleton<LiveRunways>();
 builder.Services.AddHostedService<NasrUpdater>();
 builder.Services.AddSingleton<FlightSource>();

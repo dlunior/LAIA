@@ -849,6 +849,90 @@ Console.WriteLine("== Airport rules read from the FAA's AAUP text (any airport, 
     }
 }
 
+Console.WriteLine("== Winds aloft: the FD forecast read, and the user's own sim wind is the reference near them (17 Nov)");
+{
+    var fd = string.Join("\n", new[]
+    {
+        "000", "FBUS31 KWNO 171359", "FD1US1", "DATA BASED ON 171200Z", "VALID 171800Z   FOR USE 1400-2100Z. TEMPS NEG ABV 24000", "",
+        "FT  3000    6000    9000   12000   18000   24000  30000  34000  39000",
+        "ABI      2523+11 2622+06 2523+00 2533-14 2546-27 255042 255452 256062",
+        "BHM 3010 2711+10 2717+05 2725+00 2747-12 2766-24 279739 790846 780950",
+        "DEN" + new string(' ', 14) + "2715+02 2826-04 2846-16 2864-28 760041 761151 760761",
+        "MIA 9900 0505+20 0610+15 0715+10 0820-05 0925-17 103033 103543 104055",
+    });
+    var st = WindsAloft.ParseFd(fd);
+    var bhm = st.FirstOrDefault(x => x.id == "BHM").winds; var den = st.FirstOrDefault(x => x.id == "DEN").winds; var abi = st.FirstOrDefault(x => x.id == "ABI").winds;
+    var mia = st.FirstOrDefault(x => x.id == "MIA").winds;
+    string W(V2? v) => v is { } x ? $"{WindsAloft.ToWind(x).FromDeg:000}/{WindsAloft.ToWind(x).Kt:0}" : "-";
+    Console.WriteLine($"  {st.Count} stations; BHM 3k {W(bhm?[0])} 39k {W(bhm?[8])}; DEN 3k {W(den?[0])} 9k {W(den?[2])}; ABI 3k {W(abi?[0])} 6k {W(abi?[1])}; MIA 3k {W(mia?[0])}");
+    Check(st.Count == 4, "four stations read (header lines skipped)");
+    bool Is(V2? v, double dir, double kt) => v is { } x && Math.Abs(Geo2.Diff(WindsAloft.ToWind(x).FromDeg, dir)) < 0.5 && Math.Abs(x.Length - kt) < 0.5;
+    Check(Is(bhm?[0], 300, 10) && Is(bhm?[8], 280, 109) && Is(bhm?[7], 290, 108), "direction and speed decoded, 100 kt and over too (780950 = 280° at 109 kt)");
+    Check(den?[0] is null && den?[1] is null && Is(den?[2], 270, 15) && abi?[0] is null && Is(abi?[1], 250, 23), "levels below the station are blank");
+    Check(mia?[0] is { } m0 && m0.Length < 0.5, "9900 is light and variable");
+
+    var field = new WindsAloft();
+    field.SetForecast(new[] { new WindsAloft.Station("BHM", 33.56, -86.75, 650, bhm!) }, DateTime.UtcNow);
+    var sfc = new Wind(180, 10);
+    var now = DateTime.UtcNow;
+    var at21 = field.At(now, 33.56, -86.75, 21000, sfc, 650);
+    var at1 = field.At(now, 33.56, -86.75, 650, sfc, 650);
+    var at18 = field.At(now, 33.56, -86.75, 1800, sfc, 650);
+    Console.WriteLine($"  over BHM: 21,000 ft {at21.FromDeg:000}/{at21.Kt:0.0}; surface {at1.FromDeg:000}/{at1.Kt:0}; 1,800 ft {at18.FromDeg:000}/{at18.Kt:0}");
+    Check(Math.Abs(at21.FromDeg - 270) < 1 && Math.Abs(at21.Kt - 56.5) < 1, "between levels: interpolated (270° at 47 and 66 kt → 56)");
+    Check(Math.Abs(at1.FromDeg - 180) < 1 && Math.Abs(at1.Kt - 10) < 0.5, "at the ground: the surface wind");
+    // The user at FL340 over BHM finds 300° at 80 kt (the forecast said 290° at 108).
+    field.AddUserSample(now, 33.56, -86.75, 34000, 300, 80, sfc, 650);
+    var here = field.At(now, 33.56, -86.75, 34000, sfc, 650);
+    var far = field.At(now, 33.56 + 5, -86.75, 34000, sfc, 650);   // 300 nm north
+    var low = field.At(now, 33.56, -86.75, 18000, sfc, 650);
+    Console.WriteLine($"  after the user's reading: here {here.FromDeg:000}/{here.Kt:0}; 300 nm away {far.FromDeg:000}/{far.Kt:0}; here at 18,000 ft {low.FromDeg:000}/{low.Kt:0}");
+    Check(Math.Abs(Geo2.Diff(here.FromDeg, 300)) < 2 && Math.Abs(here.Kt - 80) < 3, "where the user is, LAIA's aircraft get the user's wind");
+    Check(Math.Abs(far.Kt - 108) < 15 && Math.Abs(Geo2.Diff(far.FromDeg, 290)) < 5, "far away, mostly the forecast");
+    Check(Math.Abs(low.Kt - 47) < 3, "far below the user's level, the forecast for that level");
+    var prof = field.Profile(now, 33.56, -86.75, sfc, 650);
+    var p34 = WindsAloft.FromProfile(prof, 34000);
+    Check(prof.Length == WindsAloft.ProfileSteps && Math.Abs(p34.Kt - here.Kt) < 1, "an airport's profile matches the field");
+    var none = new WindsAloft().At(now, 40, -100, 30000, sfc, 0);
+    Check(none.FromDeg == 180 && none.Kt == 10, "with no forecast and no readings: the surface wind (as before)");
+}
+
+Console.WriteLine("== Winds aloft: arrivals spaced and timed right in strong winds at altitude (tailwind, then headwind)");
+foreach (var (aloftFrom, label) in new[] { (90.0, "tailwind"), (270.0, "headwind") })
+{
+    var data = TestAirport.Build(false);
+    var world = new TrafficWorld(new AirportModel(data), new TestSource(), seed: 11) { Automatic = false, Wind = new Wind(270, 10) };
+    var log = new List<string>(); world.Log = s2 => log.Add(s2);
+    var winds = new V2?[WindsAloft.Levels.Length];
+    for (var k = 0; k < winds.Length; k++) winds[k] = WindsAloft.FromWind(aloftFrom, 40 + 10 * k);   // 40 kt at 3,000 ft … 120 kt at 39,000
+    var field = new WindsAloft();
+    field.SetForecast(new[] { new WindsAloft.Station("TST", data.Lat, data.Lon, 0, winds) }, DateTime.UtcNow);
+    world.Aloft = field.Profile(DateTime.UtcNow, data.Lat, data.Lon, world.Wind, world.Apt.ElevationFt);
+    world.SelectRunways(true);
+    Laia.Common.Airports.ScheduleLeg L(string reg, string fl) => new() { Airline = "DAL", Operator = "DAL", Type = "A321", Reg = reg, Flight = fl, Dep = "KXXX", Arr = "TEST" };
+    var a = world.SpawnArrival(30, false, L("N1", "11"))!;
+    var b = world.SpawnArrival(36, false, L("N2", "22"))!;
+    double landA = -1, landB = -1; var holds = 0; var hA = a.LastHold; var hB = b.LastHold;
+    double gsAt5k = double.NaN, iasAt5k = double.NaN, trkAt5k = double.NaN, altAt5k = double.NaN;
+    for (var t = 0.0; t < 3600 && (landA < 0 || landB < 0); t += 0.5)
+    {
+        world.Step(0.5);
+        if (a.LastHold != hA || b.LastHold != hB) { holds++; hA = a.LastHold; hB = b.LastHold; }
+        if (double.IsNaN(gsAt5k) && !a.OnGround && a.AltFt < 5000 && a.AltFt > 4000) { gsAt5k = a.Gs; iasAt5k = a.Ias; trkAt5k = a.Path!.At(a.S).dir; altAt5k = a.AltFt; }
+        if (landA < 0 && a.OnGround) landA = world.Time;
+        if (landB < 0 && b.OnGround) landB = world.Time;
+    }
+    var errs = log.Where(x => x.Contains("landing time as predicted"))
+        .SelectMany(x => System.Text.RegularExpressions.Regex.Matches(x, @"(\d+) min out ([+-]\d+) s").Select(m => (min: int.Parse(m.Groups[1].Value), s: int.Parse(m.Groups[2].Value)))).ToList();
+    Console.WriteLine($"  {label} aloft: DAL11 at about 4,500 ft {iasAt5k:0} kt indicated, {gsAt5k:0} kt over the ground; landed {Math.Abs(landB - landA):0} s apart; holds {holds}; predictions {string.Join(", ", errs.Select(e => $"{e.min} min {e.s:+0;-0} s"))}");
+    var expect = double.IsNaN(gsAt5k) ? double.NaN : world.WindAt(altAt5k).Solve(trkAt5k, Wind.Tas(iasAt5k, altAt5k)).groundSpeed;
+    var still = double.IsNaN(gsAt5k) ? double.NaN : Wind.Tas(iasAt5k, altAt5k);
+    Console.WriteLine($"    expected {expect:0} kt with the wind at that height (no wind: {still:0})");
+    Check(!double.IsNaN(gsAt5k) && Math.Abs(gsAt5k - expect) < 3 && Math.Abs(world.WindAt(altAt5k).Kt - world.Wind.Kt) > 20, $"{label}: ground speed is the airspeed plus the wind at that height, not the surface wind");
+    Check(landA > 0 && landB > 0 && Math.Abs(landB - landA) >= 60 && holds == 0 && !a.WentAround && !b.WentAround, $"{label}: both land, properly spaced, with no hold and no go-around");
+    Check(errs.Count > 0 && errs.All(e => Math.Abs(e.s) <= 30), $"{label}: landing times predicted within 30 s (the wind at each height is in the prediction)");
+}
+
 Console.WriteLine("== Whole sky: a padded schedule doesn't make a jet crawl (UAL2458, 17 Nov)");
 {
     // About 380 nm (Houston–Dallas-ish is shorter; this is IAH–MEM-like) with a padded 150-minute block.
