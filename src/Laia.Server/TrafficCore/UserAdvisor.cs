@@ -1,3 +1,5 @@
+using Laia.Common.Airports;
+
 namespace Laia.Server.TrafficCore;
 
 /// <summary>A notice for the user in Smart traffic mode: never an instruction, only something that matters now.</summary>
@@ -26,6 +28,9 @@ public sealed partial class TrafficWorld
     public string UserType { get; set; } = "";
     /// <summary>Where the user's flight plan goes (SimBrief), if known.</summary>
     public string? UserDestination { get; set; }
+    /// <summary>The user's filed STAR (SimBrief) and the fix their route joins it at.</summary>
+    public string? UserStar { get; set; }
+    public string? UserStarFrom { get; set; }
 
     /// <summary>The user as a member of the arrival sequence (never drawn, never moved by LAIA), or null.</summary>
     public Flight? UserArr { get; private set; }
@@ -64,8 +69,68 @@ public sealed partial class TrafficWorld
         var along = r.Along(u); var off = Math.Abs(r.Offset(u));
         if (along < 0 && along > -15 * Geo2.MPerNm && off < 1.0 * Geo2.MPerNm && Math.Abs(Geo2.Diff(UserTrack, r.Heading)) < 30)
             return -along / Geo2.MPerNm;
-        var join = r.Threshold - r.Dir * (9 * Geo2.MPerNm);
-        return (u - join).Length / Geo2.MPerNm + 9;
+        var routed = UserRouteNm(r, u);
+        if (!double.IsNaN(routed)) return routed;
+        var join = r.Threshold - r.Dir * (11 * Geo2.MPerNm);
+        return (u - join).Length / Geo2.MPerNm + 11;
+    }
+
+    private readonly Dictionary<RunwayEnd, (double at, double nm)> _userRoute = new();
+
+    /// <summary>
+    /// The user's flying miles to the runway (user, 17 Nov: "Can LAIA calculate flying miles rather than distance
+    /// plane to plane?"): along the rest of their filed STAR from where they are (to about 8 nm from the airport, where
+    /// controllers turn traffic off it), then the airport's own downwind and base onto a 10–12 mile final (11 nm) and
+    /// down the final — not a straight line to the final. Worked out every 10 s. NaN when it can't be.
+    /// </summary>
+    private double UserRouteNm(RunwayEnd r, V2 u)
+    {
+        if (_userRoute.TryGetValue(r, out var c) && Time - c.at < 10) return c.nm;
+        double nmOut;
+        try { nmOut = RouteNm(r, u); } catch { nmOut = double.NaN; }
+        _userRoute[r] = (Time, nmOut);
+        return nmOut;
+    }
+
+    private double RouteNm(RunwayEnd r, V2 u)
+    {
+        var nm = Geo2.MPerNm;
+        var pts = new List<V2> { u };
+        if (UserStar is { Length: > 0 } sn
+            && Apt.Data.Arrivals.FirstOrDefault(a => a.Name.Equals(sn, StringComparison.OrdinalIgnoreCase))
+               ?? Apt.Data.Arrivals.FirstOrDefault(a => AirportRules.Base(a.Name) == AirportRules.Base(sn)) is { } star)
+        {
+            var legs = new List<ProcedureLeg>();
+            if (UserStarFrom is { Length: > 0 } fr && star.EnrouteTransitions.FirstOrDefault(t => t.Name.Equals(fr, StringComparison.OrdinalIgnoreCase)) is { } tr) legs.AddRange(tr.Legs);
+            legs.AddRange(star.Legs);
+            if (star.RunwayTransitions.FirstOrDefault(t => t.Name == r.Ident) is { } rt) legs.AddRange(rt.Legs);
+            var sp = Apt.LegsToPoints(legs, u, Math.Max(UserAltFt, 3000), out _).Select(p => p.P).ToList();
+            // From the first fix still ahead of the user (not behind them on the way in, nor one to turn back to).
+            bool Ahead(int k)
+            {
+                var p = sp[k];
+                if (p.Length > u.Length + 5 * nm) return false;
+                var to = p - u;
+                if (to.Length < 2 * nm) return k + 1 >= sp.Count;
+                if (Math.Abs(Geo2.Diff(to.Bearing, (new V2(0, 0) - u).Bearing)) > 90) return false;
+                if (k + 1 >= sp.Count) return true;
+                var outb = sp[k + 1] - p;
+                return outb.Length < 1 || Math.Abs(Geo2.Diff(to.Bearing, outb.Bearing)) <= 90;
+            }
+            var k0 = Enumerable.Range(0, sp.Count).FirstOrDefault(Ahead, -1);
+            if (k0 >= 0)
+            {
+                sp = sp.Skip(k0).ToList();
+                var near = sp.FindIndex(p => p.Length < 8 * nm);
+                if (near >= 0) sp = sp.Take(near).ToList();
+                pts.AddRange(sp);
+            }
+        }
+        pts.AddRange(Vectors(pts[^1], r, ShapeFor(r, fixedJoin: 11)));
+        double len = 0;
+        for (var i = 1; i < pts.Count; i++) len += (pts[i] - pts[i - 1]).Length;
+        len += (pts[^1] - r.Threshold).Length;
+        return len / nm;
     }
 
     /// <summary>
