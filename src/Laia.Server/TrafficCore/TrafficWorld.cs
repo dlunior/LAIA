@@ -3935,7 +3935,14 @@ public sealed partial class TrafficWorld
                     f.HoldNode = hold; f.EntryNode = entry; f.StartNode = -1;
                     if (StartTaxiOut(f)) dep++;
                 }
-                else dep++;
+                else
+                {
+                    // Still at the gate or pushing back: its hold line moves to the new runway too (it would otherwise
+                    // taxi to the old one and roll from there).
+                    var hold = PickRunwayEntry(r, out var entry, f.Pos);
+                    if (hold >= 0) { f.HoldNode = hold; f.EntryNode = entry; }
+                    dep++;
+                }
             }
         }
         Log($"Runway change at {Apt.Icao}: landing {string.Join(", ", ArrRwys.Select(e => e.Ident))}, departing {string.Join(", ", DepRwys.Select(e => e.Ident))} — {arr} arrival{(arr == 1 ? "" : "s")} and {dep} departure{(dep == 1 ? "" : "s")} given the new runways; arrivals within 25 nm finish on their runway");
@@ -4168,6 +4175,18 @@ public sealed partial class TrafficWorld
                 break;
             case "holding short":
                 f.Lights = Nav | Beacon | Logo | Taxi;
+                if (f.EntryNode >= 0 && f.Rwy is { } hr && hr.Along(Apt.Nodes[f.EntryNode]) > hr.LengthM * 0.5)
+                {
+                    // Holding short near the far end of its runway (the runway changed under it): taxi to the right end.
+                    var hold = PickRunwayEntry(hr, out var entry, f.Pos);
+                    if (hold >= 0 && hold != f.HoldNode)
+                    {
+                        f.HoldNode = hold; f.EntryNode = entry; f.StartNode = -1;
+                        Log($"{f.Callsign}: at the far end of runway {hr.Ident}, taxiing to its departure end");
+                        StartTaxiOut(f);
+                        break;
+                    }
+                }
                 if (LineUpAllowed(f)) StartLineUp(f);
                 break;
             case "lining up":
