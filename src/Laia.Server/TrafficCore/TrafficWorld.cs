@@ -3924,6 +3924,10 @@ public sealed partial class TrafficWorld
         var maxNm = 25.0;
         var wantNm = baseNm + addSec * gs / 2 / nm;
         var newNm = Math.Clamp(wantNm, minNm, maxNm);
+        // Never pushed out when it isn't short: an aircraft already near its base turn turns there (it would otherwise
+        // ride the "1 nm ahead" limit down an endless downwind).
+        if (addSec <= 0 && newNm > baseNm) newNm = baseNm;
+        if (addSec > 0 && newNm < baseNm) newNm = baseNm;
         if (Math.Abs(newNm - baseNm) < 0.3) return Math.Abs(wantNm - newNm) * 2 * nm / gs * Math.Sign(addSec);
         var left = new V2(-rwy.Dir.Y, rwy.Dir.X);
         var thr = rwy.Threshold;
