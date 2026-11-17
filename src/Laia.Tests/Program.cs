@@ -885,7 +885,7 @@ Console.WriteLine("== Airport rules read from the FAA's AAUP text (any airport, 
     }
 }
 
-Console.WriteLine("== The trombone: arrivals bunched on the downwind are spaced by moving their base turns — no holds, no 360s (CYYZ, 17 Nov)");
+Console.WriteLine("== The trombone: arrivals 3.5 nm apart on the downwind are spaced by moving their base turns — no holds, no 360s (CYYZ, 17 Nov)");
 {
     var data = TestAirport.Build(false);
     var world = new TrafficWorld(new AirportModel(data), new TestSource(), seed: 5) { Automatic = false, Wind = new Wind(270, 10) };
@@ -896,7 +896,7 @@ Console.WriteLine("== The trombone: arrivals bunched on the downwind are spaced 
     var nm = Geo2.MPerNm;
     Laia.Common.Airports.ScheduleLeg L(string reg, string fl) => new() { Airline = "DAL", Operator = "DAL", Type = "A321", Reg = reg, Flight = fl, Dep = "KXXX", Arr = "TEST" };
     var fl3 = new List<Flight>();
-    foreach (var (k, along) in new[] { (1, 11.0), (2, 13.0), (3, 15.0) })
+    foreach (var (k, along) in new[] { (1, 11.0), (2, 14.5), (3, 18.0) })
     {
         var pos = rwy.Threshold + rwy.Dir * (along * nm) + left * (6 * nm);
         var f = world.SpawnArrival(30, false, L($"N{k}", $"{k}{k}"), entry: (pos, 7000, 7000));
