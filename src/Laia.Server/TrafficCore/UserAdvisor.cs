@@ -82,7 +82,19 @@ public sealed partial class TrafficWorld
         var gs = Math.Clamp(UserGs > 60 ? UserGs : 300, 180, 650);
         if (UserAltFt < 11000) gs = Math.Min(gs, 260);
         Leg(double.MaxValue, 100, gs); Leg(100, 40, Math.Min(gs, 330)); Leg(40, 20, Math.Min(gs, 260));
-        Leg(20, 12, Math.Min(gs, 210)); Leg(12, 6, Math.Min(gs, 180)); Leg(6, 0, vapp + 5);
+        // The user's own approach, as they fly it (user, 17 Nov): 210 kt indicated through the base turn onto a 10–12 mile
+        // final, 190 once established, 170 from 7.5 to 5 miles, the approach speed inside 5 — each turned into ground
+        // speed at its height in the wind there (the final's headwind; the base is across the wind, so no wind).
+        var rwy = UserArr?.Rwy ?? _expected;
+        var elev = rwy?.ElevationFt ?? Apt.ElevationFt;
+        double Final(double ias, double nmOut)
+        {
+            var alt = elev + nmOut * 318;   // a 3° path
+            var tas = Wind.Tas(ias, alt);
+            return rwy is null ? tas : tas - WindAt(alt).Headwind(rwy.Heading);
+        }
+        Leg(20, 11, Math.Min(gs, Wind.Tas(210, elev + 4000)));
+        Leg(11, 7.5, Final(190, 9.25)); Leg(7.5, 5, Final(170, 6.25)); Leg(5, 0, Final(vapp + 5, 2.5));
         return t;
     }
 
