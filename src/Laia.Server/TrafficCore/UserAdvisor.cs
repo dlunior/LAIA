@@ -91,7 +91,9 @@ public sealed partial class TrafficWorld
         {
             var alt = elev + nmOut * 318;   // a 3° path
             var tas = Wind.Tas(ias, alt);
-            return rwy is null ? tas : tas - WindAt(alt).Headwind(rwy.Heading);
+            var g = rwy is null ? tas : tas - WindAt(alt).Headwind(rwy.Heading);
+            // Never faster than they're flying now (a light aircraft at 110 kt doesn't do 190 on final).
+            return UserGs > 60 && nm > 5 ? Math.Min(g, Math.Max(UserGs, vapp + 5)) : g;
         }
         Leg(20, 11, Math.Min(gs, Wind.Tas(210, elev + 4000)));
         Leg(11, 7.5, Final(190, 9.25)); Leg(7.5, 5, Final(170, 6.25)); Leg(5, 0, Final(vapp + 5, 2.5));

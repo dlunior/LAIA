@@ -1437,12 +1437,15 @@ Console.WriteLine("== The user as traffic: departures level below the user, arri
     var spot = a.Path!.At(a.ThrS - 20 * nm).p;
     var userAlt = Math.Max(3000, (a.Rwy!.ElevationFt + 50 + 20 * 318.4) - 1500);
     w2.UserCallsign = "UAL1196"; w2.UserOnGround = false; w2.UserPos = spot; w2.UserAltFt = userAlt; w2.UserGs = 0; w2.UserTrack = 0;
-    double minDz = double.MaxValue;
+    double minDz = double.MaxValue; var minAt = "";
     for (var t = 0.0; t < 1200 && !a.OnGround && !a.Done; t += 0.5)
     {
         w2.Step(0.5);
-        if ((a.Pos - spot).Length < 3 * nm) minDz = Math.Min(minDz, Math.Abs(a.AltFt - userAlt));
+        if ((a.Pos - spot).Length < 3 * nm && Math.Abs(a.AltFt - userAlt) < minDz)
+        { minDz = Math.Abs(a.AltFt - userAlt); minAt = $"t {w2.Time:0} {a.Phase} {a.AltFt:0} ft, {(a.Pos - spot).Length / nm:0.0} nm from the user, {(a.ThrS - a.S) / nm:0.0} nm to go, seq {a.Seq}, user arriving {(w2.UserArr is not null)}"; }
     }
+    Console.WriteLine($"  closest: {minAt}");
+    foreach (var x in log2.Where(x => x.Contains(a.Callsign)).Take(12)) Console.WriteLine("    " + x);
     foreach (var x in log2.Where(x => x.Contains("UAL1196")).Take(2)) Console.WriteLine("  " + x);
     Console.WriteLine($"  arrival over the user: closest {minDz:N0} ft vertically within 3 nm; {(a.OnGround ? "landed" : a.WentAround ? "went around" : "still flying")}");
     Check(minDz >= 900, "an arrival stays 1,000 ft above the user while near");
