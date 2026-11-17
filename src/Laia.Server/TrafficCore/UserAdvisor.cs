@@ -96,9 +96,10 @@ public sealed partial class TrafficWorld
     {
         var nm = Geo2.MPerNm;
         var pts = new List<V2> { u };
-        if (UserStar is { Length: > 0 } sn
-            && Apt.Data.Arrivals.FirstOrDefault(a => a.Name.Equals(sn, StringComparison.OrdinalIgnoreCase))
-               ?? Apt.Data.Arrivals.FirstOrDefault(a => AirportRules.Base(a.Name) == AirportRules.Base(sn)) is { } star)
+        var sn = UserStar ?? "";
+        var star = sn.Length == 0 ? null : Apt.Data.Arrivals.FirstOrDefault(a => a.Name.Equals(sn, StringComparison.OrdinalIgnoreCase))
+            ?? Apt.Data.Arrivals.FirstOrDefault(a => AirportRules.Base(a.Name) == AirportRules.Base(sn));
+        if (star is not null)
         {
             var legs = new List<ProcedureLeg>();
             if (UserStarFrom is { Length: > 0 } fr && star.EnrouteTransitions.FirstOrDefault(t => t.Name.Equals(fr, StringComparison.OrdinalIgnoreCase)) is { } tr) legs.AddRange(tr.Legs);
