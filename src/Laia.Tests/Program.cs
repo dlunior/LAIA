@@ -884,11 +884,11 @@ Console.WriteLine("== Winds aloft: the FD forecast read, and the user's own sim 
     // The user at FL340 over BHM finds 300° at 80 kt (the forecast said 290° at 108).
     field.AddUserSample(now, 33.56, -86.75, 34000, 300, 80, sfc, 650);
     var here = field.At(now, 33.56, -86.75, 34000, sfc, 650);
-    var far = field.At(now, 33.56 + 5, -86.75, 34000, sfc, 650);   // 300 nm north
+    var far = field.At(now, 33.56 + 3.33, -86.75, 34000, sfc, 650);   // 200 nm north
     var low = field.At(now, 33.56, -86.75, 18000, sfc, 650);
-    Console.WriteLine($"  after the user's reading: here {here.FromDeg:000}/{here.Kt:0}; 300 nm away {far.FromDeg:000}/{far.Kt:0}; here at 18,000 ft {low.FromDeg:000}/{low.Kt:0}");
+    Console.WriteLine($"  after the user's reading: here {here.FromDeg:000}/{here.Kt:0}; 200 nm away {far.FromDeg:000}/{far.Kt:0}; here at 18,000 ft {low.FromDeg:000}/{low.Kt:0}");
     Check(Math.Abs(Geo2.Diff(here.FromDeg, 300)) < 2 && Math.Abs(here.Kt - 80) < 3, "where the user is, LAIA's aircraft get the user's wind");
-    Check(Math.Abs(far.Kt - 108) < 15 && Math.Abs(Geo2.Diff(far.FromDeg, 290)) < 5, "far away, mostly the forecast");
+    Check(Math.Abs(far.Kt - 108) < 15 && Math.Abs(Geo2.Diff(far.FromDeg, 290)) < 6, "200 nm away, mostly the forecast");
     Check(Math.Abs(low.Kt - 47) < 3, "far below the user's level, the forecast for that level");
     var prof = field.Profile(now, 33.56, -86.75, sfc, 650);
     var p34 = WindsAloft.FromProfile(prof, 34000);

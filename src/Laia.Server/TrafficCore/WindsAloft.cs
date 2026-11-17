@@ -155,7 +155,7 @@ public sealed class WindsAloft
     {
         var v = Base(lat, lon, altFt, surface, surfaceElevFt);
         // What the user found nearby (the closer, the nearer the level and the more recent, the more it counts). A
-        // sample right here and now gives the user's wind almost exactly.
+        // sample right here and now gives the user's wind almost exactly (97%); 100 nm away about 80% of it, 200 nm 30%.
         double sw = 0; var sd = new V2(0, 0);
         foreach (var s in _samples)
         {
@@ -165,10 +165,10 @@ public sealed class WindsAloft
             if (Math.Abs(dz) > 3) continue;
             var d = Geo2.DistanceNm(lat, lon, s.Lat, s.Lon);
             if (d > 400) continue;
-            var w = Math.Exp(-d / 60) * Math.Exp(-dz * dz) * Math.Exp(-Math.Max(0, age) / 60);
+            var w = Math.Exp(-d / 46) * Math.Exp(-dz * dz) * Math.Exp(-Math.Max(0, age) / 60);
             sw += w; sd += s.Delta * w;
         }
-        return sw > 1e-6 ? v + sd * (1 / (sw + 0.02)) : v;
+        return sw > 1e-6 ? v + sd * (1 / (sw + 0.03)) : v;
     }
 
     /// <summary>The forecast at a place and altitude, blended down to the surface wind below its lowest level; the surface wind everywhere with no forecast near.</summary>
