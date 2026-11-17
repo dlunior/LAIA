@@ -95,6 +95,39 @@ foreach (var swapped in new[] { false, true })
     Check(r is not null && r.Count > 3, $"taxi route found ({r?.Count ?? 0} nodes)");
 }
 
+Console.WriteLine("== A runway change while departures taxi: they take off along the new runway (CYYZ ACA836, 17 Nov)");
+{
+    var apt = new AirportModel(TestAirport.Build(false));
+    var log = new List<string>();
+    var world = new TrafficWorld(apt, new TestSource(), seed: 7) { Level = TrafficLevel.Busy, Wind = new Wind(270, 12) };
+    world.Log = s2 => log.Add(s2);
+    var changed = false; var checkedDeps = new HashSet<string>(); var bad = new List<string>(); var movedAndFlown = 0;
+    var taxiingAtChange = new HashSet<string>();
+    for (var t = 0.0; t < 3600; t += 0.5)
+    {
+        world.Step(0.5);
+        if (!changed && t > 900 && world.Flights.Count(f => f.Kind == "departure" && f.Phase is "taxi" or "holding short") >= 1)
+        {
+            changed = true;
+            foreach (var f in world.Flights.Where(f => f.Kind == "departure" && f.Phase is "taxi" or "holding short" or "pushback" or "engine start")) taxiingAtChange.Add(f.Callsign);
+            world.Wind = new Wind(90, 15); world.SelectRunways(true);
+        }
+        foreach (var f in world.Flights)
+        {
+            if (f.Kind != "departure" || f.OnGround || f.Rwy is not { } r || checkedDeps.Contains(f.Callsign)) continue;
+            if (f.AltFt - apt.ElevationFt < 400) continue;
+            checkedDeps.Add(f.Callsign);
+            var off = Math.Abs(r.Offset(f.Pos)); var along = r.Along(f.Pos);
+            if (taxiingAtChange.Contains(f.Callsign)) movedAndFlown++;
+            if (off > 250 || along < r.LengthM * 0.5) bad.Add($"{f.Callsign} off {r.Ident}: {off:0} m aside, {along:0} m along at {f.AltFt - apt.ElevationFt:0} ft");
+        }
+    }
+    var warn = log.Where(l => l.Contains("WARNING starting the take-off roll")).ToList();
+    Console.WriteLine($"  runway change at {(changed ? "yes" : "no")}; {taxiingAtChange.Count} departures on the ground then, {movedAndFlown} of them flown; {checkedDeps.Count} departures checked; {string.Join("; ", bad.Concat(warn).Take(4))}");
+    Check(changed && movedAndFlown > 0, "departures caught taxiing by the runway change took off");
+    Check(bad.Count == 0 && warn.Count == 0, "every departure climbs out along its own runway's centreline");
+}
+
 Console.WriteLine("== One hour of busy traffic, runway 27 in use (wind 270/12)");
 {
     var apt = new AirportModel(TestAirport.Build(false));

@@ -131,6 +131,8 @@ public sealed class Flight
     public bool GateHoldDone;
     /// <summary>The planned departure route (planned when lining up, so the spacing can look at where it goes).</summary>
     public List<AirPoint>? DepPlan;
+    /// <summary>The runway DepPlan was planned from: a different runway now (a runway change) means planning again.</summary>
+    public RunwayEnd? DepPlanRwy;
     public string DepRoute = "";
     public double DepCourse = double.NaN;   // the track about 4 nm after the runway end
     public bool StableChecked;
@@ -1945,7 +1947,7 @@ public sealed partial class TrafficWorld
         }
         var since = Time - l.LiftoffTime;
         var wake = Cwt.DepartureSeconds(l.Wake, f.Wake) - since;
-        if (double.IsNaN(f.DepCourse)) PlanDeparture(f);
+        EnsureDeparturePlan(f);
         var diverging = !double.IsNaN(l.DepCourse) && !double.IsNaN(f.DepCourse) && Math.Abs(Geo2.Diff(l.DepCourse, f.DepCourse)) >= 15;
         // The follower gets airborne about 35 s after starting its roll, by when the leader has gained more distance.
         var needNm = diverging ? 0.4 : 2.0;
@@ -2208,7 +2210,7 @@ public sealed partial class TrafficWorld
         f.Stops.Clear();
         f.MaxKt = 10;
         f.Reserve = rwy.Runway;
-        if (f.DepPlan is null) PlanDeparture(f);
+        EnsureDeparturePlan(f);
         f.SetPhase("lining up", Time);
     }
 
@@ -2222,9 +2224,19 @@ public sealed partial class TrafficWorld
     }
 
     /// <summary>The departure route: straight ahead past the runway end, then the SID (or a turn out). Also its course.</summary>
+    /// <summary>
+    /// The departure route planned off the runway it's actually using (CYYZ, 17 Nov: ACA836, planned off 24R, was moved
+    /// to 23 by a runway change and took off from 23 straight across the airport towards 24R's far end).
+    /// </summary>
+    private void EnsureDeparturePlan(Flight f)
+    {
+        if (f.DepPlan is null || f.DepPlanRwy != f.Rwy || double.IsNaN(f.DepCourse)) PlanDeparture(f);
+    }
+
     private void PlanDeparture(Flight f)
     {
         var rwy = f.Rwy!;
+        f.DepPlanRwy = rwy;
         var pts = new List<AirPoint> { new(rwy.FarEnd, ""), new(rwy.FarEnd + rwy.Dir * Geo2.MPerNm, "") };
         f.DepRoute = "";
         var sid = PickSid(f, rwy, out var sidLegs);
@@ -2273,7 +2285,9 @@ public sealed partial class TrafficWorld
     private void StartTakeoff(Flight f)
     {
         var rwy = f.Rwy!;
-        if (f.DepPlan is null) PlanDeparture(f);
+        EnsureDeparturePlan(f);
+        if (Math.Abs(rwy.Offset(f.Pos)) > 60 || rwy.Along(f.Pos) < -60 || rwy.Along(f.Pos) > rwy.LengthM * 0.6)
+            Log($"{f.Callsign}: WARNING starting the take-off roll off runway {rwy.Ident}'s centreline ({rwy.Offset(f.Pos):0} m aside, {rwy.Along(f.Pos):0} m along)");
         var pts = new List<AirPoint> { new(f.Pos, "") };
         pts.AddRange(f.DepPlan!);
         f.Route = f.DepRoute;
@@ -3914,6 +3928,7 @@ public sealed partial class TrafficWorld
                 var r = DepartureRunwayFor(f);
                 if (r is null || r == f.Rwy) continue;
                 f.Rwy = r;
+                f.DepPlan = null; f.DepCourse = double.NaN;
                 if (f.Phase is "taxi" or "holding short")
                 {
                     var hold = PickRunwayEntry(r, out var entry, f.Pos);
