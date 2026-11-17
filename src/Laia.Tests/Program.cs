@@ -914,7 +914,9 @@ Console.WriteLine("== The trombone: arrivals bunched on the downwind are spaced 
     var vecs = log.Count(l => l.Contains("vectors for spacing")); var tromb = log.Where(l => l.Contains("base turn now")).ToList();
     var gas = log.Count(l => l.Contains("going around"));
     Console.WriteLine($"  {fl3.Count} spawned, {lands.Count} landed; gaps {string.Join(", ", gaps.Select(g => $"{g:0} s"))}; trombone moves {tromb.Count}, vectors {vecs}, holds {holds}, 360s {orbits}, break-offs {breaks}, go-arounds {gas}");
-    foreach (var l in tromb.Take(6)) Console.WriteLine("    " + l);
+    foreach (var l in tromb.Take(10)) Console.WriteLine("    " + l);
+    foreach (var f in fl3.Where(f => !lands.ContainsKey(f.Callsign))) Console.WriteLine($"    not landed: {f.Callsign} {f.Phase} seq {f.Seq} {(f.ThrS - f.S) / Geo2.MPerNm:0.0} nm to go, {f.AltFt:0} ft, {f.Ias:0} kt");
+    foreach (var l in log.Where(l => l.Contains("vectors for spacing") || l.Contains("going around") || l.Contains("landed")).Take(8)) Console.WriteLine("    " + l);
     Check(fl3.Count == 3 && lands.Count == 3, "all three land");
     Check(gaps.All(g => g >= 80) && gas == 0, "spaced at the runway (at least 80 s apart), no go-around");
     Check(tromb.Count > 0 && holds == 0 && orbits == 0 && breaks == 0, "the downwind is extended for them: no hold, 360 or break-off");

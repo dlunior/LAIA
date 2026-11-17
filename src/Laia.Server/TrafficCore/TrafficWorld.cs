@@ -5148,7 +5148,17 @@ public sealed partial class TrafficWorld
             // Spacing behind the arrival ahead on the same runway.
             Flight? leader = null;
             var leaderD = double.MinValue;
-            foreach (var o in UserArr is { } uaf ? Flights.Append(uaf) : Flights)
+            // The one ahead in the landing order (the arrival manager's sequence), not merely the one nearer the
+            // runway along its path: once a downwind is extended, the aircraft on it is further from the runway along
+            // its path than the one behind it, and it must stay ahead (the trombone would otherwise swap them).
+            var pool = UserArr is { } uaf0 ? Flights.Append(uaf0) : Flights;
+            if (f.Seq > 1)
+            {
+                leader = pool.FirstOrDefault(o => o != f && o.Kind == "arrival" && o.Rwy?.Runway == rwy.Runway && o.Seq == f.Seq - 1 && !o.OnGround && !o.Done && o.Phase != "go-around");
+                if (leader is not null) leaderD = (leader.ThrS - leader.S) / Geo2.MPerNm;
+            }
+            if (leader is null)
+            foreach (var o in pool)
             {
                 if (o == f || o.Kind != "arrival" || o.Rwy?.Runway != rwy.Runway || o.Phase == "go-around") continue;
                 var od = o.OnGround ? -1 : (o.ThrS - o.S) / Geo2.MPerNm;
@@ -5177,8 +5187,8 @@ public sealed partial class TrafficWorld
                 var short_ = ThresholdGapNeeded(leader, f, forDepartures: false) - gapSec;
                 // What speed control can still absorb before 20 nm (250 → 210 kt) and inside it (down to the 170 kt
                 // floor): a hold only when the shortfall is more than that.
-                if (!tooCloseNow(gap, needNm)) short_ -= Math.Max(0, dth - 20) * (3600 / 210.0 - 3600 / 250.0) + (dth > 12 ? 30 : 0);
-                var tooClose = tooCloseNow(gap, needNm);
+                if (!(gap > 0 && tooCloseNow(gap, needNm))) short_ -= Math.Max(0, dth - 20) * (3600 / 210.0 - 3600 / 250.0) + (dth > 12 ? 30 : 0);
+                var tooClose = gap > 0 && tooCloseNow(gap, needNm);
                 f.GapNm = gap; f.GapSec = gapSec;
                 // The trombone first: with a downwind and base ahead, the base turn moves so it lands the gap needed
                 // (plus 10 s) behind the one ahead — further out, or earlier when the gap is bigger than it needs to be.
