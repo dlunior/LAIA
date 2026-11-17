@@ -51,7 +51,7 @@ public sealed partial class TrafficWorld
         // my groundspeed and slow the other plane in time without having it to do a loop or hold" — the user joined
         // the sequence at 80 nm, 45 s ahead of AAL1842's slot, which then got a loop and a hold).
         if (UserDestination is { Length: > 0 } d) return nm <= 200 && d.Equals(Apt.Icao, StringComparison.OrdinalIgnoreCase);
-        if (nm > 80) return false;
+        if (nm > 80 || UserGs < 60) return false;   // not moving (paused or slewing): not in the sequence
         // No plan: within 40 nm, below 15,000 ft above the field and coming closer.
         var toApt = (new V2(0, 0) - u).Bearing;
         return nm < 40 && UserAltFt < Apt.ElevationFt + 15000 && Math.Abs(Geo2.Diff(UserTrack, toApt)) < 100;
@@ -92,10 +92,11 @@ public sealed partial class TrafficWorld
             var alt = elev + nmOut * 318;   // a 3° path
             var tas = Wind.Tas(ias, alt);
             var g = rwy is null ? tas : tas - WindAt(alt).Headwind(rwy.Heading);
-            // Never faster than they're flying now (a light aircraft at 110 kt doesn't do 190 on final).
-            return UserGs > 60 && nm > 5 ? Math.Min(g, Math.Max(UserGs, vapp + 5)) : g;
+            // Never faster than they're flying now (a light aircraft at 110 kt doesn't do 190 on final), nor slower than
+            // 70 % of it (its approach speed may not be the one assumed for the type).
+            return UserGs > 60 ? Math.Clamp(g, UserGs * 0.7, UserGs) : g;
         }
-        Leg(20, 11, Math.Min(gs, Wind.Tas(210, elev + 4000)));
+        Leg(20, 11, Math.Min(UserGs > 60 ? UserGs : gs, Wind.Tas(210, elev + 4000)));
         Leg(11, 7.5, Final(190, 9.25)); Leg(7.5, 5, Final(170, 6.25)); Leg(5, 0, Final(vapp + 5, 2.5));
         return t;
     }
