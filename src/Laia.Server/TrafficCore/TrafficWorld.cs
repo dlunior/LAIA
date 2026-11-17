@@ -2456,8 +2456,8 @@ public sealed partial class TrafficWorld
     }
 
     /// <summary>
-    /// The highest speed the procedure allows here: a limit ahead must be met at its fix (slowing about 10 kt per mile
-    /// before it), and the last limit passed holds until the next one (or for 10 nm after the last).
+    /// The highest speed the procedure allows here: a limit ahead must be met at its fix (slowing about 5 kt per mile,
+    /// at it 1½ nm before), and the last limit passed holds until the next one (or for 10 nm after the last).
     /// </summary>
     private static double ProcedureLimit(Flight f, bool before)
     {
@@ -2466,7 +2466,9 @@ public sealed partial class TrafficWorld
         foreach (var c in f.SpeedLimits)
         {
             var ahead = (c.S - f.S) / Geo2.MPerNm;
-            if (ahead >= 0) { lim = Math.Min(lim, before ? c.Kt : c.Kt + Math.Max(0, ahead - 0.5) * 6); }   // slowing ~6 kt per nm, at the limit half a mile before the fix
+            // Slowing about 5 kt per nm, at the limit 1½ nm before the fix (16 Nov, KAUS: every WLEEE7 arrival crossed
+            // MUSEC "max 230" at 241 kt — at the limit only half a mile before, descending as it slowed, it got there late).
+            if (ahead >= 0) { lim = Math.Min(lim, before ? c.Kt : c.Kt + Math.Max(0, ahead - 1.5) * 5); }
             else passed = c;
         }
         if (!before && passed is { } p && (f.S - p.S) / Geo2.MPerNm < 10 && !f.SpeedLimits.Any(c => c.S > f.S)) lim = Math.Min(lim, p.Kt);
@@ -2498,7 +2500,7 @@ public sealed partial class TrafficWorld
         {
             var sid = cands.First(c => AirportRules.Base(c.Name) == AirportRules.Base(pr.sid));
             var tr = sid.EnrouteTransitions.FirstOrDefault(t => t.Name.Equals(pr.transition, StringComparison.OrdinalIgnoreCase));
-            if (tr is not null || sid.EnrouteTransitions.Count == 0) { RoutesUsed++; return (sid, tr); }
+            if (tr is not null || sid.EnrouteTransitions.Count == 0) { RoutesUsed++; return RnavInstead(sid, tr, cands, dest) ?? (sid, tr); }
         }
         if (Routes is not null && BearingTo(dest) is { } db && list.Count > 0 &&
             Routes.DepartureToDirection(Apt.Icao, db, ArrRwy?.Heading ?? list[0].Heading, FaaWhere, tok => cands.Any(c => AirportRules.Base(c.Name) == AirportRules.Base(tok))) is { } pd)
@@ -2508,7 +2510,7 @@ public sealed partial class TrafficWorld
             if (tr is null && sid.EnrouteTransitions.Count > 0)
                 tr = sid.EnrouteTransitions.OrderBy(t => Score(db, ExitFix(sid, t))).First();
             RoutesUsed++;
-            return (sid, tr);
+            return RnavInstead(sid, tr, cands, dest) ?? (sid, tr);
         }
         var want = BearingTo(dest);
         var options = new List<(Procedure p, Transition? t, double score)>();
@@ -2516,6 +2518,23 @@ public sealed partial class TrafficWorld
             foreach (var t in sid.EnrouteTransitions.Count > 0 ? sid.EnrouteTransitions.Select(t => (Transition?)t).ToList() : new List<Transition?> { null })
                 options.Add((sid, t, Score(want, ExitFix(sid, t))));
         return Best(options);
+    }
+
+    /// <summary>
+    /// A radar-vectors SID (no fix of its own: AUS7, ORD's OHARE9) named by the FAA's preferred routes gives way to a
+    /// published RNAV SID whose exit points within 45° of the destination (user, 16 Nov, KAUS: "departures didn't seem
+    /// to follow SIDs" — nearly every departure was given AUS7, while the real ones fly ELOEL3, ILEXY4, MUCKY3…: the
+    /// preferred routes still name the old vectors departure). Null to keep the routes' choice.
+    /// </summary>
+    private (Procedure p, Transition? t)? RnavInstead(Procedure chosen, Transition? tr, List<Procedure> cands, string? dest)
+    {
+        if (ExitFix(chosen, tr) is not null || BearingTo(dest) is not { } want) return null;
+        var options = new List<(Procedure p, Transition? t, double score)>();
+        foreach (var sid in cands)
+            foreach (var t in sid.EnrouteTransitions.Count > 0 ? sid.EnrouteTransitions.Select(t => (Transition?)t).ToList() : new List<Transition?> { null })
+                if (ExitFix(sid, t) is not null) options.Add((sid, t, Score(want, ExitFix(sid, t))));
+        options = options.Where(o => o.score <= 45).ToList();
+        return options.Count == 0 ? null : Best(options);
     }
 
     /// <summary>The STAR and entry (among those serving any of these runways) that starts nearest the origin's direction.</summary>

@@ -29,7 +29,8 @@ public sealed partial class TrafficWorld
 
     /// <summary>The user as a member of the arrival sequence (never drawn, never moved by LAIA), or null.</summary>
     public Flight? UserArr { get; private set; }
-    private double _userSlot = double.NaN, _userOffSince = double.NaN;
+    private double _userSlot = double.NaN, _userOffSince = double.NaN, _userSlotAt, _etaScale = 1;
+    private readonly List<(double t, double eta)> _etaSamples = new();
     private bool _userReplanned;
     private int _userRwyChanges;
     private string _seqSig = "";
@@ -112,7 +113,7 @@ public sealed partial class TrafficWorld
         UpdateExpected();
         if (!UserArriving() || UserPos is not { } u)
         {
-            UserArr = null; Sequence = null; _userSlot = double.NaN; _seqSig = ""; _userRwyChanges = 0; _userHoldLogged = false; return;
+            UserArr = null; Sequence = null; _userSlot = double.NaN; _etaScale = 1; _etaSamples.Clear(); _seqSig = ""; _userRwyChanges = 0; _userHoldLogged = false; return;
         }
         var arrs = ArrRwys.Count > 0 ? ArrRwys : ArrRwy is null ? new List<RunwayEnd>() : new() { ArrRwy };
         if (arrs.Count == 0) return;
@@ -139,17 +140,34 @@ public sealed partial class TrafficWorld
         var nm = UserTrackNm(f.Rwy, u);
         f.ThrS = nm * Geo2.MPerNm; f.S = 0;
         f.EtaAt = Time;
-        f.EtaSec = UserEtaSec(nm);
-        // The planned slot: kept while the user stays within about 90 s of it; a new one when they're going to miss it
-        // (for 20 s running), and the aircraft around them re-sequence for the new place.
-        var eta = Time + f.EtaSec;
-        if (double.IsNaN(_userSlot)) { _userSlot = eta; _userReplanned = false; }
-        else if (Math.Abs(eta - _userSlot) > 90)
+        var raw = UserEtaSec(nm);
+        // Learn how the user actually flies (16 Nov, KAUS: the user flew in faster than the speeds assumed, caught up
+        // SWA581 from behind, and was only put ahead of it 4 nm apart — a loop and a 360 for SWA581): the estimate
+        // should come 1 s closer every second; if it comes closer faster (or slower), the rest of it is scaled by what
+        // the last two minutes showed (between 0.75 and 1.25), beyond 10 nm out.
+        _etaSamples.Add((Time, Time + raw));
+        _etaSamples.RemoveAll(x => Time - x.t > 120);
+        if (_etaSamples.Count >= 2 && Time - _etaSamples[0].t > 45)
         {
-            if (double.IsNaN(_userOffSince)) _userOffSince = Time;
-            else if (Time - _userOffSince > 20) { _userSlot = eta; _userReplanned = true; _userOffSince = double.NaN; }
+            var (t0, e0) = _etaSamples[0];
+            var rate = ((Time + raw) - e0) / (Time - t0);   // 0 when on the estimate; −0.2 when 20 % quicker
+            var k = Math.Clamp(1 / Math.Max(0.5, 1 - rate), 0.75, 1.25);
+            _etaScale += (k - _etaScale) * Math.Min(1, 0.05);
         }
-        else _userOffSince = double.NaN;
+        f.EtaSec = nm > 10 ? UserEtaSec(10) + (raw - UserEtaSec(10)) * _etaScale : raw;
+        // The planned slot follows the user smoothly (closing any difference over 15 s with a time constant of about
+        // 45 s), so the aircraft around them adjust with speed while there's time — instead of the slot holding still
+        // until the user was 90 s off it and then jumping (the old way).
+        var eta = Time + f.EtaSec;
+        if (double.IsNaN(_userSlot)) { _userSlot = eta; _userReplanned = false; _userSlotAt = Time; }
+        else
+        {
+            var diff = eta - _userSlot;
+            var step = Math.Min(1, (Time - _userSlotAt) / 45);
+            if (Math.Abs(diff) > 15) _userSlot += diff * step;
+            _userReplanned = Math.Abs(diff) > 90;
+        }
+        _userSlotAt = Time;
         f.EtaNominal = _userSlot;
         f.Frozen = true; f.FrozenSlot = _userSlot;
     }
