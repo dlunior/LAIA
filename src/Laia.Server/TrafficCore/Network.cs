@@ -47,6 +47,12 @@ public static class NetworkModel
         return k * 1000;
     }
 
+    /// <summary>A type's usual cruise speed over the ground in still air (knots).</summary>
+    public static double CruiseGsKt(string type) => Perf.For(type).Family switch
+    {
+        "turboprop" => 290, "regional jet" => 420, "large regional" => 440, "757" => 460, "widebody" => 480, "heavy" => 490, _ => 450,
+    };
+
     /// <summary>The flight's position at this minute of the week, or null if it isn't flying (or taxiing) now.</summary>
     public static NetPos? At(NetLeg l, double weekMin, bool includeGround = false)
     {
@@ -66,9 +72,27 @@ public static class NetworkModel
             return new NetPos(l, atDep ? l.DepLat : l.ArrLat, atDep ? l.DepLon : l.ArrLon, atDep ? l.DepElev : l.ArrElev, 0, 0,
                 atDep ? "taxiing out" : "taxiing in", 0, atDep ? 0 : l.DistNm, atDep ? block - taxiIn - e : 0);
         }
-        var tau = e - taxiOut;
         var cruise = CruiseFt(l);
         var jet = Perf.For(l.Type).Family != "turboprop";
+        // Airline schedules are padded (and real flights follow airways, wait at the runway and in holds), so timing a
+        // flight's whole block on the straight line could have a jet cruising at 300 kt (user, 17 Nov: "why UAL2458 is
+        // flying so slow"). It flies its type's normal speed (8% slack) instead; the spare time is spent on the ground
+        // before take-off, so it still lands when the schedule says.
+        var nominal = CruiseGsKt(l.Type) / 60;   // nm per minute
+        for (var i = 0; i < 2; i++)
+        {
+            var c0 = Math.Min((cruise - l.DepElev) / (jet ? 2000 : 1300), 0.45 * t);
+            var d0 = Math.Min((cruise - l.ArrElev) / (jet ? 2200 : 1400), 0.45 * t);
+            var tMin = 1.08 * (l.DistNm / nominal + 0.3 * (c0 + d0));
+            if (t <= tMin + 0.01) break;
+            taxiOut += t - tMin; t = tMin;
+        }
+        if (e < taxiOut)
+        {
+            if (!includeGround) return null;
+            return new NetPos(l, l.DepLat, l.DepLon, l.DepElev, 0, 0, "taxiing out", 0, 0, block - taxiIn - e);
+        }
+        var tau = e - taxiOut;
         var c = Math.Min((cruise - l.DepElev) / (jet ? 2000 : 1300), 0.45 * t);
         var d = Math.Min((cruise - l.ArrElev) / (jet ? 2200 : 1400), 0.45 * t);
         // Speed ramps from 40% to 100% in the climb (and back down in the descent): 70% on average.

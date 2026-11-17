@@ -849,6 +849,26 @@ Console.WriteLine("== Airport rules read from the FAA's AAUP text (any airport, 
     }
 }
 
+Console.WriteLine("== Whole sky: a padded schedule doesn't make a jet crawl (UAL2458, 17 Nov)");
+{
+    // About 380 nm (Houston–Dallas-ish is shorter; this is IAH–MEM-like) with a padded 150-minute block.
+    var leg = new NetLeg { Airline = "UAL", Operator = "UAL", Type = "B39M", Reg = "N-UAL", Flight = "2458", Dep = "KIAH", Arr = "KMEM",
+        DepMin = 3000, ArrMin = 3000 + 150, DepLat = 29.98, DepLon = -95.34, ArrLat = 35.04, ArrLon = -89.98, DepElev = 97, ArrElev = 341, Located = true };
+    leg.DistNm = Geo2.DistanceNm(leg.DepLat, leg.DepLon, leg.ArrLat, leg.ArrLon);
+    double cruiseGs = 0, firstAir = double.NaN, lastAir = double.NaN;
+    for (var m = 3000.0; m <= 3150; m += 0.25)
+    {
+        var p = NetworkModel.At(leg, m);
+        if (p is null) continue;
+        if (double.IsNaN(firstAir)) firstAir = m;
+        lastAir = m;
+        if (p.Phase == "cruising") cruiseGs = Math.Max(cruiseGs, p.GsKt);
+    }
+    Console.WriteLine($"  {leg.DistNm:0} nm in a 150-minute block: cruise {cruiseGs:0} kt, airborne {firstAir - 3000:0} to {lastAir - 3000:0} min");
+    Check(cruiseGs > 400, "cruises at a jet's speed (over 400 kt), not the schedule's padded average");
+    Check(lastAir - 3000 >= 143, "still lands on schedule (taxi-in about 6 minutes before the block ends)");
+}
+
 Console.WriteLine("== Whole sky: descending flights are never above a 3:1 path to their destination");
 {
     var leg = new NetLeg { Airline = "WJA", Operator = "WJA", Type = "B738", Reg = "C-WJA", Flight = "1272", Dep = "CYYZ", Arr = "KMCO",
