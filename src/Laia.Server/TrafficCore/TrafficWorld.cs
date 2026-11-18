@@ -3776,6 +3776,7 @@ public sealed partial class TrafficWorld
     /// speed can no longer fix it (no speed adjustments inside 5 nm, 7110.65 5-7-2): a turn away from final at the
     /// same altitude, then vectors back around — calmer and more realistic than a go-around at half a mile.
     /// </summary>
+    private double _lastBreakoffAt = -999, _lastBreakoffSide;
     private void BreakOff(Flight f, string why)
     {
         var rwy = f.Rwy!;
@@ -3783,11 +3784,14 @@ public sealed partial class TrafficWorld
         var nm = Geo2.MPerNm;
         var left = new V2(-rwy.Dir.Y, rwy.Dir.X);
         var side = rwy.Offset(p) >= 0 ? 1.0 : -1.0;              // break off to the side it's already on
-        var outPt = p + left * (side * 4 * nm) - rwy.Dir * (4 * nm);
+        // A second break-off soon after another on the same side goes wider and further out, not to the same spot.
+        var wide = Time - _lastBreakoffAt < 120 && _lastBreakoffSide == side;
+        _lastBreakoffAt = Time; _lastBreakoffSide = side;
+        var outPt = p + left * (side * (wide ? 7 : 4) * nm) - rwy.Dir * ((wide ? 8 : 4) * nm);
         var heading = (outPt - p).Bearing;
         _breakoffs++; f.Mgr = "vectored around"; f.Frozen = false;   // re-sequenced at its new time
         Log($"{f.Callsign}: breaking off the approach for spacing ({why}): turn {(V2.Cross(V2.FromBearing(dir), outPt - p) > 0 ? "left" : "right")} heading {heading:000}, vectors back around");
-        f.LastOrbit = Time;
+        f.LastOrbit = Time; f.LastVector = Time; f.LastTrombone = Time;   // nothing else for it straight away
         var pts = new List<V2> { p, p + V2.FromBearing(dir, 700), outPt };
         pts.AddRange(Vectors(outPt, rwy, ShapeFor(rwy)));
         var thrIndex = pts.Count;
@@ -3909,7 +3913,7 @@ public sealed partial class TrafficWorld
                 var byTrombone = double.IsNaN(tromb) || double.IsNaN(f.BaseTurnNm) ? 0 : Math.Max(0, 25 - f.BaseTurnNm) * 2 * Geo2.MPerNm / (200 * Kt) * 0.6;
                 var left = f.Delay - bySpeed - byTrombone;
                 if (left > 90)
-                    Vector(f, Math.Min(left, dth > 60 ? 600 : 300), $"{f.Delay:0} s delay for the sequence (number {f.Seq} for {f.Rwy.Ident}), {bySpeed:0} s of it by speed");
+                    Vector(f, Math.Min(left, dth > 60 ? 600 : 300), rejoinNm: Math.Clamp(dth - 30, 25, 45), why: $"{f.Delay:0} s delay for the sequence (number {f.Seq} for {f.Rwy.Ident}), {bySpeed:0} s of it by speed");
             }
         }
         if (f.SlowDv > 0 && (old == 0 || Math.Abs(f.SlowDv - old) >= 10))
@@ -3926,7 +3930,7 @@ public sealed partial class TrafficWorld
     /// time it must lose — the controller's tool before a hold. Turned away from the airport side, never more than
     /// 70° off, rejoining at least 9.5 nm from the runway. False when there's not enough route left to do it.
     /// </summary>
-    private bool Vector(Flight f, double addSec, string why)
+    private bool Vector(Flight f, double addSec, string why, double rejoinNm = 25)
     {
         var path = f.Path!;
         var (p, dir, _) = path.At(f.S);
@@ -3934,8 +3938,9 @@ public sealed partial class TrafficWorld
         var addM = addSec * gs;
         var keptS = path.KeptS;
         var latest = f.ThrS - 9.5 * Geo2.MPerNm;
-        var wantS = Math.Min(f.S + 25 * Geo2.MPerNm, latest);
-        if (wantS - f.S < 4 * Geo2.MPerNm) return false;
+        var wantS = Math.Min(f.S + rejoinNm * Geo2.MPerNm, latest);
+        // At least 8 nm of route to stretch: shorter detours are a string of little turns, not vectors.
+        if (wantS - f.S < 8 * Geo2.MPerNm) return false;
         var j = -1;
         for (var i = 0; i < path.Points.Count; i++) if (keptS[i] >= wantS - 1) { j = i; break; }
         if (j < 0 || keptS[j] > latest + 1) { for (var i = path.Points.Count - 1; i >= 0; i--) if (keptS[i] <= latest && keptS[i] > f.S + 4 * Geo2.MPerNm) { j = i; break; } }
