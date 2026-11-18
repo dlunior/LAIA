@@ -621,6 +621,8 @@ public sealed partial class TrafficWorld
             {
                 var a = ordered[k]; var b = ordered[k + 1];
                 if (a == UserArr || b == UserArr || a.Path is null || b.Path is null || double.IsNaN(a.EtaSec) || double.IsNaN(b.EtaSec)) continue;
+                // Not when the one ahead is on a planned detour (delay vectors, an extended downwind): that's the plan.
+                if (Time - a.LastVector < 600 || Time - a.LastTrombone < 60 && !double.IsNaN(a.BaseTurnNm)) continue;
                 var da = (a.ThrS - a.S) / Geo2.MPerNm; var db = (b.ThrS - b.S) / Geo2.MPerNm;
                 if (db < da - 2 && b.EtaSec + ThresholdGapNeeded(b, a, forDepartures: false) < a.EtaSec)
                 {
@@ -5304,7 +5306,7 @@ public sealed partial class TrafficWorld
                 // arrival manager plans the delay far out with speed, a runway with less delay, delay vectors on the
                 // way in and the trombone. Close in, vectors only with real route left (beyond 20 nm), and a break-off
                 // only when radar spacing would actually be lost or the gap is far too short to make up.
-                if (!trombone && (short_ > 45 || tooClose) && dth > 20 && short_ <= 300 && Time - f.LastVector > 150
+                if (!trombone && (short_ > 45 || tooClose) && dth > 13 && short_ <= 300 && Time - f.LastVector > 150
                     && Vector(f, Math.Max(short_, 45) + 15, $"{gap:0.0} nm behind {leader.Callsign}, {short_:0} s short at the runway")) return;
                 if (!trombone && (tooClose || (short_ > 75 && OnFinal(f, dth))) && dth > 5 && dth <= 12 && Time - f.LastOrbit > 240) { BreakOff(f, $"{gap:0.0} nm behind {leader.Callsign}, {short_:0} s short at the runway"); return; }
             }

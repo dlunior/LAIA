@@ -910,6 +910,7 @@ Console.WriteLine("== A rush of arrivals far out: planned with speed, delay vect
     var gaps = order.Zip(order.Skip(1), (a, b) => b.Value - a.Value).ToList();
     int C(string k) => log.Count(l => l.Contains(k));
     var negative = log.Count(l => l.Contains("breaking off") && System.Text.RegularExpressions.Regex.IsMatch(l, @"\(-\d+(\.\d)? nm behind"));
+    Console.WriteLine("  landings: " + string.Join(", ", order.Select(o => $"{o.Key} {o.Value:0}")));
     Console.WriteLine($"  {rush.Count} arrivals, {lands.Count} landed in {(order.Count > 0 ? (order[^1].Value - order[0].Value) / 60 : 0):0} min; gaps min {(gaps.Count > 0 ? gaps.Min() : 0):0} s, average {(gaps.Count > 0 ? gaps.Average() : 0):0} s, max {(gaps.Count > 0 ? gaps.Max() : 0):0} s");
     Console.WriteLine($"  speed {C("reduce speed")}, delay vectors {C("delay for the sequence")}, vectors for spacing {C("vectors for spacing")}, downwind changes {C("base turn now")}, holds {C("holding")}, 360s {C("making a 360")}, break-offs {C("breaking off")}, go-arounds {C("going around")}, spaced behind one behind it {negative}");
     foreach (var l in log.Where(l => l.Contains("breaking off") || l.Contains("going around") || l.Contains("now ahead of") || l.Contains("delay for the sequence")).Take(10)) Console.WriteLine("    " + l);
