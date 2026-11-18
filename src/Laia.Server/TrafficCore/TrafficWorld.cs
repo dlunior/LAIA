@@ -5290,7 +5290,7 @@ public sealed partial class TrafficWorld
                 var short_ = ThresholdGapNeeded(leader, f, forDepartures: false) - gapSec;
                 // What speed control can still absorb before 20 nm (250 → 210 kt) and inside it (down to the 170 kt
                 // floor): a hold only when the shortfall is more than that.
-                if (!(gap > 0 && tooCloseNow(gap, needNm))) short_ -= Math.Max(0, dth - 20) * (3600 / 210.0 - 3600 / 250.0) + (dth > 12 ? 30 : 0);
+                if (!(gap > 0 && tooCloseNow(gap, needNm))) short_ -= Math.Max(0, dth - 20) * (3600 / 210.0 - 3600 / 250.0) + (dth > 12 ? 10 : 0);
                 var tooClose = gap > 0 && tooCloseNow(gap, needNm);
                 f.GapNm = double.IsInfinity(gap) ? double.NaN : gap; f.GapSec = gapSec;
                 // The trombone first: with a downwind and base ahead, the base turn moves so it lands the gap needed
@@ -5312,9 +5312,9 @@ public sealed partial class TrafficWorld
                 // arrival manager plans the delay far out with speed, a runway with less delay, delay vectors on the
                 // way in and the trombone. Close in, vectors only with real route left (beyond 20 nm), and a break-off
                 // only when radar spacing would actually be lost or the gap is far too short to make up.
-                if (!trombone && (short_ > 45 || tooClose) && dth > 13 && short_ <= 300 && Time - f.LastVector > 150
+                if (!trombone && (short_ > (dth > 20 ? 45 : 20) || tooClose) && dth > 13 && short_ <= 300 && Time - f.LastVector > 150
                     && Vector(f, Math.Max(short_, 45) + 15, $"{gapText}, {short_:0} s short at the runway")) return;
-                if (!trombone && (tooClose || (short_ > 30 && OnFinal(f, dth))) && dth > 5 && dth <= 12 && Time - f.LastOrbit > 240) { BreakOff(f, $"{gapText}, {short_:0} s short at the runway"); return; }
+                if (!trombone && (tooClose || (short_ > 20 && OnFinal(f, dth))) && dth > 5 && dth <= 12 && Time - f.LastOrbit > 240) { BreakOff(f, $"{gapText}, {short_:0} s short at the runway"); return; }
             }
             if (f.Phase == "flare") target = f.P.Vapp - 5;
             // Energy: it slows only as fast as its configuration and descent allow (descend OR slow, not both).
