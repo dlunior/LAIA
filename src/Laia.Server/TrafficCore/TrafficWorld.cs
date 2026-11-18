@@ -5270,7 +5270,8 @@ public sealed partial class TrafficWorld
                 // different routes the difference in miles to go says nothing about radar separation).
                 bool OnFinal(Flight x, double d) => d < 15 && x.Rwy is { } xr && Math.Abs(xr.Offset(x.Pos)) < 0.6 * Geo2.MPerNm && xr.Along(x.Pos) < 0;
                 var gap = OnFinal(f, dth) && OnFinal(leader, leaderD) ? dth - leaderD
-                    : Math.Abs(f.AltFt - leader.AltFt) >= 1000 ? 99 : (f.Pos - leader.Pos).Length / Geo2.MPerNm;
+                    : Math.Abs(f.AltFt - leader.AltFt) >= 1000 ? double.PositiveInfinity : (f.Pos - leader.Pos).Length / Geo2.MPerNm;
+                var gapText = double.IsInfinity(gap) ? $"1,000 ft or more from {leader.Callsign}" : $"{gap:0.0} nm behind {leader.Callsign}";
                 var gapSec = EtaToThreshold(f, dth) - (leader == UserArr ? leader.EtaSec : EtaToThreshold(leader, leaderD));
                 var needSec = ThresholdGapNeeded(leader, f);
                 var needNm = OnFinal(f, dth) && OnFinal(leader, leaderD) ? Cwt.MilesBehind(leader.Wake, f.Wake) : 3;
@@ -5291,7 +5292,7 @@ public sealed partial class TrafficWorld
                 // floor): a hold only when the shortfall is more than that.
                 if (!(gap > 0 && tooCloseNow(gap, needNm))) short_ -= Math.Max(0, dth - 20) * (3600 / 210.0 - 3600 / 250.0) + (dth > 12 ? 30 : 0);
                 var tooClose = gap > 0 && tooCloseNow(gap, needNm);
-                f.GapNm = gap; f.GapSec = gapSec;
+                f.GapNm = double.IsInfinity(gap) ? double.NaN : gap; f.GapSec = gapSec;
                 // The trombone first: with a downwind and base ahead, the base turn moves so it lands the gap needed
                 // (plus 10 s) behind the one ahead — further out, or earlier when the gap is bigger than it needs to be.
                 // Looked at every 8 s, so the downwind keeps following how the traffic ahead (and the user) actually
@@ -5312,8 +5313,8 @@ public sealed partial class TrafficWorld
                 // way in and the trombone. Close in, vectors only with real route left (beyond 20 nm), and a break-off
                 // only when radar spacing would actually be lost or the gap is far too short to make up.
                 if (!trombone && (short_ > 45 || tooClose) && dth > 13 && short_ <= 300 && Time - f.LastVector > 150
-                    && Vector(f, Math.Max(short_, 45) + 15, $"{gap:0.0} nm behind {leader.Callsign}, {short_:0} s short at the runway")) return;
-                if (!trombone && (tooClose || (short_ > 75 && OnFinal(f, dth))) && dth > 5 && dth <= 12 && Time - f.LastOrbit > 240) { BreakOff(f, $"{gap:0.0} nm behind {leader.Callsign}, {short_:0} s short at the runway"); return; }
+                    && Vector(f, Math.Max(short_, 45) + 15, $"{gapText}, {short_:0} s short at the runway")) return;
+                if (!trombone && (tooClose || (short_ > 30 && OnFinal(f, dth))) && dth > 5 && dth <= 12 && Time - f.LastOrbit > 240) { BreakOff(f, $"{gapText}, {short_:0} s short at the runway"); return; }
             }
             if (f.Phase == "flare") target = f.P.Vapp - 5;
             // Energy: it slows only as fast as its configuration and descent allow (descend OR slow, not both).
