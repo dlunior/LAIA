@@ -885,6 +885,41 @@ Console.WriteLine("== Airport rules read from the FAA's AAUP text (any airport, 
     }
 }
 
+Console.WriteLine("== A rush of arrivals far out: planned with speed, delay vectors and the trombone — never a hold (KORD, 18 Nov)");
+{
+    var data = TestAirport.Build(false);
+    var world = new TrafficWorld(new AirportModel(data), new TestSource(), seed: 21) { Automatic = false, Wind = new Wind(270, 10) };
+    var log = new List<string>(); world.Log = s2 => log.Add($"{world.Time:0} {s2}");
+    world.SelectRunways(true);
+    Laia.Common.Airports.ScheduleLeg L(string reg, string fl) => new() { Airline = "UAL", Operator = "UAL", Type = "B738", Reg = reg, Flight = fl, Dep = "KXXX", Arr = "TEST" };
+    var rush = new List<Flight>();
+    var rng = new Random(3);
+    for (var k = 0; k < 12; k++)
+    {
+        var f = world.SpawnArrival(70 + rng.NextDouble() * 40, false, L($"N{k:00}", $"{100 + k}"));
+        if (f is not null) rush.Add(f);
+        for (var t = 0; t < 40; t++) world.Step(0.5);   // one every 20 s: far more than the runway takes
+    }
+    var lands = new Dictionary<string, double>();
+    for (var t = 0.0; t < 3 * 3600 && lands.Count < rush.Count; t += 0.5)
+    {
+        world.Step(0.5);
+        foreach (var f in rush) if (f.OnGround && !lands.ContainsKey(f.Callsign)) lands[f.Callsign] = world.Time;
+    }
+    var order = lands.OrderBy(x => x.Value).ToList();
+    var gaps = order.Zip(order.Skip(1), (a, b) => b.Value - a.Value).ToList();
+    int C(string k) => log.Count(l => l.Contains(k));
+    var negative = log.Count(l => System.Text.RegularExpressions.Regex.IsMatch(l, @"\(-\d+(\.\d)? nm behind"));
+    Console.WriteLine($"  {rush.Count} arrivals, {lands.Count} landed in {(order.Count > 0 ? (order[^1].Value - order[0].Value) / 60 : 0):0} min; gaps min {(gaps.Count > 0 ? gaps.Min() : 0):0} s, average {(gaps.Count > 0 ? gaps.Average() : 0):0} s, max {(gaps.Count > 0 ? gaps.Max() : 0):0} s");
+    Console.WriteLine($"  speed {C("reduce speed")}, delay vectors {C("delay for the sequence")}, vectors for spacing {C("vectors for spacing")}, downwind changes {C("base turn now")}, holds {C("holding")}, 360s {C("making a 360")}, break-offs {C("breaking off")}, go-arounds {C("going around")}, spaced behind one behind it {negative}");
+    foreach (var l in log.Where(l => l.Contains("breaking off") || l.Contains("going around")).Take(4)) Console.WriteLine("    " + l);
+    Check(lands.Count == rush.Count, "every arrival lands");
+    Check(gaps.Count > 0 && gaps.Min() >= 75, "spaced at the runway (75 s or more between landings)");
+    Check(C("holding") == 0 && C("making a 360") == 0, "no holds and no 360s");
+    Check(C("breaking off") <= 1 && C("going around") == 0, "at most one break-off, no go-arounds");
+    Check(negative == 0, "nobody is spaced behind an aircraft that's behind it");
+}
+
 Console.WriteLine("== The trombone: arrivals 3.5 nm apart on the downwind are spaced by moving their base turns — no holds, no 360s (CYYZ, 17 Nov)");
 {
     var data = TestAirport.Build(false);

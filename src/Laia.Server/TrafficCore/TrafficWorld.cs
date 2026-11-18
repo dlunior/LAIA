@@ -139,6 +139,8 @@ public sealed class Flight
     /// <summary>Predicted seconds to the threshold (updated every 5 s), its place in the landing order on its runway,
     /// and the landing times predicted 30, 10 and 5 minutes out (world time), to measure the prediction.</summary>
     public double EtaNominal = double.NaN;
+    /// <summary>When the arrival manager last looked at moving it to a runway with less delay, and when it last moved it.</summary>
+    public double RwyCheckAt = -999, RwySwitchAt = -999;
     public double EtaSec = double.NaN, EtaAt = -999, Pred30 = double.NaN, Pred10 = double.NaN, Pred5 = double.NaN;
     public int Seq;
     /// <summary>Arrival manager: seconds this arrival must lose to land at its slot behind the one ahead (0 = none),
@@ -602,8 +604,13 @@ public sealed partial class TrafficWorld
         {
             var i = 0;
             Flight? prev = null; double prevSlot = 0;
-            // Frozen arrivals (inside ~15 minutes) keep their place; the rest are ordered by their own unhindered time.
+            // Every arrival keeps its place in the landing order from the moment it's sequenced (KORD, 18 Nov: frozen only
+            // inside 15 minutes, the order mixed frozen slots with unhindered times and kept changing — arrivals spaced
+            // behind aircraft 60 nm behind them, held, vectored and broken off). A new arrival is placed by its own
+            // unhindered time among the others' slots; an arrival that can no longer make its slot (its unhindered time
+            // is past the next one's) drops back. The user is placed by their predicted time.
             var ordered = g.OrderBy(f => f.Frozen ? f.FrozenSlot : f.EtaNominal).ToList();
+            _timeline[g.Key] = new();
             // A runway for landings and take-offs both (KORD at night, 16 Nov: 10C for everything, arrivals every 107–124 s,
             // so the departures — which need about 165 s between two arrivals — waited 20 minutes and more): the arrival
             // manager plans a departure gap between arrivals for each departure still to go, as a controller spaces the
@@ -625,10 +632,11 @@ public sealed partial class TrafficWorld
                     }
                     slot = Math.Max(slot, prevSlot + gapNeed + 15);
                 }
+                _timeline[g.Key].Add((slot, f));
                 if (f == UserArr) { prev = f; prevSlot = slot; continue; }
                 f.Delay = slot - f.EtaNominal;
-                if (f.Frozen) f.FrozenSlot = Math.Max(f.FrozenSlot, slot);
-                else if (f.EtaSec < 900) { f.Frozen = true; f.FrozenSlot = slot; }
+                f.Frozen = true; f.FrozenSlot = slot;
+                if (Time - f.RwyCheckAt >= 30) { f.RwyCheckAt = Time; try { BalanceRunway(f); } catch { } }
                 if (Time - f.SlowAt >= 5) { f.SlowAt = Time; AssignSequenceSpeed(f); }
                 f.Slowed = f.SlowDv > 0;
                 prev = f; prevSlot = slot;
@@ -3804,6 +3812,54 @@ public sealed partial class TrafficWorld
     /// 20 nm out — worked out on its own predicted path — and logged when it changes by 10 kt or more, like a
     /// controller's "reduce speed to 250".
     /// </summary>
+    /// <summary>Each runway's landing order from the last pass: (slot, flight).</summary>
+    private readonly Dictionary<int, List<(double slot, Flight f)>> _timeline = new();
+
+    /// <summary>The earliest slot on a runway at or after a time that keeps the gaps needed to the arrivals either side.</summary>
+    private double EarliestSlot(int r, double eta, Flight f)
+    {
+        if (!_timeline.TryGetValue(r, out var tl) || tl.Count == 0) return eta;
+        var list = tl.Where(x => x.f != f && !x.f.Done && !x.f.OnGround).OrderBy(x => x.slot).ToList();
+        var t = eta;
+        for (var i = 0; i <= list.Count; i++)
+        {
+            if (i > 0) t = Math.Max(t, list[i - 1].slot + ThresholdGapNeeded(list[i - 1].f, f, forDepartures: false) + 15);
+            if (i == list.Count || t + ThresholdGapNeeded(f, list[i].f, forDepartures: false) + 15 <= list[i].slot) return t;
+        }
+        return t;
+    }
+
+    /// <summary>
+    /// Planning the runway (user, 18 Nov: "planning runway sequencing"): an arrival still 50 nm or more out with two
+    /// minutes or more of delay on its runway moves to another landing runway its STAR serves when that one has a slot
+    /// at least 90 s sooner — as the arrival manager balances parallel runways — at most once every 10 minutes.
+    /// </summary>
+    private void BalanceRunway(Flight f)
+    {
+        if (f.Rwy is not { } cur || f.Path is null || f.Phase != "arriving" || f.Test) return;
+        var dth = (f.ThrS - f.S) / Geo2.MPerNm;
+        if (dth < 50 || f.Delay < 120 || Time - f.RwySwitchAt < 600 || ArrRwys.Count < 2 || double.IsNaN(f.EtaNominal)) return;
+        var star = f.StarPick?.p;
+        double best = f.Delay; RunwayEnd? pick = null;
+        foreach (var r in ArrRwys)
+        {
+            if (r.Runway == cur.Runway || r.LengthM < f.P.MinRunwayM) continue;
+            if (star is not null && !Serves(star, r)) continue;
+            // Its time to that runway instead: the difference in distance at about 220 kt.
+            var eta = f.EtaNominal + ((f.Pos - r.Threshold).Length - (f.Pos - cur.Threshold).Length) / (220 * Kt);
+            var d = EarliestSlot(r.Runway, eta, f) - f.EtaNominal;
+            if (d < best - 90) { best = d; pick = r; }
+        }
+        if (pick is null) return;
+        var was = f.Delay;
+        f.Rwy = pick;
+        BuildArrivalPath(f, null, f.Pos);
+        f.S = 0; f.Frozen = false; f.SlowDv = 0; f.RwySwitchAt = Time; f.EtaAt = -99;
+        _rwySwitches++;
+        Log($"{f.Callsign}: runway {pick.Ident} instead of {cur.Ident} for less delay ({best:0} s instead of {was:0} s)");
+    }
+    private int _rwySwitches;
+
     private void AssignSequenceSpeed(Flight f)
     {
         if (f.Rwy is null || f.Path is null) return;
@@ -3823,6 +3879,17 @@ public sealed partial class TrafficWorld
                 if (EtaToThreshold(f, dth) - base0 >= f.Delay) break;
             }
             f.SlowDv = Math.Abs(dv - keep) < 10 && keep > 0 ? keep : dv;
+            // More delay than speed (40 kt slower) and the trombone near the runway can take: delay vectors on the way
+            // in, far out (beyond 40 nm), a few minutes at a time — never a hold.
+            if (dv >= 40 && dth > 40 && Time - f.LastVector > 300)
+            {
+                var bySpeed = EtaToThreshold(f, dth) - base0;
+                var tromb = Trombone(f, 0, "");
+                var byTrombone = double.IsNaN(tromb) || double.IsNaN(f.BaseTurnNm) ? 0 : Math.Max(0, 25 - f.BaseTurnNm) * 2 * Geo2.MPerNm / (200 * Kt) * 0.6;
+                var left = f.Delay - bySpeed - byTrombone;
+                if (left > 90)
+                    Vector(f, Math.Min(left, 300), $"{f.Delay:0} s delay for the sequence (number {f.Seq} for {f.Rwy.Ident}), {bySpeed:0} s of it by speed");
+            }
         }
         if (f.SlowDv > 0 && (old == 0 || Math.Abs(f.SlowDv - old) >= 10))
         {
@@ -4049,8 +4116,8 @@ public sealed partial class TrafficWorld
         get
         {
             var gaps = _gapExcess.Count == 0 ? "" : $"landings {_gapExcess.Average():+0;-0} s on average beyond the gap needed ({_gapsShort} short)";
-            var acts = $"{_speedAssigns} speed reductions, {_vectors} vectors, {_orbits} 360s, {_holds} holds, {_breakoffs} break-offs";
-            return gaps.Length == 0 && _speedAssigns + _vectors + _orbits + _holds + _breakoffs == 0 ? null : (gaps.Length > 0 ? gaps + "; " : "") + acts;
+            var acts = $"{_speedAssigns} speed reductions, {_trombones} downwind changes, {_rwySwitches} runway moves, {_vectors} vectors, {_breakoffs} break-offs";
+            return gaps.Length == 0 && _speedAssigns + _vectors + _trombones + _rwySwitches + _breakoffs == 0 ? null : (gaps.Length > 0 ? gaps + "; " : "") + acts;
         }
     }
 
@@ -5160,6 +5227,8 @@ public sealed partial class TrafficWorld
             if (f.Seq > 1)
             {
                 leader = pool.FirstOrDefault(o => o != f && o.Kind == "arrival" && o.Rwy?.Runway == rwy.Runway && o.Seq == f.Seq - 1 && !o.OnGround && !o.Done && o.Phase != "go-around");
+                // Only if it really is ahead in time (not one predicted well after this one).
+                if (leader is not null && !double.IsNaN(leader.EtaSec) && !double.IsNaN(f.EtaSec) && leader.EtaSec > f.EtaSec + 60) leader = null;
                 if (leader is not null) leaderD = (leader.ThrS - leader.S) / Geo2.MPerNm;
             }
             if (leader is null)
@@ -5210,11 +5279,13 @@ public sealed partial class TrafficWorld
                 var trombone = !double.IsNaN(f.TromboneLeft) && f.TromboneLeft < 40 && !tooClose;
                 // Vectors before a hold or a 360 (path stretching): a detour as long as the time to lose, when there's
                 // route left to do it; a hold only for long delays (over 4 minutes) or when no detour fits.
-                if (!trombone && (short_ > 45 || tooClose) && dth > 13 && short_ <= 240 && Time - f.LastVector > 150 && Time - f.LastOrbit > 120
+                // No holds and no 360s (user, 18 Nov, KORD: "I am taking away the ability to put holds on aircraft"): the
+                // arrival manager plans the delay far out with speed, a runway with less delay, delay vectors on the
+                // way in and the trombone. Close in, vectors only with real route left (beyond 20 nm), and a break-off
+                // only when radar spacing would actually be lost or the gap is far too short to make up.
+                if (!trombone && (short_ > 45 || tooClose) && dth > 20 && short_ <= 300 && Time - f.LastVector > 150
                     && Vector(f, Math.Max(short_, 45) + 15, $"{gap:0.0} nm behind {leader.Callsign}, {short_:0} s short at the runway")) return;
-                if (!trombone && (short_ > 45 || tooClose) && dth > 15 && Time - f.LastHold > 300 && Time - f.LastOrbit > 120 && Time - f.LastVector > 90) { Hold(f, $"{gap:0.0} nm behind {leader.Callsign}, {short_:0} s short at the runway"); return; }
-                if (!trombone && (short_ > 45 || tooClose) && dth > 12 && dth <= 15 && Time - f.LastOrbit > 240 && Time - f.LastVector > 90) { Orbit(f, $"{gap:0.0} nm behind {leader.Callsign}"); return; }
-                if (!trombone && (short_ > 40 || tooClose) && dth > 5 && dth <= 12 && Time - f.LastOrbit > 240) { BreakOff(f, $"{gap:0.0} nm behind {leader.Callsign}, {short_:0} s short at the runway"); return; }
+                if (!trombone && (tooClose || short_ > 75) && dth > 5 && dth <= 12 && Time - f.LastOrbit > 240) { BreakOff(f, $"{gap:0.0} nm behind {leader.Callsign}, {short_:0} s short at the runway"); return; }
             }
             if (f.Phase == "flare") target = f.P.Vapp - 5;
             // Energy: it slows only as fast as its configuration and descent allow (descend OR slow, not both).
