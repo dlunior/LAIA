@@ -141,6 +141,9 @@ public sealed class Flight
     public double EtaNominal = double.NaN;
     /// <summary>When the arrival manager last looked at moving it to a runway with less delay, and when it last moved it.</summary>
     public double RwyCheckAt = -999, RwySwitchAt = -999;
+    /// <summary>Its place in the landing order: its unhindered time when first sequenced (NaN: not yet). Stretching its
+    /// path (delay vectors, the trombone) doesn't change it, so it can't swap the order.</summary>
+    public double OrderKey = double.NaN;
     public double EtaSec = double.NaN, EtaAt = -999, Pred30 = double.NaN, Pred10 = double.NaN, Pred5 = double.NaN;
     public int Seq;
     /// <summary>Arrival manager: seconds this arrival must lose to land at its slot behind the one ahead (0 = none),
@@ -609,7 +612,23 @@ public sealed partial class TrafficWorld
             // behind aircraft 60 nm behind them, held, vectored and broken off). A new arrival is placed by its own
             // unhindered time among the others' slots; an arrival that can no longer make its slot (its unhindered time
             // is past the next one's) drops back. The user is placed by their predicted time.
-            var ordered = g.OrderBy(f => f.Frozen ? f.FrozenSlot : f.EtaNominal).ToList();
+            foreach (var f in g) if (f == UserArr || double.IsNaN(f.OrderKey) || !f.Frozen) f.OrderKey = f.EtaNominal;
+            var ordered = g.OrderBy(f => f.OrderKey).ToList();
+            // One that will clearly be first after all (it couldn't lose its delay, or the one ahead was slowed or
+            // stretched more than planned): closer to the runway along its route by 2 nm or more, and landing with the
+            // full gap before the other at the speeds they're flying now — they swap.
+            for (var k = 0; k + 1 < ordered.Count; k++)
+            {
+                var a = ordered[k]; var b = ordered[k + 1];
+                if (a == UserArr || b == UserArr || a.Path is null || b.Path is null || double.IsNaN(a.EtaSec) || double.IsNaN(b.EtaSec)) continue;
+                var da = (a.ThrS - a.S) / Geo2.MPerNm; var db = (b.ThrS - b.S) / Geo2.MPerNm;
+                if (db < da - 2 && b.EtaSec + ThresholdGapNeeded(b, a, forDepartures: false) < a.EtaSec)
+                {
+                    (a.OrderKey, b.OrderKey) = (b.OrderKey, a.OrderKey);
+                    ordered[k] = b; ordered[k + 1] = a;
+                    Log($"{b.Callsign}: now ahead of {a.Callsign} for {b.Rwy!.Ident} ({db:0} nm to go against {da:0})");
+                }
+            }
             _timeline[g.Key] = new();
             // A runway for landings and take-offs both (KORD at night, 16 Nov: 10C for everything, arrivals every 107–124 s,
             // so the departures — which need about 165 s between two arrivals — waited 20 minutes and more): the arrival
@@ -3881,14 +3900,14 @@ public sealed partial class TrafficWorld
             f.SlowDv = Math.Abs(dv - keep) < 10 && keep > 0 ? keep : dv;
             // More delay than speed (40 kt slower) and the trombone near the runway can take: delay vectors on the way
             // in, far out (beyond 40 nm), a few minutes at a time — never a hold.
-            if (dv >= 40 && dth > 40 && Time - f.LastVector > 300)
+            if (dv >= 40 && dth > 40 && Time - f.LastVector > 180)
             {
                 var bySpeed = EtaToThreshold(f, dth) - base0;
                 var tromb = Trombone(f, 0, "");
                 var byTrombone = double.IsNaN(tromb) || double.IsNaN(f.BaseTurnNm) ? 0 : Math.Max(0, 25 - f.BaseTurnNm) * 2 * Geo2.MPerNm / (200 * Kt) * 0.6;
                 var left = f.Delay - bySpeed - byTrombone;
                 if (left > 90)
-                    Vector(f, Math.Min(left, 300), $"{f.Delay:0} s delay for the sequence (number {f.Seq} for {f.Rwy.Ident}), {bySpeed:0} s of it by speed");
+                    Vector(f, Math.Min(left, dth > 60 ? 600 : 300), $"{f.Delay:0} s delay for the sequence (number {f.Seq} for {f.Rwy.Ident}), {bySpeed:0} s of it by speed");
             }
         }
         if (f.SlowDv > 0 && (old == 0 || Math.Abs(f.SlowDv - old) >= 10))
@@ -5227,8 +5246,6 @@ public sealed partial class TrafficWorld
             if (f.Seq > 1)
             {
                 leader = pool.FirstOrDefault(o => o != f && o.Kind == "arrival" && o.Rwy?.Runway == rwy.Runway && o.Seq == f.Seq - 1 && !o.OnGround && !o.Done && o.Phase != "go-around");
-                // Only if it really is ahead in time (not one predicted well after this one).
-                if (leader is not null && !double.IsNaN(leader.EtaSec) && !double.IsNaN(f.EtaSec) && leader.EtaSec > f.EtaSec + 60) leader = null;
                 if (leader is not null) leaderD = (leader.ThrS - leader.S) / Geo2.MPerNm;
             }
             if (leader is null)
@@ -5242,10 +5259,14 @@ public sealed partial class TrafficWorld
             {
                 // Measured and predicted all the time: the gap now, and the predicted gap when each crosses the
                 // threshold (compression: the leader slows to its approach speed first), against the gap needed there.
-                var gap = dth - leaderD;
+                // The gap in miles: along the final when both are on it; otherwise how far apart they really are (on
+                // different routes the difference in miles to go says nothing about radar separation).
+                bool OnFinal(Flight x, double d) => d < 15 && x.Rwy is { } xr && Math.Abs(xr.Offset(x.Pos)) < 0.6 * Geo2.MPerNm && xr.Along(x.Pos) < 0;
+                var gap = OnFinal(f, dth) && OnFinal(leader, leaderD) ? dth - leaderD
+                    : Math.Abs(f.AltFt - leader.AltFt) >= 1000 ? 99 : (f.Pos - leader.Pos).Length / Geo2.MPerNm;
                 var gapSec = EtaToThreshold(f, dth) - (leader == UserArr ? leader.EtaSec : EtaToThreshold(leader, leaderD));
                 var needSec = ThresholdGapNeeded(leader, f);
-                var needNm = Cwt.MilesBehind(leader.Wake, f.Wake);
+                var needNm = OnFinal(f, dth) && OnFinal(leader, leaderD) ? Cwt.MilesBehind(leader.Wake, f.Wake) : 3;
                 // Speed first (7110.65 5-7-1), never below what a controller may assign (5-7-3: jets 210 kt below
                 // 10,000 ft, 170 kt within 20 miles; turboprops 200 / 150), never inside 5 miles (5-7-2), in 5-kt steps.
                 if ((gapSec < needSec || gap < needNm + 0.5) && dth > 5)
@@ -5285,7 +5306,7 @@ public sealed partial class TrafficWorld
                 // only when radar spacing would actually be lost or the gap is far too short to make up.
                 if (!trombone && (short_ > 45 || tooClose) && dth > 20 && short_ <= 300 && Time - f.LastVector > 150
                     && Vector(f, Math.Max(short_, 45) + 15, $"{gap:0.0} nm behind {leader.Callsign}, {short_:0} s short at the runway")) return;
-                if (!trombone && (tooClose || short_ > 75) && dth > 5 && dth <= 12 && Time - f.LastOrbit > 240) { BreakOff(f, $"{gap:0.0} nm behind {leader.Callsign}, {short_:0} s short at the runway"); return; }
+                if (!trombone && (tooClose || (short_ > 75 && OnFinal(f, dth))) && dth > 5 && dth <= 12 && Time - f.LastOrbit > 240) { BreakOff(f, $"{gap:0.0} nm behind {leader.Callsign}, {short_:0} s short at the runway"); return; }
             }
             if (f.Phase == "flare") target = f.P.Vapp - 5;
             // Energy: it slows only as fast as its configuration and descent allow (descend OR slow, not both).
