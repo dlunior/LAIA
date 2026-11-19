@@ -3224,7 +3224,7 @@ public sealed partial class TrafficWorld
                     {
                         f.FanIdx = bi; f.Fan = fan; f.FanLeave = fan[bi].pts[0];
                         starPts.Clear();
-                        starPts.AddRange(fan[bi].pts.Skip(bj + 1).Select(q => RealPoint(rwy, q)));
+                        starPts.AddRange(fan[bi].pts.Skip(bj + 1).Select(q => new AirPoint(q, "")));
                         realVec = (starPts.Count - 1, new List<V2>());
                     }
                 }
@@ -3235,14 +3235,14 @@ public sealed partial class TrafficWorld
             {
                 starOnly = rv.pts.Count == 0 ? 0 : rv.cut + 1;   // joined a real track: no STAR left
                 starPts.RemoveRange(rv.cut + 1, starPts.Count - rv.cut - 1);
-                starPts.AddRange(rv.pts.Select(q => RealPoint(rwy, q)));
+                starPts.AddRange(rv.pts.Select(q => new AirPoint(q, "")));
             }
             // No real tracks off this STAR to this runway (user, 19 Nov, AAL2867 on SHAIN2 for 27C sent straight across
             // the field to the approach's first fix): from where the STAR ends, the way real arrivals to this runway
             // that passed there flew on — whichever STAR they came by.
             if (realVec is null && starPts.Count > 0 && DirectionTrack(rwy, starPts[^1].P) is { } dtr)
             {
-                starPts.AddRange(dtr.Select(q => RealPoint(rwy, q)));
+                starPts.AddRange(dtr.Select(q => new AirPoint(q, "")));
                 realVec = (starPts.Count - 1, new List<V2>());
             }
             if (star is not null && starPts.Count > 0) names.Add(star.Name);
@@ -3330,6 +3330,9 @@ public sealed partial class TrafficWorld
                 var alt = RealAltAt(rwy, f.Path.At(sR).p);
                 if (double.IsNaN(alt)) continue;
                 var ceil = Math.Ceiling((alt + 500) / 100) * 100;
+                // Published restrictions win (user, 19 Nov: "make sure STAR altitude restrictions trump ADSB data"): no
+                // real-traffic ceiling under a published floor still ahead, none near a published limit, and none
+                // tighter than the 3:1 descent to a published "at or below" ahead would allow anyway is needed.
                 var floor = published.Where(c => c.S >= sR && c.Min > 0).Select(c => c.Min).DefaultIfEmpty(0).Max();
                 if (published.Any(c => Math.Abs(c.S - sR) < 2 * nmR && c.Max > 0)) continue;   // a published one right there
                 f.AltLimits.Add((sR, 0, Math.Max(ceil, floor)));
