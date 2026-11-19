@@ -716,14 +716,16 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     {
         // The departure field and the destination prepared ahead (user, 13 Nov, CYWG–CYYC: "not showing the real
         // track or taxi flow for my arrival airport").
-        List<TrafficWorld> ws;
-        lock (_gate) ws = MapAirports().ToList();
-        var parts = new List<(TrafficWorld w, AirportProfile p, string key)>();
-        foreach (var w in ws)
+        // And the satellite fields (user, 19 Nov: "incorporate ADSB data for satellite fields as well … different
+        // colors on the map"), marked so the map draws them in their own colours.
+        List<(TrafficWorld w, bool sat)> ws;
+        lock (_gate) ws = MapAirports().Select(w => (w, false)).Concat(_neighbours.Select(n => (n, true))).DistinctBy(x => x.Item1.Apt.Icao).ToList();
+        var parts = new List<(TrafficWorld w, AirportProfile p, string key, bool sat)>();
+        foreach (var (w, sat) in ws)
         {
             if (history.Profile(w.Apt.Icao) is not { } p) continue;
             var key = $"{p.Icao}@{p.LearnedUtc:O}:{string.Join("/", w.ArrRwys.Select(e => e.Ident))}:{string.Join("/", w.DepRwys.Select(e => e.Ident))}";
-            parts.Add((w, p, key));
+            parts.Add((w, p, key, sat));
         }
         if (parts.Count == 0) return null;
         var all = string.Join("|", parts.Select(x => x.key));
@@ -734,7 +736,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         }
         var tracks = new List<object>();
         var icaos = new List<string>();
-        foreach (var (w, p, _) in parts)
+        foreach (var (w, p, _, sat) in parts)
         {
             // Every real arrival to the landing runways and departure from the departure runways, the part below FL200
             // (user, 15 Nov: "all arrival and departure tracks lower than FL200 should be shown" — no longer an equal
@@ -754,7 +756,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 var arrival = t.Kind == "arrival";
                 if (!(arrival ? arrRw.Count == 0 || arrRw.Contains(t.Runway) : depRw.Count == 0 || depRw.Contains(t.Runway))) continue;
                 var pts = Thin(Below(t.Points, arrival));
-                if (pts.Count >= 2) tracks.Add(new { kind = t.Kind, points = pts });
+                if (pts.Count >= 2) tracks.Add(new { kind = t.Kind, sat, points = pts });
             }
             icaos.Add($"{p.Icao} {p.Day}");
         }

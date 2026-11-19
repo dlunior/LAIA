@@ -75,6 +75,7 @@
       <label><input type="checkbox" id="tFollow">Follow me</label>
       <label><input type="checkbox" id="tSky" checked>Whole sky</label>
       <label><input type="checkbox" id="tReal">Real tracks</label>
+      <label title="Satellite fields' real tracks: arrivals amber, departures pink"><input type="checkbox" id="tRealSat" checked>…satellites too</label>
       <label title="The planned direction of each one-way stretch of taxiway: violet arrivals, teal departures, white both; solid from real taxi tracks, dashed worked out from the layout"><input type="checkbox" id="tFlow">Taxi flow</label>
     </div>
     <div style="margin-top:8px;display:flex;gap:6px"><button id="bAirport">Airport</button><button id="bMe">Me</button><button id="bList">Flights</button></div>
@@ -242,11 +243,18 @@ async function updateReal() {
     if (d.key === realKey) return;
     realKey = d.key;
     layers.real.clearLayers();
-    const arr = [], dep = [];
-    for (const t of d.tracks) (t.kind === "arrival" ? arr : dep).push(t.points);
+    // Satellite fields' real tracks in their own colours: arrivals amber, departures pink.
+    const arr = [], dep = [], sArr = [], sDep = [];
+    const sats = $("tRealSat").checked;
+    for (const t of d.tracks) {
+      if (t.sat && !sats) continue;
+      (t.sat ? (t.kind === "arrival" ? sArr : sDep) : (t.kind === "arrival" ? arr : dep)).push(t.points);
+    }
     const opt = { renderer: realCanvas, weight: 1.2, opacity: .35, interactive: false, smoothFactor: 1.5 };
     if (arr.length) L.polyline(arr, { ...opt, color: "#a78bfa" }).addTo(layers.real);
     if (dep.length) L.polyline(dep, { ...opt, color: "#2dd4bf" }).addTo(layers.real);
+    if (sArr.length) L.polyline(sArr, { ...opt, color: "#f59e0b" }).addTo(layers.real);
+    if (sDep.length) L.polyline(sDep, { ...opt, color: "#f472b6" }).addTo(layers.real);
   } catch { }
 }
 
@@ -447,6 +455,7 @@ $("tRing").onchange = render;
 $("tLabels").onchange = render;
 $("tSky").onchange = () => { skyAt = 0; if (!$("tSky").checked) sky = []; render(); };
 $("tAllPaths").onchange = () => { allPathsAt = 0; drawAllPaths(); };
+$("tRealSat").onchange = () => { realAt = 0; realKey = ""; updateReal(); };
 map.on("click", () => { if (selected) { selected = null; $("sel").hidden = true; layers.sel.clearLayers(); render(); } });
 poll();
 </script>
