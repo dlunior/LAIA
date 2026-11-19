@@ -163,6 +163,7 @@ app.MapGet("/api/map/flow", (TrafficEngine t) => t.TaxiFlowMap() is { } r ? Resu
 // replay real airports from them).
 app.MapGet("/api/learned", (TrafficEngine t, AdsbHistory h) => Results.Json(t.AirportsInUse().Select(i => new { icao = i, file = h.ProfileFile(i) })
     .Where(x => x.file is not null).Select(x => new { x.icao, modified = File.GetLastWriteTimeUtc(x.file!) }), jsonOpts));
+app.MapPost("/api/selftest", (TrafficEngine t) => { t.RestartSelfTest(); return Results.Ok(); });
 app.MapGet("/api/learned/{icao}", (string icao, AdsbHistory h) => h.ProfileFile(icao) is { } f ? Results.File(f, "application/json") : Results.NotFound());
 app.MapGet("/api/map/real", (TrafficEngine t) => t.RealTracks() is { } r ? Results.Json(r, jsonOpts) : Results.NotFound());
 app.MapGet("/api/map/net/{id}", (string id, TrafficEngine t) => t.MapNetPath(id) is { } p ? Results.Json(p, jsonOpts) : Results.NotFound());

@@ -396,6 +396,100 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     /// already has), and runs late by the difference — a departure delay at its origin if it hasn't left yet, a slower
     /// cruise (no more than 15% slower) if it's flying. So it reaches the 200 nm hand-over at about its slot.
     /// </summary>
+    // ------------------------------------------------------------------ self-test (offline Peak replay)
+
+    /// <summary>
+    /// A fast offline replay of the traffic airport (user, 19 Nov: "feels like we are playing whack a mole" — the tests
+    /// in CI use a made-up one-runway airport, so problems with several runways and real tracks only showed on the
+    /// user's screen). Once per server version and airport, when the airport is prepared, a second copy of it runs
+    /// unseen: an hour of its busiest three (Peak), from an empty sky, with the same data (layout, schedule, procedures,
+    /// learned real tracks, ATIS rules, wind). A few milliseconds of each traffic step, so it takes several minutes, and
+    /// the result goes to the log as a scorecard ("Self-test …") to compare one version with the next.
+    /// </summary>
+    private TrafficWorld? _shadow;
+    private string? _shadowDoneFor, _shadowKey;
+    private readonly List<string> _shadowLog = new();
+    private double _shadowStartWeek, _shadowStartedAt;
+    private const double ShadowSecs = 3600;
+    public bool SelfTestRunning => _shadow is not null;
+    public void RestartSelfTest() { lock (_gate) { _shadowDoneFor = null; _shadow = null; } }
+
+    private void SelfTestStep()
+    {
+        var w = _world;
+        if (_shadow is null)
+        {
+            if (w is null || w.RunwayOnly || _prep is not { Ready: true } || w.Learned is null || w.Schedule is null) return;
+            _shadowKey = $"{typeof(TrafficEngine).Assembly.GetName().Version?.ToString(3)}|{w.Apt.Icao}";
+            if (_shadowDoneFor == _shadowKey) return;
+            _shadowLog.Clear();
+            TrafficWorld? s = null;
+            s = new TrafficWorld(w.Apt, source, seed: 7)
+            {
+                Automatic = false, GenericTraffic = false, HoldRunways = false,
+                Log = line => { if (_shadowLog.Count < 20000) _shadowLog.Add($"{s!.Time,6:0} {line}"); },
+            };
+            s.Schedule = w.Schedule; s.Gates = w.Gates; s.Atis = w.Atis; s.Rules = w.Rules; s.SidTops = w.SidTops; s.StarExpects = w.StarExpects;
+            s.Routes = w.Routes; s.NavData = w.NavData; s.Learned = w.Learned; s.Locate = w.Locate; s.Wind = w.Wind; s.Aloft = w.Aloft;
+            s.LowWeather = w.LowWeather; s.SafetyLogic = w.SafetyLogic; s.LiveLanding = w.LiveLanding; s.LiveDeparting = w.LiveDeparting;
+            s.WeekMinute = w.WeekMinute;
+            s.Level = TrafficLevel.Peak;
+            _shadowStartWeek = w.WeekMinute; _shadowStartedAt = DateTime.UtcNow.Ticks;
+            _shadow = s;
+            log.LogInformation("Self-test started: {icao} at Peak, an hour replayed offline (version {v})", w.Apt.Icao, _shadowKey.Split('|')[0]);
+            return;
+        }
+        var sh = _shadow;
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (sw.Elapsed.TotalMilliseconds < 25 && sh.Time < ShadowSecs)
+        {
+            sh.WeekMinute = _shadowStartWeek + sh.Time / 60;
+            sh.Step(0.5);
+        }
+        if (sh.Time < ShadowSecs) return;
+        _shadow = null;
+        _shadowDoneFor = _shadowKey;
+        var mins = (DateTime.UtcNow.Ticks - _shadowStartedAt) / TimeSpan.TicksPerMinute;
+        foreach (var line in Scorecard(_shadowLog, sh, mins)) log.LogInformation("{line}", line);
+    }
+
+    /// <summary>The self-test's scorecard: what happened in the hour, per 10 landings, and the worst moments.</summary>
+    private static List<string> Scorecard(List<string> lines, TrafficWorld sh, double realMin)
+    {
+        int C(string k) => lines.Count(l => l.Contains(k));
+        var landed = lines.Where(l => l.Contains(": landed runway")).ToList();
+        int met = 0, tot = 0, shortGaps = 0; var extra = new List<int>();
+        foreach (var l in landed)
+        {
+            var m = System.Text.RegularExpressions.Regex.Match(l, @"restrictions (\d+) of (\d+) met");
+            if (m.Success) { met += int.Parse(m.Groups[1].Value); tot += int.Parse(m.Groups[2].Value); }
+            var g = System.Text.RegularExpressions.Regex.Match(l, @"(\d+) s behind \S+ \(needed (\d+)\)");
+            if (g.Success) { var e = int.Parse(g.Groups[1].Value) - int.Parse(g.Groups[2].Value); extra.Add(e); if (e < -5) shortGaps++; }
+        }
+        var n = Math.Max(1, landed.Count);
+        string Per(int x) => (10.0 * x / n).ToString("0.0");
+        var spacing = lines.Count(l => l.Contains("vectors for spacing (") && !l.Contains("delay for the sequence"));
+        var delay = C("delay for the sequence),");
+        var takeovers = lines.Where(l => l.Contains("taken over from the whole sky")).ToList();
+        var real = takeovers.Count(l => l.Contains("real traffic flies"));
+        var tooHigh = takeovers.Count(l => System.Text.RegularExpressions.Regex.Match(l, @"([\d.]+) nm out at (\d+) ft") is { Success: true } m
+            && double.Parse(m.Groups[2].Value) > double.Parse(m.Groups[1].Value) * 300 + 4000 && double.Parse(m.Groups[1].Value) < 150);
+        extra.Sort();
+        var res = new List<string>
+        {
+            $"Self-test {sh.Apt.Icao} (Peak, {sh.Time / 60:0} min replayed offline in {realMin:0} min; landing {string.Join("/", sh.ArrRwys.Select(r => r.Ident))}): " +
+            $"{landed.Count} landings, {C(": took off") + C(": airborne")} take-offs; per 10 landings — vectors for spacing {Per(spacing)}, delay vectors {Per(delay)}, " +
+            $"break-offs {Per(C("breaking off"))}, go-arounds {Per(C("going around"))}, runway switches {Per(C(" instead of "))}, real-track moves {Per(C("real track off its STAR"))}, " +
+            $"trombones {Per(C("downwind extended"))}; holds {C("holding for")}, 360s {C("making a 360")}; separation warnings {C("SEPARATION")}; " +
+            $"restrictions {met} of {tot} met; landings short of the gap needed {shortGaps}" + (extra.Count > 0 ? $", median {extra[extra.Count / 2]} s beyond it" : "") +
+            $"; take-overs {takeovers.Count} ({(takeovers.Count > 0 ? 100 * real / takeovers.Count : 0)}% on real tracks, {C("sequenced: starts")} moved back, {tooHigh} too high); " +
+            $"failures {C("failed")}, removed {C("removed after")}",
+        };
+        foreach (var l in lines.Where(l => l.Contains("breaking off") || l.Contains("going around") || l.Contains("SEPARATION") || l.Contains("failed")).Take(8))
+            res.Add("Self-test   " + l);
+        return res;
+    }
+
     /// <summary>The metering delay the whole sky's copy of a scheduled arrival has (0 when none).</summary>
     private double MeterFor(string icao, Laia.Common.Airports.ScheduleLeg l)
     {
@@ -1318,6 +1412,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                         Part(w.Apt.Icao);
                     }
                     _retiring.RemoveAll(w => w.Flights.Count == 0 || w.Flights.All(f => f.Kind == "parked"));
+                    try { SelfTestStep(); } catch (Exception ex) { log.LogInformation("Self-test stopped: {msg}", ex.Message); _shadow = null; _shadowDoneFor = _shadowKey; }
                     _stampMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 }
             }
