@@ -212,7 +212,8 @@ public sealed partial class TrafficWorld
             _level = value;
             var isBusy = value >= TrafficLevel.Medium;
             if (value != TrafficLevel.Peak) { _peakSet = false; _peakOffset = 0; PeakInfo = null; }
-            if (wasBusy != isBusy && ArrRwy is not null) SelectRunways(true);
+            if ((wasBusy != isBusy || value == TrafficLevel.Peak || _wasPeak) && ArrRwy is not null) SelectRunways(true);
+            _wasPeak = value == TrafficLevel.Peak;
             if (value != TrafficLevel.Off) _levelChanged = true;
         }
     }
@@ -394,14 +395,19 @@ public sealed partial class TrafficWorld
         var usable = Apt.Ends.Where(e => e.LengthM >= 1400).ToList();
         if (usable.Count == 0) usable = Apt.Ends.ToList();
         bool WindOk(RunwayEnd e) => Wind.Headwind(e.Heading) >= -5 && Crosswind(e.Heading) <= 20;
+        // The Peak test replays the busiest real hours, but the ATIS and live traffic are today's, right now (KORD, 18 Nov
+        // at 23:00 local: one landing runway, six closed for the night, under a Monday-afternoon rush — every arrival was
+        // queued for 27C). In the Peak test the runways are the ones real traffic used on the learned days in this wind,
+        // with no night closures.
+        var peak = Level == TrafficLevel.Peak;
         // Closed runways (from the ATIS) are never used.
-        usable = usable.Where(e => !_atis.Closed.Contains(e.Ident)).ToList();
+        if (!peak) usable = usable.Where(e => !_atis.Closed.Contains(e.Ident)).ToList();
         if (usable.Count == 0) return;
         // The real ATIS always decides when it names the runways; the wind is only the fallback.
         // Every runway it names is used: several landing runways (Orlando lands 35L and 36L) and several departure runways.
         List<RunwayEnd> Ends(IEnumerable<string> ids) => ids.Where(id => !_atis.Closed.Contains(id))
             .Select(id => Apt.Ends.FirstOrDefault(e => e.Ident == id)).Where(e => e is not null).Select(e => e!).Distinct().OrderByDescending(e => e.LengthM).ToList();
-        var atisArrs = Ends(AtisLanding);
+        var atisArrs = peak ? new List<RunwayEnd>() : Ends(AtisLanding);
         if (atisArrs.Count > 0)
         {
             var atisDeps = Ends(AtisDeparting);
@@ -502,7 +508,8 @@ public sealed partial class TrafficWorld
     private (List<RunwayEnd> arr, List<RunwayEnd> dep, string why)? RealConfig(List<RunwayEnd> usable)
     {
         List<RunwayEnd> Map(IEnumerable<string> ids) => ids.Select(id => usable.FirstOrDefault(e => e.Ident == id)).Where(e => e is not null).Select(e => e!).Distinct().ToList();
-        var la = Map(LiveLanding); var ld = Map(LiveDeparting);
+        var la = Level == TrafficLevel.Peak ? new List<RunwayEnd>() : Map(LiveLanding);
+        var ld = Level == TrafficLevel.Peak ? new List<RunwayEnd>() : Map(LiveDeparting);
         bool Ok(RunwayEnd e) => Wind.Kt < 4 || (Wind.Headwind(e.Heading) >= -10 && Crosswind(e.Heading) <= 25);
         List<RunwayEnd> Top(IEnumerable<(string id, int n)> counts)
         {
@@ -980,7 +987,7 @@ public sealed partial class TrafficWorld
 
     // ------------------------------------------------------------------ peak-hour test setting
     private double _peakOffset;
-    private bool _peakSet;
+    private bool _peakSet, _wasPeak;
     private double _peakStart, _peakLen = 180;
     /// <summary>What the peak test is replaying, for the control page (null when not in use).</summary>
     public string? PeakInfo { get; private set; }
