@@ -168,10 +168,14 @@ public static class NetworkModel
         // little to slow down): the timed descent alone slows near the end and left arrivals thousands of feet high
         // when the airport took them over (WJA1272 at 26,490 ft 52 nm out).
         // The cruise ends where that path meets the cruise level, so the top of descent is where an airliner's would be.
-        var cap = l.ArrElev + (path - s) * 300 + 1500;
+        var (lat, lon, hdg) = l.PointAt(s);
+        // Miles to go: the filed route's, but no more than the way it will really be flown from here (user, 19 Nov,
+        // AAL2867 taken over 54 nm from O'Hare at 32,450 ft: its filed route still had about 100 nm to run, while from
+        // the hand-over it flies direct to its STAR). A little over the straight line, for the STAR and the vectors.
+        var toGo = Math.Min(path - s, Geo2.DistanceNm(lat, lon, l.ArrLat, l.ArrLon) * 1.3 + 10);
+        var cap = l.ArrElev + toGo * 300 + 1500;
         if (tau >= c) { alt = Math.Min(cruise, cap); phase = alt < cruise - 50 ? "descending" : "cruising"; }
         else alt = Math.Min(alt, cap);
-        var (lat, lon, hdg) = l.PointAt(s);
         return new NetPos(l, lat, lon, Math.Round(alt / 10) * 10, gs * 60, hdg, phase, cruise, s, t - tau + taxiIn);
     }
 
