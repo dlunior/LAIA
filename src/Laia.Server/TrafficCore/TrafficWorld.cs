@@ -4331,9 +4331,12 @@ public sealed partial class TrafficWorld
         _breakoffs++; f.Mgr = "vectored around"; f.Frozen = false; f.Rejoin = true;   // re-sequenced behind those nearer in
         Log($"{f.Callsign}: breaking off the approach for spacing ({why}): turn {(V2.Cross(V2.FromBearing(dir), outPt - p) > 0 ? "left" : "right")} heading {heading:000}, vectors back around");
         f.LastOrbit = Time; f.LastVector = Time; f.LastTrombone = Time;   // nothing else for it straight away
-        var after = new List<V2> { outPt };
-        after.AddRange(Vectors(outPt, rwy, ShapeFor(rwy)));
-        var pts = WithTurn(p, dir, after, f.Ias, f.AltFt).pts;
+        // A real turn out to the break-off point, then another from there onto the vectors back round (the corner at
+        // the point itself was too tight to fly: 12°/s in the offline check).
+        var first = WithTurn(p, dir, new List<V2> { outPt }, f.Ias, f.AltFt).pts;
+        var dirOut = first.Count >= 2 ? (first[^1] - first[^2]).Bearing : (outPt - p).Bearing;
+        var back = Vectors(outPt, rwy, ShapeFor(rwy));
+        var pts = back.Count > 0 ? first.Concat(WithTurn(outPt, dirOut, back, 200, f.AltFt).pts.Skip(1)).ToList() : first;
         var thrIndex = pts.Count;
         pts.Add(rwy.Threshold);
         pts.Add(rwy.FarEnd);
@@ -5365,6 +5368,8 @@ public sealed partial class TrafficWorld
             for (var j = i + 1; j < arr.Count; j++)
             {
                 var a = arr[i]; var b = arr[j];
+                // Arrivals to the same runway are already spaced in its landing sequence (speed, real tracks).
+                if (a.Rwy!.Runway == b.Rwy!.Runway) continue;
                 if ((a.Pos - b.Pos).Length > 60 * nm || Math.Abs(a.AltFt - b.AltFt) >= 1000 && Math.Sign(a.Vs) == Math.Sign(b.Vs)) continue;
                 var meet = false;
                 for (var t = 0.0; t <= 300 && !meet; t += 20)
