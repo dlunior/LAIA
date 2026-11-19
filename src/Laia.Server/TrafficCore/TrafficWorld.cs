@@ -1585,6 +1585,10 @@ public sealed partial class TrafficWorld
             // there needs its level piece too (MCO WHOVL "9,000–14,000, max 250": taken over 12 nm before it at
             // 17,500 ft and 280 kt, WJA1272 crossed at 13,000–14,300 ft and 254–280 kt every session).
             var high = c.Max > 10500 || (c.Max <= 0 && c.Min > 10500);
+            // Coming down from above 10,000 ft to a ceiling at or below it: 91.117's 250 kt applies there, so it needs
+            // the same level piece to slow from its descent speed (Midway JILLZ "at 10,000" crossed at 10,460 ft and
+            // 254 kt — still levelled at 10,000 slowing when it got there).
+            if (kt == 0 && c.Max > 0 && c.Max <= 10500 && f.AltFt > 10500 && f.Kind == "arrival") { kt = 250; high = true; }
             var from = high ? (f.P.Family == "turboprop" ? 230 : 280) : 250;
             var slowNm = kt > 0 && kt < from ? (from - kt) / 10 + 1 : 0;
             if (c.Max > 0) { var h = c.Max + Math.Max(0, ahead - slowNm) * 300; if (h < hi) { hi = h; hiS = c.S; } }
