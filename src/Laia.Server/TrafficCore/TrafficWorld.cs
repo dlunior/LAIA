@@ -3224,7 +3224,7 @@ public sealed partial class TrafficWorld
                     {
                         f.FanIdx = bi; f.Fan = fan; f.FanLeave = fan[bi].pts[0];
                         starPts.Clear();
-                        starPts.AddRange(fan[bi].pts.Skip(bj + 1).Select(q => new AirPoint(q, "")));
+                        starPts.AddRange(fan[bi].pts.Skip(bj + 1).Select(q => RealPoint(rwy, q)));
                         realVec = (starPts.Count - 1, new List<V2>());
                     }
                 }
@@ -3235,14 +3235,14 @@ public sealed partial class TrafficWorld
             {
                 starOnly = rv.pts.Count == 0 ? 0 : rv.cut + 1;   // joined a real track: no STAR left
                 starPts.RemoveRange(rv.cut + 1, starPts.Count - rv.cut - 1);
-                starPts.AddRange(rv.pts.Select(q => new AirPoint(q, "")));
+                starPts.AddRange(rv.pts.Select(q => RealPoint(rwy, q)));
             }
             // No real tracks off this STAR to this runway (user, 19 Nov, AAL2867 on SHAIN2 for 27C sent straight across
             // the field to the approach's first fix): from where the STAR ends, the way real arrivals to this runway
             // that passed there flew on — whichever STAR they came by.
             if (realVec is null && starPts.Count > 0 && DirectionTrack(rwy, starPts[^1].P) is { } dtr)
             {
-                starPts.AddRange(dtr.Select(q => new AirPoint(q, "")));
+                starPts.AddRange(dtr.Select(q => RealPoint(rwy, q)));
                 realVec = (starPts.Count - 1, new List<V2>());
             }
             if (star is not null && starPts.Count > 0) names.Add(star.Name);
@@ -3440,6 +3440,52 @@ public sealed partial class TrafficWorld
         return Fanned(typical, star);
     }
     private List<(double leaveNm, V2 leave, List<V2> rest)>? _fanFound;
+
+    /// <summary>
+    /// A point on a real track, with no higher than real traffic to this runway flies there as its ceiling (user, 19 Nov:
+    /// Midway arrivals taken over above where real traffic is — off the STAR on real vectors, the STAR's own "6,000 at
+    /// STKNY" no longer applied): the median altitude of the real arrivals to the runway within about a mile of it, plus
+    /// 500 ft, when five or more passed there. Unnamed, so it isn't counted as a published restriction.
+    /// </summary>
+    private AirPoint RealPoint(RunwayEnd rwy, V2 q)
+    {
+        var ceil = RealAltAt(rwy, q);
+        return new AirPoint(q, "", 0, double.IsNaN(ceil) ? 0 : Math.Ceiling((ceil + 500) / 100) * 100);
+    }
+    private AirportProfile? _altGridFor;
+    private readonly Dictionary<string, Dictionary<(int, int), List<double>>> _altGrid = new();
+    private double RealAltAt(RunwayEnd rwy, V2 q)
+    {
+        if (Learned is not { Samples.Count: > 0 } prof) return double.NaN;
+        if (!ReferenceEquals(_altGridFor, prof)) { _altGrid.Clear(); _altGridFor = prof; }
+        var nm = Geo2.MPerNm;
+        if (!_altGrid.TryGetValue(rwy.Ident, out var grid))
+        {
+            grid = new();
+            foreach (var smp in prof.Samples)
+            {
+                if (smp.Kind != "arrival" || smp.Runway != rwy.Ident) continue;
+                var seen = new HashSet<(int, int)>();
+                foreach (var pt in smp.Points)
+                {
+                    if (pt.Length < 3 || pt[2] <= 0) continue;
+                    var xy = Apt.Map.ToXY(pt[0], pt[1]);
+                    var key = ((int)Math.Floor(xy.X / nm), (int)Math.Floor(xy.Y / nm));
+                    if (!seen.Add(key)) continue;   // each real aircraft once per cell
+                    if (!grid.TryGetValue(key, out var l)) grid[key] = l = new List<double>();
+                    l.Add(pt[2]);
+                }
+            }
+            _altGrid[rwy.Ident] = grid;
+        }
+        var c = ((int)Math.Floor(q.X / nm), (int)Math.Floor(q.Y / nm));
+        var alts = new List<double>();
+        for (var dx = -1; dx <= 1; dx++) for (var dy = -1; dy <= 1; dy++)
+            if (grid.TryGetValue((c.Item1 + dx, c.Item2 + dy), out var l)) alts.AddRange(l);
+        if (alts.Count < 5) return double.NaN;
+        alts.Sort();
+        return alts[alts.Count / 2];
+    }
 
     /// <summary>
     /// The typical real way to this runway's final from a point (the end of a STAR no real track was matched to): real
