@@ -823,6 +823,21 @@ Console.WriteLine("== Vectors off the STAR where real traffic is turned off it (
         for (var x = 11.0; x >= 1.5; x -= 1) pts.Add(P(x, 0));                                       // final
         prof.Samples.Add(new AirportProfile.SampleTrack { Kind = "arrival", Runway = "27", Points = pts });
     }
+    // Traffic from another arrival, from the north, that runs beside the STAR's last legs for 12 nm, then goes on to a
+    // downwind south of the field (DAL2646 on WYNDE3, 19 Nov): it didn't fly this STAR, and more of them than of the
+    // real ones mustn't make their downwind the "typical" way in.
+    for (var k = 0; k < 7; k++)
+    {
+        var pts = new List<double[]>();
+        for (var y = 30.0; y >= 16; y -= 1) pts.Add(P(-14, y));                                     // from the north
+        for (var t = 0.0; t <= 1; t += 0.1) pts.Add(P(-14 + 7 * t, 14 - 5 * t));                    // beside NWBBB → NWCCC
+        for (var t = 0.1; t <= 1; t += 0.2) pts.Add(P(-7 + 2 * t, 9 - 3 * t));                      // → NWDDD
+        for (var t = 0.1; t <= 1; t += 0.1) pts.Add(P(-5 + 2 * t, 6 - (11 + k * 0.2) * t));          // turned south
+        for (var x = -2.0; x <= 12; x += 1) pts.Add(P(x, -5));                                      // a south downwind
+        for (var y = -4.0; y <= -1; y += 1) pts.Add(P(12, y));                                      // base
+        for (var x = 11.0; x >= 1.5; x -= 1) pts.Add(P(x, 0));                                       // final
+        prof.Samples.Add(new AirportProfile.SampleTrack { Kind = "arrival", Runway = "27", Points = pts });
+    }
     var world = new TrafficWorld(new AirportModel(data), new TestSource(), seed: 41) { Automatic = false, Wind = new Wind(270, 5), Learned = prof };
     world.SelectRunways(true);
     var f = world.SpawnArrival(45, true)!;
@@ -835,6 +850,9 @@ Console.WriteLine("== Vectors off the STAR where real traffic is turned off it (
     Check(f.Route.Contains("real traffic"), "flies the vectors real traffic flew");
     Check(minToDownwind < 1.5 * nm, "out to the real downwind");
     Check(nearDddd > 2 * nm, "turned off the STAR where real traffic is, not flown to its end");
+    var southDw = double.MaxValue;
+    for (var d = 0.0; d < f.Path.Length; d += 200) southDw = Math.Min(southDw, (f.Path.At(d).p - new V2(6 * nm, -5 * nm)).Length);
+    Check(southDw > 4 * nm, $"not out to the downwind of traffic that only ran beside the STAR ({southDw / nm:0.0} nm from it)");
 }
 
 Console.WriteLine("== Airport rules read from the FAA's AAUP text (any airport, no airport-specific code)");

@@ -3246,6 +3246,20 @@ public sealed partial class TrafficWorld
         var nm = Geo2.MPerNm;
         var star = starPts.Select(p => p.P).ToList();
         double ToStar(V2 p) { var d = double.MaxValue; for (var i = 0; i + 1 < star.Count; i++) d = Math.Min(d, DistToSegment(p, star[i], star[i + 1])); return d; }
+        // How far along the STAR (m from its first point) the nearest point to p is.
+        double Progress(V2 p)
+        {
+            double best = double.MaxValue, at = 0, run = 0;
+            for (var i = 0; i + 1 < star.Count; i++)
+            {
+                var seg = star[i + 1] - star[i]; var len = seg.Length;
+                var t = len < 1 ? 0 : Math.Clamp(V2.Dot(p - star[i], seg) / (len * len), 0, 1);
+                var d = (star[i] + seg * t - p).Length;
+                if (d < best) { best = d; at = run + t * len; }
+                run += len;
+            }
+            return at;
+        }
         var found = new List<(double leaveNm, V2 leave, List<V2> rest)>();
         foreach (var smp in prof.Samples)
         {
@@ -3265,6 +3279,18 @@ public sealed partial class TrafficWorld
                 }
             }
             if (lastOn < 0 || onFor < 5 * nm || i >= pts.Count) continue;
+            // Came in on this STAR, not across it (user, 19 Nov, DAL2646 on WYNDE3: "no ADS-B track even comes close"):
+            // traffic from another arrival running beside a piece of the STAR for 5 nm — a downwind passing over its
+            // last leg — counted as having flown it, and its downwind became a "WYNDE3" track. The track must be on the
+            // STAR within its first 8 nm (it starts 45 nm out, on its way in) and move along it in the STAR's direction.
+            int first = -1; double flown = 0;
+            for (var k = 0; k < pts.Count; k++)
+            {
+                if (k > 0) flown += (pts[k] - pts[k - 1]).Length;
+                if (flown > 8 * nm) break;
+                if (ToStar(pts[k]) < 2 * nm) { first = k; break; }
+            }
+            if (first < 0 || Progress(pts[lastOn]) - Progress(pts[first]) < 4 * nm) continue;
             // From the turn off the STAR until established on final.
             var rest = new List<V2>();
             for (var j = lastOn; j < pts.Count; j++)
