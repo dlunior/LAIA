@@ -986,7 +986,7 @@ public sealed partial class TrafficWorld
         // taken over (most at the start, when everything within 200 nm appears at once). Far out the arrival manager
         // spaces them with speed; close in it can't, so a clashing one starts on its arrival route one slot further
         // back (5 nm behind the one it clashed with), as if it had been sequenced before it got here.
-        if (f is not null && f.ThrS / Geo2.MPerNm < 60 && plan.rwy is not null)
+        if (f is not null && f.ThrS / Geo2.MPerNm < 120 && plan.rwy is not null)
         {
             var mine = f.ThrS / Geo2.MPerNm;
             var clash = Flights.Any(o => o != f && !o.Done && o.Kind == "arrival" && !o.OnGround && o.Rwy?.Runway == plan.rwy.Runway
@@ -994,7 +994,7 @@ public sealed partial class TrafficWorld
             if (clash)
             {
                 Flights.Remove(f);
-                var d = ArrivalSlot(mine, plan.rwy, 60);
+                var d = ArrivalSlot(mine, plan.rwy, Math.Max(60, mine + 40));
                 if (d < 0) return null;
                 f = SpawnArrival(d, false, l, plan);
                 if (f is not null) Log($"{f.Callsign}: taken over from the whole sky, sequenced: starts {d:0} track nm out (it was {mine:0}, too close to the traffic ahead), {f.Route} for runway {f.Rwy?.Ident}");
@@ -1297,16 +1297,25 @@ public sealed partial class TrafficWorld
         }
         // Arrivals: handed over from the whole sky about 200 nm out, where the schedule has them flying; if their
         // origin can't be placed, they appear about 40 track miles out so they land on time.
-        foreach (var l in arrs)
+        // Closest to the airport first (user, 19 Nov: "traffic should be injected on the ground, then on approach, then on
+        // the STAR, then at cruise, in the order of closest to the airport and work its way out" — two were injected into
+        // the middle of an earlier wave): when many appear at once (an airport prepared, a level or Peak change), each is
+        // placed behind the ones already there, never in front of them.
+        var npAt = new Dictionary<ScheduleLeg, NetPos?>();
+        var arrOrder = arrs.Where(l => Until(l.ArrMin) is var u0 && u0 <= 75 && u0 >= 1)
+            .Select(l => { var np0 = NetworkPosition(l); npAt[l] = np0; return (l, d: np0 is null ? double.MaxValue : Geo2.DistanceNm(Apt.Data.Lat, Apt.Data.Lon, np0.Lat, np0.Lon)); })
+            .OrderBy(x => x.d).Select(x => x.l).ToList();
+        NetPos? NetPosOf(ScheduleLeg l) => npAt.TryGetValue(l, out var v) ? v : NetworkPosition(l);
+        foreach (var l in arrOrder)
         {
             var u = Until(l.ArrMin);
             if (u > 75 || u < 1) continue;
             if (l.Reg.Length > 0 && Flights.Any(f => !f.Done && f.Reg == l.Reg)) continue;   // that airframe is still around
             if (_done.Contains(Key(l, 'A'))) continue;
             if (CallsignBusy(l.Callsign)) continue;
-            if (u > 13 || NetworkPosition(l) is not null)
+            if (u > 13 || NetPosOf(l) is not null)
             {
-                var np = NetworkPosition(l);
+                var np = NetPosOf(l);
                 if (np is null) continue;                                   // not airborne yet, or can't be placed: later
                 var dist = Geo2.DistanceNm(Apt.Data.Lat, Apt.Data.Lon, np.Lat, np.Lon);
                 if (dist > HandoverNm) continue;                             // still in the whole sky
