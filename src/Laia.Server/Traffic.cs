@@ -479,7 +479,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         {
             $"Self-test {sh.Apt.Icao} (Peak, {sh.Time / 60:0} min replayed offline in {realMin:0} min; landing {string.Join("/", sh.ArrRwys.Select(r => r.Ident))}): " +
             $"{landed.Count} landings, {C(": took off") + C(": airborne")} take-offs; per 10 landings — vectors for spacing {Per(spacing)}, delay vectors {Per(delay)}, " +
-            $"break-offs {Per(C("breaking off"))}, go-arounds {Per(C("going around"))}, runway switches {Per(C(" instead of "))}, real-track moves {Per(C("real track off its STAR"))}, " +
+            $"break-offs {Per(C("breaking off"))}, go-arounds {Per(C("going around"))}, runway switches {Per(C("for less delay") + C("lands about"))}, real-track moves {Per(C("real track off its STAR"))}, " +
             $"trombones {Per(C("downwind extended"))}; holds {C("holding for")}, 360s {C("making a 360")}; separation warnings {C("SEPARATION")}; " +
             $"restrictions {met} of {tot} met; landings short of the gap needed {shortGaps}" + (extra.Count > 0 ? $", median {extra[extra.Count / 2]} s beyond it" : "") +
             $"; take-overs {takeovers.Count} ({(takeovers.Count > 0 ? 100 * real / takeovers.Count : 0)}% on real tracks, {C("sequenced: starts")} moved back, {tooHigh} too high); " +
