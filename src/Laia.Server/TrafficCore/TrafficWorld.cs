@@ -849,7 +849,10 @@ public sealed partial class TrafficWorld
             var (a, b) = (r.Pts[i - 1], r.Pts[i]);
             var (lat, lon) = NetworkModel.Intermediate(a.lat, a.lon, b.lat, b.lon, u);
             var hdg = Geo2.BearingDeg(lat, lon, b.lat, b.lon);
-            var rem = r.LengthNm - at;
+            // Miles to go: the route's, but no more than the way it will be flown in from here (the hand-over goes direct
+            // to the STAR's next fix ahead, so a STAR that loops round left arrivals thousands of feet high — AAL2867
+            // 54 nm out at 32,450 ft, every Peak session).
+            var rem = Math.Min(r.LengthNm - at, Geo2.DistanceNm(lat, lon, Apt.Data.Lat, Apt.Data.Lon) * 1.3 + 10);
             var alt = p.AltFt; var phase = p.Phase;
             if (arr && phase != "climbing") { alt = Math.Min(p.CruiseFt, l.ArrElev + rem * 300 + 1500); phase = alt < p.CruiseFt - 50 ? "descending" : "cruising"; }
             return p with { Lat = lat, Lon = lon, Heading = hdg, AltFt = Math.Round(alt / 10) * 10, Phase = phase };

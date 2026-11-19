@@ -1344,6 +1344,9 @@ Console.WriteLine("== Hand-over spacing: two arrivals the whole sky has on top o
     Console.WriteLine($"  first {(a.ThrS - a.S) / nm:0.0} track nm out, second {(b.ThrS - b.S) / nm:0.0} ({gap:0.0} nm behind)");
     Console.WriteLine("  " + log.LastOrDefault());
     Check(gap >= 4.9, "the second starts at least 5 nm behind the first");
+    var aDist = Geo2.DistanceNm(data.Lat, data.Lon, np!.Lat, np.Lon);
+    Console.WriteLine($"  the whole sky has it {aDist:0} nm out at {np.AltFt:0} ft");
+    Check(np.AltFt <= (aDist * 1.3 + 10) * 300 + 1500 + 1000, "not handed over higher than it can get down from on the way it will fly in");
     // Injection gaps (user, 19 Nov): 5 track nm on the approach, 7 on the STAR, 10 before it.
     NetPos? far = null; int farDep = 0;
     for (var dep = 2000 - 70; dep <= 2000; dep++)
