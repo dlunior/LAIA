@@ -77,6 +77,7 @@ public sealed class Flight
     public List<V2>? Via;
     /// <summary>Path distance where its last delay vector rejoins (no new one before it's back on its route).</summary>
     public double VectorRejoinS = double.NegativeInfinity;
+    public int DelayVectors;
     /// <summary>A lower level to keep 1,000 ft under another of this airport's arrivals en route (NaN when none), until when.</summary>
     public double SepCeiling = double.NaN, SepUntil;
     public string? SepFrom;
@@ -4494,9 +4495,9 @@ public sealed partial class TrafficWorld
                 var bySpeed0 = EtaToThreshold(f, dth) - base0;
                 if (f.Delay - bySpeed0 > 20) FanPick(f, f.Delay - bySpeed0, $"{f.Delay:0} s delay for the sequence (number {f.Seq} for {f.Rwy.Ident}), {bySpeed0:0} s of it by speed");
             }
-            // One delay vector at a time: not another before it's back on its route from the last (UAL2211, 19 Nov: six
-            // in 18 minutes, each 3 minutes after the one before and before it had rejoined).
-            if (dv >= 40 && dth > 40 && Time - f.LastVector > 180 && f.S >= f.VectorRejoinS)
+            // At most three delay vectors for one arrival (UAL2211, 19 Nov: six in 18 minutes). Waiting for each to
+            // rejoin before the next left too much delay for close in (offline rush: 23 min and 2 break-offs, not 18 and 0).
+            if (dv >= 40 && dth > 40 && Time - f.LastVector > 180 && f.DelayVectors < 3)
             {
                 var bySpeed = EtaToThreshold(f, dth) - base0;
                 var tromb = Trombone(f, 0, "");
@@ -4505,7 +4506,7 @@ public sealed partial class TrafficWorld
                 var byFan = f.Fan is { Count: >= 3 } fn ? Math.Max(0, fn.Max(x => x.lenNm) - fn[Math.Clamp(f.FanIdx, 0, fn.Count - 1)].lenNm) * 3600 / 200 : 0;
                 var left = f.Delay - bySpeed - byTrombone - byFan;
                 if (left > 90)
-                    Vector(f, Math.Min(left, 300), rejoinNm: Math.Clamp(dth - 30, 25, 45), why: $"{f.Delay:0} s delay for the sequence (number {f.Seq} for {f.Rwy.Ident}), {bySpeed:0} s of it by speed");
+                    if (Vector(f, Math.Min(left, 300), rejoinNm: Math.Clamp(dth - 30, 25, 45), why: $"{f.Delay:0} s delay for the sequence (number {f.Seq} for {f.Rwy.Ident}), {bySpeed:0} s of it by speed")) f.DelayVectors++;
             }
         }
         if (f.SlowDv > 0 && (old == 0 || Math.Abs(f.SlowDv - old) >= 10))
