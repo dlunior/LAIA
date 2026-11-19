@@ -5665,6 +5665,9 @@ public sealed partial class TrafficWorld
             foreach (var o in pool)
             {
                 if (o == f || o.Kind != "arrival" || o.Rwy?.Runway != rwy.Runway || o.Phase == "go-around") continue;
+                // Never one that's after it in the landing order (user, 19 Nov, UAL538 and DAL1390 each spacing on the
+                // other: DAL1390, first of the two, took UAL538 as its leader because it was nearer along its path).
+                if (f.Seq > 0 && o.Seq > f.Seq && !o.OnGround) continue;
                 var od = o.OnGround ? -1 : (o.ThrS - o.S) / Geo2.MPerNm;
                 if (od < dth && od > leaderD) { leaderD = od; leader = o; }
             }

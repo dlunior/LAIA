@@ -966,6 +966,12 @@ Console.WriteLine("== A rush of arrivals far out: planned with speed, delay vect
     // do too; more means the delay isn't being planned far out.
     Check(C("breaking off") <= 2 && C("going around") == 0, "at most two break-offs in the whole rush, no go-arounds");
     Check(negative == 0, "nobody is broken off for an aircraft that's behind it");
+    // Nobody spaces on an aircraft that is at the same time spacing on it (UAL538/DAL1390 at KORD, 19 Nov).
+    var spacing = log.Select(l => System.Text.RegularExpressions.Regex.Match(l, @"^(\d+) (\w+): .*?(?:\d nm behind|from|s behind) (\w+)[ ,]"))
+        .Where(m => m.Success).Select(m => (t: double.Parse(m.Groups[1].Value), a: m.Groups[2].Value, b: m.Groups[3].Value)).ToList();
+    var mutual = spacing.Where(x => spacing.Any(y => y.a == x.b && y.b == x.a && Math.Abs(y.t - x.t) < 60)).Select(x => $"{x.a}/{x.b} at {x.t:0}").Distinct().Take(4).ToList();
+    foreach (var x in mutual) Console.WriteLine("    each spacing on the other: " + x);
+    Check(mutual.Count == 0, "no two arrivals each spacing on the other");
     foreach (var x in sharp) Console.WriteLine("    turned too sharply: " + x);
     Check(sharp.Count == 0, "no turn sharper than 8°/s in the air (vectors and break-offs start with a real turn)");
 }
