@@ -71,6 +71,8 @@ public sealed class Flight
     public double BlockedFor;
     public Flight? BlockedBy, Ignore;
     public double IgnoreUntil;
+    /// <summary>Everyone else in a standoff ring this one was told to go first in (not only the one it saw first).</summary>
+    public HashSet<Flight>? IgnoreAll;
     public bool LandingChecked, WentAround, BlockedByUser;
     public double StuckFor;
     public double RerouteTime = -999;
@@ -5182,7 +5184,7 @@ public sealed partial class TrafficWorld
         foreach (var o in Flights)
         {
             if (o == f || o.Done || !o.OnGround || o.Phase is not ("taxi" or "taxi in")) continue;
-            if (f.Ignore == o && Time < f.IgnoreUntil) continue;   // a standoff this one was told to go first in
+            if ((f.Ignore == o || f.IgnoreAll?.Contains(o) == true) && Time < f.IgnoreUntil) continue;   // a standoff this one was told to go first in
             if (NextEdge(o) is not { } it) continue;
             // It's on (or entering first) the same segment the other way round.
             if (it.u == me.v && it.v == me.u && it.toU < me.toU) return o;
@@ -5203,7 +5205,7 @@ public sealed partial class TrafficWorld
         foreach (var o in Flights)
         {
             if (o == f || !o.OnGround || o.Done || o.Phase is "parked" or "boarding" or "takeoff roll") continue;
-            if (f.Ignore == o && Time < f.IgnoreUntil) continue;
+            if ((f.Ignore == o || f.IgnoreAll?.Contains(o) == true) && Time < f.IgnoreUntil) continue;
             // A pushback has the right of way over taxiing traffic (the taxiing aircraft holds for it), so the two
             // never wait for each other.
             if (f.Phase == "pushback" && o.Phase is "taxi" or "taxi in") continue;
@@ -5260,7 +5262,11 @@ public sealed partial class TrafficWorld
             if (f == oldest && f.BlockedFor > 20)
             {
                 if (f.BlockedFor < 20.3) Log($"{f.Callsign}: standoff with {string.Join(", ", ring.Where(x => x != f).Select(x => x.Callsign))}; going first");
+                // Past every one of them, not just the one it saw first: in a ring of three it only ever passed one,
+                // then waited for the next (KORD, 19 Nov: UAL590 "going first" for 7 minutes between UAL2059 and
+                // AAL2636 while eleven aircraft behind them were removed as stuck).
                 f.Ignore = by;
+                f.IgnoreAll = ring.Where(x => x != f).ToHashSet();
                 f.IgnoreUntil = Time + 45;
                 return userBlock;
             }
