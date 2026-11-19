@@ -1330,6 +1330,23 @@ Console.WriteLine("== Hand-over spacing: two arrivals the whole sky has on top o
     Console.WriteLine($"  first {(a.ThrS - a.S) / nm:0.0} track nm out, second {(b.ThrS - b.S) / nm:0.0} ({gap:0.0} nm behind)");
     Console.WriteLine("  " + log.LastOrDefault());
     Check(gap >= 4.9, "the second starts at least 5 nm behind the first");
+    // Injection gaps (user, 19 Nov): 5 track nm on the approach, 7 on the STAR, 10 before it.
+    NetPos? far = null; int farDep = 0;
+    for (var dep = 2000 - 70; dep <= 2000; dep++)
+    {
+        var p = world.NetworkPosition(Leg(dep, "7", "N7"));
+        if (p is not null && Geo2.DistanceNm(data.Lat, data.Lon, p.Lat, p.Lon) is > 120 and < 180) { far = p; farDep = dep; break; }
+    }
+    if (far is not null)
+    {
+        var c = world.SpawnFromNetwork(Leg(farDep, "7", "N7"), far)!;
+        var e = world.SpawnFromNetwork(Leg(farDep, "8", "N8"), far)!;
+        var fg = Math.Abs((e.ThrS - e.S) - (c.ThrS - c.S)) / nm;
+        Console.WriteLine($"  far out: {(c.ThrS - c.S) / nm:0.0} and {(e.ThrS - e.S) / nm:0.0} track nm ({fg:0.0} apart; STAR starts {c.StarNm:0} nm out)");
+        Console.WriteLine("  " + log.LastOrDefault());
+        Check(fg >= 9.9, "two taken over on top of each other before their STAR start 10 track nm or more apart");
+        world.Flights.Remove(c); world.Flights.Remove(e);
+    }
     var holds = 0; var landed = 0;
     for (var t = 0.0; t < 2400 && landed < 2; t += 0.5)
     {

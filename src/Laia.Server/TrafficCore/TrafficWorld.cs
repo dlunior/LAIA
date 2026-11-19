@@ -144,6 +144,8 @@ public sealed class Flight
     /// <summary>Its place in the landing order: its unhindered time when first sequenced (NaN: not yet). Stretching its
     /// path (delay vectors, the trombone) doesn't change it, so it can't swap the order.</summary>
     public double OrderKey = double.NaN;
+    /// <summary>Track nm to the threshold where its STAR starts and where it leaves the STAR (vectors/approach), as built.</summary>
+    public double StarNm = double.NaN, AppNm = double.NaN;
     /// <summary>Broken off or gone around: placed behind everyone nearer the runway than it when re-sequenced.</summary>
     public bool Rejoin;
     /// <summary>The real tracks off its STAR (shortest to longest), which one it flies, and where that one leaves the STAR.</summary>
@@ -986,17 +988,28 @@ public sealed partial class TrafficWorld
         // taken over (most at the start, when everything within 200 nm appears at once). Far out the arrival manager
         // spaces them with speed; close in it can't, so a clashing one starts on its arrival route one slot further
         // back (5 nm behind the one it clashed with), as if it had been sequenced before it got here.
-        if (f is not null && f.ThrS / Geo2.MPerNm < 120 && plan.rwy is not null)
+        // How far apart in track miles (user, 19 Nov): at least 5 on the approach (vectors and final), 7 on the STAR,
+        // 10 before it — measured to the same runway, by the farther of the two.
+        if (f is not null && plan.rwy is not null)
         {
             var mine = f.ThrS / Geo2.MPerNm;
+            var need = InjectGap(f.AppNm, f.StarNm);
             var clash = Flights.Any(o => o != f && !o.Done && o.Kind == "arrival" && !o.OnGround && o.Rwy?.Runway == plan.rwy.Runway
-                && Math.Abs((o.Phase == "go-around" ? 12.0 : (o.ThrS - o.S) / Geo2.MPerNm) - mine) < 5);
+                && (o.Phase == "go-around" ? 12.0 : (o.ThrS - o.S) / Geo2.MPerNm) is var od && Math.Abs(od - mine) < need(Math.Max(od, mine)));
             if (clash)
             {
                 Flights.Remove(f);
-                var d = ArrivalSlot(mine, plan.rwy, Math.Max(60, mine + 40));
+                var before = mine > f.StarNm + 0.5;
+                var d = ArrivalSlot(mine, plan.rwy, before ? mine + 60 : Math.Max(60, mine + 40), need);
                 if (d < 0) return null;
-                f = SpawnArrival(d, false, l, plan);
+                if (before)
+                {
+                    // Still before its STAR: taken over further back on its way in, at the same level.
+                    var at = Apt.Map.ToXY(np.Lat, np.Lon);
+                    var back = at + at.Unit * ((d - mine) * Geo2.MPerNm);
+                    f = SpawnArrival(0, false, l, plan, entry: (back, np.AltFt, np.CruiseFt));
+                }
+                else f = SpawnArrival(d, false, l, plan);
                 if (f is not null) Log($"{f.Callsign}: taken over from the whole sky, sequenced: starts {d:0} track nm out (it was {mine:0}, too close to the traffic ahead), {f.Route} for runway {f.Rwy?.Ident}");
                 return f;
             }
@@ -1094,18 +1107,27 @@ public sealed partial class TrafficWorld
     /// </summary>
     private readonly Dictionary<string, double> _retryAt = new();
 
-    private double ArrivalSlot(double wantNm, RunwayEnd? rwy, double maxNm = 50)
+    /// <summary>The injection gap (track nm) at a distance to go: 5 on the approach, 7 on the STAR, 10 before it.</summary>
+    private static Func<double, double> InjectGap(double appNm, double starNm)
     {
+        var app = double.IsNaN(appNm) || appNm <= 0 ? 20 : appNm;
+        var st = double.IsNaN(starNm) || starNm < app ? Math.Max(app, 60) : starNm;
+        return x => x <= app + 0.5 ? 5 : x <= st + 0.5 ? 7 : 10;
+    }
+
+    private double ArrivalSlot(double wantNm, RunwayEnd? rwy, double maxNm = 50, Func<double, double>? need = null)
+    {
+        need ??= InjectGap(double.NaN, double.NaN);
         if (ArrRwy is null) SelectRunways(true);
         rwy ??= ArrRwy;
         var taken = Flights.Where(o => !o.Done && o.Kind == "arrival" && !o.OnGround && o.Rwy is not null && rwy is not null && o.Rwy.Runway == rwy.Runway)
             .Select(o => o.Phase == "go-around" ? 12.0 : (o.ThrS - o.S) / Geo2.MPerNm).OrderBy(x => x).ToList();
         var d = wantNm;
-        for (var tries = 0; tries < 20; tries++)
+        for (var tries = 0; tries < 60; tries++)
         {
-            var clash = taken.FirstOrDefault(o => Math.Abs(o - d) < 5, double.NaN);
+            var clash = taken.FirstOrDefault(o => Math.Abs(o - d) < need(Math.Max(o, d)), double.NaN);
             if (double.IsNaN(clash)) return d <= maxNm ? d : -1;
-            d = clash + 5;
+            d = clash + need(clash + 5);
         }
         return -1;
     }
@@ -3049,6 +3071,7 @@ public sealed partial class TrafficWorld
         var route = new List<V2>();
         var speeds = new List<double>();
         var names = new List<string>();
+        int starIdx0 = -1, starIdx1 = -1;
         if (from is { } start)
         {
             route.Add(start);
@@ -3165,8 +3188,10 @@ public sealed partial class TrafficWorld
                 }
             }
             if (f.Fan is null) f.FanKey = null;
+            var starOnly = starPts.Count;
             if (realVec is { } rv)
             {
+                starOnly = rv.pts.Count == 0 ? 0 : rv.cut + 1;   // joined a real track: no STAR left
                 starPts.RemoveRange(rv.cut + 1, starPts.Count - rv.cut - 1);
                 starPts.AddRange(rv.pts.Select(q => new AirPoint(q, "")));
             }
@@ -3194,6 +3219,7 @@ public sealed partial class TrafficWorld
             }
             altFixes.AddRange(appPts.Where(p => p.AltMinFt > 0 || p.AltMaxFt > 0 || p.SpeedKt is >= 100 and < 400));
             named.AddRange(appPts.Where(p => p.Fix.Length > 0));
+            starIdx0 = route.Count; starIdx1 = route.Count + Math.Min(starOnly, starPts.Count);
             route.AddRange(starPts.Select(p => p.P));
             speeds.AddRange(starPts.Select(p => p.SpeedKt));
             if (appPts.Count > 0) { route.AddRange(appPts.Select(p => p.P)); speeds.AddRange(appPts.Select(p => p.SpeedKt)); }
@@ -3215,6 +3241,9 @@ public sealed partial class TrafficWorld
             return d > 20 ? 250 : d > 12 ? 210 : d > 7 ? 180 : 160;
         }, 6000);
         f.ThrS = f.Path.PointS[thrIndex];
+        f.StarNm = starIdx0 >= 0 && starIdx1 > starIdx0 ? (f.ThrS - f.Path.PointS[starIdx0]) / Geo2.MPerNm : 0;
+        f.AppNm = starIdx1 >= 0 && starIdx1 < thrIndex ? (f.ThrS - f.Path.PointS[starIdx1]) / Geo2.MPerNm : f.ThrS / Geo2.MPerNm;
+        if (f.StarNm < f.AppNm) f.StarNm = f.AppNm;
         CheckLoops(f, "arrival route");
         f.LandingChecked = false;
         f.StableChecked = false;
