@@ -3948,14 +3948,16 @@ public sealed partial class TrafficWorld
         while (drop < rest.Count - 1 && Inside(rest[drop])) drop++;
         var target = rest[drop];
         var turn = Geo2.Diff(dir, (target - p).Bearing);       // + clockwise (right)
-        if (Math.Abs(turn) > 12)
+        if (Math.Abs(turn) > 2)
         {
-            var step = Math.Sign(turn) * 10.0; var h = dir; var q = p; var arc = r * 10 * Math.PI / 180;
-            for (var k = 0; k < 34; k++)
+            var h = dir; var q = p;
+            for (var k = 0; k < 80; k++)
             {
-                q += V2.FromBearing(h + step / 2, arc); h += step;
+                var left = Geo2.Diff(h, (target - q).Bearing);
+                if (Math.Abs(left) <= 2) break;
+                var step = Math.Sign(turn) * Math.Min(5, Math.Abs(left));
+                q += V2.FromBearing(h + step / 2, r * Math.Abs(step) * Math.PI / 180); h += step;
                 res.Add(q);
-                if (Math.Abs(Geo2.Diff(h, (target - q).Bearing)) <= 10) break;
             }
         }
         var added = res.Count - 1;

@@ -931,7 +931,12 @@ Console.WriteLine("== A rush of arrivals far out: planned with speed, delay vect
         {
             if (f.OnGround || f.Path is null || f.Done) { lastHdg.Remove(f); continue; }
             var h = f.Path.At(f.S).dir;
-            if (lastHdg.TryGetValue(f, out var h0) && Math.Abs(Geo2.Diff(h0, h)) > 4 && sharp.Count < 6) sharp.Add($"{f.Callsign} {Math.Abs(Geo2.Diff(h0, h)) * 2:0}°/s at {world.Time:0} s, {(f.ThrS - f.S) / Geo2.MPerNm:0.0} nm to go, {f.Phase}");
+            if (lastHdg.TryGetValue(f, out var h0) && Math.Abs(Geo2.Diff(h0, h)) > 4 && sharp.Count < 6)
+            {
+                var tNow = world.Time;
+                var near = log.LastOrDefault(l => l.Contains(f.Callsign + ":") && double.TryParse(l.Split(' ')[0], out var lt) && lt >= tNow - 2) ?? "(nothing logged)";
+                sharp.Add($"{f.Callsign} {Math.Abs(Geo2.Diff(h0, h)) * 2:0}°/s at {tNow:0} s, {(f.ThrS - f.S) / Geo2.MPerNm:0.0} nm to go, {f.Phase}, S {f.S:0} m; {near}");
+            }
             lastHdg[f] = h;
         }
     }
