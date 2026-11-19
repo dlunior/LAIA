@@ -52,6 +52,7 @@ work runs on a second PC on the home network, so the sim PC stays fast.
   Cloud sessions read these through the connected-folder bridge.
 - **Test after each update:** **Remove traffic**, then set the level again on the control page.
 - **Release notes go to the user, not into the app.**
+- **Airport-agnostic, tested that way (the user's rule, 19 Nov 2026: "I know we have been using KORD for testing but remember our fixes and improvement should be agnostic").** No fix names an airport, runway or STAR; all work from each airport's own data. Testing must match: versions are compared on several learned airports of different shapes (parallel, crossing, single runway; hub and quiet field), and a change only counts as better if it is no worse at any of them.
 - **Research first (the user's rule, 9 Nov 2026).** The user is not the only source of truth. When a concept is added to the design, research it independently (FAA orders, AIM, FARs, manufacturer and safety-foundation guidance, real ATC tools) and check the user's idea against what's found. Write the numbers and the sources into this document. Where findings differ from what was planned, change the plan and say so.
 
 ---
