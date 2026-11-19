@@ -809,6 +809,8 @@ Console.WriteLine("== Vectors off the STAR where real traffic is turned off it (
     }
     // A STAR from the northwest that runs on to a point 8 nm north-west of the field.
     data.Arrivals.Add(new() { Name = "NWEST1", Legs = { Fx("NWAAA", -30, 30, 15), Fx("NWBBB", -14, 14, 18), Fx("NWCCC", -7, 9, 18), Fx("NWDDD", -5, 6, 18) } });
+    // A STAR from the north no real track flew, ending beside where the real ones pass (AAL2867 on SHAIN2, 19 Nov).
+    data.Arrivals.Add(new() { Name = "NORTH1", Legs = { Fx("NOAAA", -6, 40, 15), Fx("NOBBB", -6, 13, 18) } });
     // Real arrivals to 27 (landing west, from the east): on the STAR to NWBBB, then turned east onto a downwind
     // 5 nm north of the field, base 12 nm east, final 10 nm out.
     double[] P(double x, double y) { var (la, lo) = map.ToLatLon(new V2(x * nm, y * nm)); return new[] { la, lo, 6000 }; }
@@ -860,6 +862,12 @@ Console.WriteLine("== Vectors off the STAR where real traffic is turned off it (
     for (var d = 0.0; d < g.Path!.Length; d += 200) gDw = Math.Min(gDw, (g.Path.At(d).p - downwind).Length);
     Console.WriteLine($"  started close in: {g.Route}; passes {gDw / nm:0.0} nm from the real downwind");
     Check(g.Route.Contains("real traffic") && gDw < 1.5 * nm, "an arrival started past the turn-off joins the nearest real track");
+    var north = data.Arrivals.First(a => a.Name == "NORTH1");
+    var hN = world.SpawnArrival(45, true, planned: (world.ArrRwy, (north, (Laia.Common.Airports.Transition?)null)))!;
+    var hDw = double.MaxValue;
+    for (var d = 0.0; d < hN.Path!.Length; d += 200) hDw = Math.Min(hDw, (hN.Path.At(d).p - downwind).Length);
+    Console.WriteLine($"  on a STAR no real track flew: {hN.Route}; passes {hDw / nm:0.0} nm from the real downwind");
+    Check(hN.Route.Contains("NORTH1") && hN.Route.Contains("real traffic") && hDw < 1.5 * nm, "from the end of a STAR no real track flew, the way real arrivals passing there flew on");
 }
 
 Console.WriteLine("== Airport rules read from the FAA's AAUP text (any airport, no airport-specific code)");

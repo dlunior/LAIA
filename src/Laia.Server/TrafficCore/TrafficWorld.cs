@@ -2666,6 +2666,21 @@ public sealed partial class TrafficWorld
 
     private static bool Serves(Procedure p, RunwayEnd rwy) => p.RunwayTransitions.Count == 0 || p.RunwayTransitions.Any(t => t.Name == rwy.Ident);
 
+    /// <summary>
+    /// A STAR's runway transition for this runway — or, when it has none, a parallel's (user, 19 Nov: Midway's ENDEE8,
+    /// FISSK7 and PANGG7 have transitions for 04R/13L/22L/31R only, so arrivals to 22R flew no STAR and none of its
+    /// restrictions — the 6,000 ft at STKNY or HALIE). Controllers vector the arrival from the STAR to the parallel.
+    /// </summary>
+    private static Transition? StarTrans(Procedure p, RunwayEnd rwy)
+    {
+        var t = p.RunwayTransitions.FirstOrDefault(x => x.Name == rwy.Ident);
+        if (t is not null) return t;
+        static string Num(string id) => new string(id.Where(char.IsDigit).ToArray()).TrimStart('0');
+        var n = Num(rwy.Ident);
+        return n.Length == 0 ? null : p.RunwayTransitions.FirstOrDefault(x => Num(x.Name) == n);
+    }
+    private static bool ServesStar(Procedure p, RunwayEnd rwy) => p.RunwayTransitions.Count == 0 || StarTrans(p, rwy) is not null;
+
     /// <summary>The SID's outer fix: the last fix of its exit transition (or of the SID itself).</summary>
     private static ProcedureLeg? ExitFix(Procedure sid, Transition? t) =>
         t?.Legs.LastOrDefault(l => l.Lat != 0 || l.Lon != 0) ?? sid.Legs.LastOrDefault(l => l.Lat != 0 || l.Lon != 0)
@@ -2729,7 +2744,7 @@ public sealed partial class TrafficWorld
     private (Procedure p, Transition? t)? ChooseStar(IEnumerable<RunwayEnd> rwys, string? origin, bool jet = true)
     {
         var list = rwys.ToList();
-        var cands = Apt.Data.Arrivals.Where(a => list.Any(r => Serves(a, r))).ToList();
+        var cands = Apt.Data.Arrivals.Where(a => list.Any(r => ServesStar(a, r))).ToList();
         // Never a propeller-only arrival for a jet (the FAA routes say which), when anything else serves.
         if (jet && Routes is not null && cands.Any(c => !Routes.PropsOnly(c.Name))) cands = cands.Where(c => !Routes.PropsOnly(c.Name)).ToList();
         if (cands.Count == 0) return null;
@@ -2854,7 +2869,7 @@ public sealed partial class TrafficWorld
         var star = ChooseStar(list, origin, jet);
         if (list.Count == 1) return (list[0], star);
         var pos = Across(list, out var axis).Select(x => Math.Abs(x) < 0.3 ? x : Math.Sign(x)).ToList();
-        var serving = Enumerable.Range(0, list.Count).Where(i => star is null || Serves(star.Value.p, list[i])).ToList();
+        var serving = Enumerable.Range(0, list.Count).Where(i => star is null || ServesStar(star.Value.p, list[i])).ToList();
         if (serving.Count == 0) serving = Enumerable.Range(0, list.Count).ToList();
         // The airport's published rule for this STAR (its AAUP), when it names runways that are in use.
         if (star is { } srr && Rules?.ForStar(srr.p.Name, LocalMinuteNow) is { } rule)
@@ -3222,6 +3237,14 @@ public sealed partial class TrafficWorld
                 starPts.RemoveRange(rv.cut + 1, starPts.Count - rv.cut - 1);
                 starPts.AddRange(rv.pts.Select(q => new AirPoint(q, "")));
             }
+            // No real tracks off this STAR to this runway (user, 19 Nov, AAL2867 on SHAIN2 for 27C sent straight across
+            // the field to the approach's first fix): from where the STAR ends, the way real arrivals to this runway
+            // that passed there flew on — whichever STAR they came by.
+            if (realVec is null && starPts.Count > 0 && DirectionTrack(rwy, starPts[^1].P) is { } dtr)
+            {
+                starPts.AddRange(dtr.Select(q => new AirPoint(q, "")));
+                realVec = (starPts.Count - 1, new List<V2>());
+            }
             if (star is not null && starPts.Count > 0) names.Add(star.Name);
             // The STAR's restrictions, kept before the approach join trims the STAR (the joining fix keeps its restriction).
             altFixes.AddRange(starPts.Where(p => p.AltMinFt > 0 || p.AltMaxFt > 0 || p.SpeedKt is >= 100 and < 400));
@@ -3311,12 +3334,12 @@ public sealed partial class TrafficWorld
     private Procedure? PickStar(Flight f, RunwayEnd rwy, out List<ProcedureLeg> legs)
     {
         legs = new List<ProcedureLeg>();
-        var choice = f.StarPick is { } sp && Serves(sp.p, rwy) ? sp : ChooseStar(new[] { rwy }, f.Other, f.P.Family != "turboprop");
+        var choice = f.StarPick is { } sp && ServesStar(sp.p, rwy) ? sp : ChooseStar(new[] { rwy }, f.Other, f.P.Family != "turboprop");
         if (choice is null) return null;
         var (star, tr) = choice.Value;
         if (tr is not null) legs.AddRange(tr.Legs);
         legs.AddRange(star.Legs);
-        var rt = star.RunwayTransitions.FirstOrDefault(t => t.Name == rwy.Ident);
+        var rt = StarTrans(star, rwy);
         if (rt is not null) legs.AddRange(rt.Legs);
         return star;
     }
@@ -3417,6 +3440,46 @@ public sealed partial class TrafficWorld
         return Fanned(typical, star);
     }
     private List<(double leaveNm, V2 leave, List<V2> rest)>? _fanFound;
+
+    /// <summary>
+    /// The typical real way to this runway's final from a point (the end of a STAR no real track was matched to): real
+    /// arrivals to the runway that passed within 5 nm of it, from there until established on final — the one of
+    /// middling length among them (three or more needed; no loops). Points about 1 nm apart. Null when there aren't
+    /// enough.
+    /// </summary>
+    private List<V2>? DirectionTrack(RunwayEnd rwy, V2 from)
+    {
+        if (Learned is not { Samples.Count: > 0 } prof) return null;
+        var nm = Geo2.MPerNm;
+        var cands = new List<(double len, List<V2> rest)>();
+        foreach (var smp in prof.Samples)
+        {
+            if (smp.Kind != "arrival" || smp.Runway != rwy.Ident || smp.Points.Count < 6) continue;
+            var pts = smp.Points.Where(q => q.Length >= 2).Select(q => Apt.Map.ToXY(q[0], q[1])).ToList();
+            int bi = -1; var bd = 5 * nm;
+            for (var i = 0; i < pts.Count; i++) { var d = (pts[i] - from).Length; if (d < bd) { bd = d; bi = i; } }
+            if (bi < 0) continue;
+            var rest = new List<V2>();
+            for (var j = bi + 1; j < pts.Count; j++)
+            {
+                if (rest.Count == 0 || (pts[j] - rest[^1]).Length >= 1 * nm) rest.Add(pts[j]);
+                if (Math.Abs(rwy.Offset(pts[j])) < 0.3 * nm && rwy.Along(pts[j]) < -2 * nm && rwy.Along(pts[j]) > -20 * nm) { if (rest[^1] != pts[j]) rest.Add(pts[j]); break; }
+            }
+            if (rest.Count < 2 || Math.Abs(rwy.Offset(rest[^1])) >= 0.3 * nm) continue;
+            double len = (rest[0] - from).Length, turned = 0; double? pb = null;
+            for (var k = 1; k < rest.Count; k++)
+            {
+                var seg = rest[k] - rest[k - 1]; len += seg.Length;
+                if (seg.Length < 300) continue;
+                if (pb is { } b0) turned += Math.Abs(Geo2.Diff(b0, seg.Bearing));
+                pb = seg.Bearing;
+            }
+            if (turned > 300) continue;
+            cands.Add((len, rest));
+        }
+        if (cands.Count < 3) return null;
+        return cands.OrderBy(c => c.len).ElementAt(cands.Count / 2).rest;
+    }
 
     /// <summary>One real track off the STAR as a path piece: where on the STAR it turned off, and its points 1 nm apart.</summary>
     private (int cut, List<V2> pts) Fanned((double leaveNm, V2 leave, List<V2> rest) tr, List<V2> star)
@@ -3759,7 +3822,7 @@ public sealed partial class TrafficWorld
             if (real.Count < 3) continue;
             foreach (var star in Apt.Data.Arrivals)
             {
-                var rt = star.RunwayTransitions.FirstOrDefault(t => t.Name == rwy.Ident);
+                var rt = StarTrans(star, rwy);
                 if (rt is null && star.RunwayTransitions.Count > 0) continue;
                 var fixes = star.Legs.Concat(rt?.Legs ?? new List<ProcedureLeg>())
                     .Where(l => l.Fix.Length > 0 && (Math.Abs(l.Lat) > 0.0001 || Math.Abs(l.Lon) > 0.0001))
@@ -4200,7 +4263,7 @@ public sealed partial class TrafficWorld
         foreach (var r in ArrRwys)
         {
             if (r.Runway == cur.Runway || r.LengthM < f.P.MinRunwayM) continue;
-            if (star is not null && !Serves(star, r)) continue;
+            if (star is not null && !ServesStar(star, r)) continue;
             // Its time to that runway instead: the difference in distance at about 220 kt.
             var eta = f.EtaNominal + ((f.Pos - r.Threshold).Length - (f.Pos - cur.Threshold).Length) / (220 * Kt);
             var d = EarliestSlot(r.Runway, eta, f) - f.EtaNominal;
