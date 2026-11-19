@@ -396,6 +396,20 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     /// already has), and runs late by the difference — a departure delay at its origin if it hasn't left yet, a slower
     /// cruise (no more than 15% slower) if it's flying. So it reaches the 200 nm hand-over at about its slot.
     /// </summary>
+    /// <summary>The metering delay the whole sky's copy of a scheduled arrival has (0 when none).</summary>
+    private double MeterFor(string icao, Laia.Common.Airports.ScheduleLeg l)
+    {
+        var list = network.ArrivingAt(icao);
+        if (!_meterIndex.TryGetValue(icao, out var ix) || !ReferenceEquals(ix.list, list))
+        {
+            var d = new Dictionary<(string, string, int), NetLeg>();
+            foreach (var n in list) d.TryAdd((n.Dep.ToUpperInvariant(), n.Flight, n.DepMin), n);
+            _meterIndex[icao] = ix = (list, d);
+        }
+        return ix.map.TryGetValue((l.Dep.ToUpperInvariant(), l.Flight, l.DepMin), out var leg) ? leg.MeterMin : 0;
+    }
+    private readonly Dictionary<string, (List<NetLeg> list, Dictionary<(string, string, int), NetLeg> map)> _meterIndex = new(StringComparer.OrdinalIgnoreCase);
+
     private void MeterArrivals()
     {
         var clock = NetClock;
@@ -1291,6 +1305,8 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                             if (w.AtisLanding.Count == 0) { var lr = liveRunways.Get(w.Apt); w.LiveLanding = lr.landing; w.LiveDeparting = lr.departing; }
                             else { w.LiveLanding = new(); w.LiveDeparting = new(); }
                             w.Locate ??= code => worldAirports.Find(code) is { } p ? (p.lat, p.lon) : null;
+                            var icaoM = w.Apt.Icao;
+                            w.MeterOf ??= l => MeterFor(icaoM, l);
                             var self = w;
                             w.CallsignInUse ??= cs => Worlds().Any(o => o != self && o.Flights.Any(f => !f.Done && f.Kind != "parked" && f.Callsign == cs));
                             if (w == _world) UpdatePrep(w, _prep, _neighbours);

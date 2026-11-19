@@ -803,6 +803,9 @@ public sealed partial class TrafficWorld
     private static bool Far(Flight f) => f.Kind == "arrival" && !f.OnGround && f.Path is not null && (f.ThrS - f.S) / Geo2.MPerNm > 60;
 
     /// <summary>Where the whole-sky layer has a scheduled arrival right now (null if it isn't airborne or can't be placed).</summary>
+    /// <summary>The arrival metering's delay (minutes) for a scheduled arrival, from the whole sky's copy of the leg.</summary>
+    public Func<ScheduleLeg, double>? MeterOf { get; set; }
+
     internal NetPos? NetworkPosition(ScheduleLeg l)
     {
         if (Locate?.Invoke(l.Dep) is not { } d) return null;
@@ -813,6 +816,9 @@ public sealed partial class TrafficWorld
             ArrElev = Apt.ElevationFt, Located = true,
         };
         leg.DistNm = Geo2.DistanceNm(leg.DepLat, leg.DepLon, leg.ArrLat, leg.ArrLon);
+        // The arrival metering's delay for this flight (found 19 Nov: the take-over built its own leg with none, so the
+        // metering only ever moved the map's dots — arrivals still reached the hand-over bunched as scheduled).
+        leg.MeterMin = MeterOf?.Invoke(l) ?? 0;
         var p = NetworkModel.At(leg, SchedNow);
         return p is null ? null : OnRoute(p, l.Type, Key(l, 'A'));
     }
@@ -1354,13 +1360,14 @@ public sealed partial class TrafficWorld
         // the middle of an earlier wave): when many appear at once (an airport prepared, a level or Peak change), each is
         // placed behind the ones already there, never in front of them.
         var npAt = new Dictionary<ScheduleLeg, NetPos?>();
-        var arrOrder = arrs.Where(l => Until(l.ArrMin) is var u0 && u0 <= 75 && u0 >= 1)
+        double UntilArr(ScheduleLeg l) => Until(l.ArrMin) + (MeterOf?.Invoke(l) ?? 0);   // later by its metering
+        var arrOrder = arrs.Where(l => UntilArr(l) is var u0 && u0 <= 75 && u0 >= 1)
             .Select(l => { var np0 = NetworkPosition(l); npAt[l] = np0; return (l, d: np0 is null ? double.MaxValue : Geo2.DistanceNm(Apt.Data.Lat, Apt.Data.Lon, np0.Lat, np0.Lon)); })
             .OrderBy(x => x.d).Select(x => x.l).ToList();
         NetPos? NetPosOf(ScheduleLeg l) => npAt.TryGetValue(l, out var v) ? v : NetworkPosition(l);
         foreach (var l in arrOrder)
         {
-            var u = Until(l.ArrMin);
+            var u = UntilArr(l);
             if (u > 75 || u < 1) continue;
             if (l.Reg.Length > 0 && Flights.Any(f => !f.Done && f.Reg == l.Reg)) continue;   // that airframe is still around
             if (_done.Contains(Key(l, 'A'))) continue;
