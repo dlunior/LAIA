@@ -3345,7 +3345,11 @@ public sealed partial class TrafficWorld
                 // tighter than the 3:1 descent to a published "at or below" ahead would allow anyway is needed.
                 var floor = published.Where(c => c.S >= sR && c.Min > 0).Select(c => c.Min).DefaultIfEmpty(0).Max();
                 if (published.Any(c => Math.Abs(c.S - sR) < 2 * nmR && c.Max > 0)) continue;   // a published one right there
-                f.AltLimits.Add((sR, 0, Math.Max(ceil, floor)));
+                // …nor so soon after a published floor that it couldn't be met: room to be at that floor over its fix and
+                // come down at 300 ft per nm after it (Midway, 19 Nov: STKNY/HALIE "at 6,000" crossed at 5,550 ft — a
+                // real-traffic ceiling 2–3 nm past the fix pulled the descent through it).
+                var behind = published.Where(c => c.S < sR && c.Min > 0).Select(c => c.Min - (sR - c.S) / nmR * 300).DefaultIfEmpty(0).Max();
+                f.AltLimits.Add((sR, 0, Math.Max(Math.Max(ceil, floor), behind)));
             }
             f.AltLimits.Sort((x, y) => x.S.CompareTo(y.S));
         }
