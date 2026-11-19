@@ -426,7 +426,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
             TrafficWorld? s = null;
             s = new TrafficWorld(w.Apt, source, seed: 7)
             {
-                Automatic = false, GenericTraffic = false, HoldRunways = false,
+                Automatic = true, GenericTraffic = false, HoldRunways = false,
                 Log = line => { if (_shadowLog.Count < 20000) _shadowLog.Add($"{s!.Time,6:0} {line}"); },
             };
             s.Schedule = w.Schedule; s.Gates = w.Gates; s.Atis = w.Atis; s.Rules = w.Rules; s.SidTops = w.SidTops; s.StarExpects = w.StarExpects;
