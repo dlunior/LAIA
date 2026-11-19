@@ -4426,12 +4426,22 @@ public sealed partial class TrafficWorld
             f.SlowDv = Math.Abs(dv - keep) < 10 && keep > 0 ? keep : dv;
             // More delay than speed (40 kt slower) and the trombone near the runway can take: delay vectors on the way
             // in, far out (beyond 40 nm), a few minutes at a time — never a hold.
+            // Far out, the delay speed can't take is planned onto a longer real track (the way real controllers stretch
+            // arrivals: a longer downwind, a wider base) before any delay vectors — one plan, made by the arrival
+            // manager from the slot; close in (45 nm) the tactical spacing adjusts it from the aircraft ahead.
+            if (dv >= 40 && dth > 45 && f.Fan is { Count: >= 3 } && Time - f.FanAt > 20)
+            {
+                var bySpeed0 = EtaToThreshold(f, dth) - base0;
+                if (f.Delay - bySpeed0 > 20) FanPick(f, f.Delay - bySpeed0, $"{f.Delay:0} s delay for the sequence (number {f.Seq} for {f.Rwy.Ident}), {bySpeed0:0} s of it by speed");
+            }
             if (dv >= 40 && dth > 40 && Time - f.LastVector > 180)
             {
                 var bySpeed = EtaToThreshold(f, dth) - base0;
                 var tromb = Trombone(f, 0, "");
                 var byTrombone = double.IsNaN(tromb) || double.IsNaN(f.BaseTurnNm) ? 0 : Math.Max(0, 25 - f.BaseTurnNm) * 2 * Geo2.MPerNm / (200 * Kt) * 0.6;
-                var left = f.Delay - bySpeed - byTrombone;
+                // What the longest real track would still add, at about 200 kt.
+                var byFan = f.Fan is { Count: >= 3 } fn ? Math.Max(0, fn.Max(x => x.lenNm) - fn[Math.Clamp(f.FanIdx, 0, fn.Count - 1)].lenNm) * 3600 / 200 : 0;
+                var left = f.Delay - bySpeed - byTrombone - byFan;
                 if (left > 90)
                     Vector(f, Math.Min(left, 300), rejoinNm: Math.Clamp(dth - 30, 25, 45), why: $"{f.Delay:0} s delay for the sequence (number {f.Seq} for {f.Rwy.Ident}), {bySpeed:0} s of it by speed");
             }
