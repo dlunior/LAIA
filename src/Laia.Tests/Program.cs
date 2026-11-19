@@ -829,7 +829,7 @@ Console.WriteLine("== Vectors off the STAR where real traffic is turned off it (
     for (var k = 0; k < 7; k++)
     {
         var pts = new List<double[]>();
-        for (var y = 30.0; y >= 16; y -= 1) pts.Add(P(-14, y));                                     // from the north
+        for (var y = 48.0; y >= 16; y -= 1) pts.Add(P(-14, y));                                     // from the north
         for (var t = 0.0; t <= 1; t += 0.1) pts.Add(P(-14 + 7 * t, 14 - 5 * t));                    // beside NWBBB → NWCCC
         for (var t = 0.1; t <= 1; t += 0.2) pts.Add(P(-7 + 2 * t, 9 - 3 * t));                      // → NWDDD
         for (var t = 0.1; t <= 1; t += 0.1) pts.Add(P(-5 + 2 * t, 6 - (11 + k * 0.2) * t));          // turned south
@@ -853,6 +853,13 @@ Console.WriteLine("== Vectors off the STAR where real traffic is turned off it (
     var southDw = double.MaxValue;
     for (var d = 0.0; d < f.Path.Length; d += 200) southDw = Math.Min(southDw, (f.Path.At(d).p - new V2(6 * nm, -5 * nm)).Length);
     Check(southDw > 4 * nm, $"not out to the downwind of traffic that only ran beside the STAR ({southDw / nm:0.0} nm from it)");
+    // Started close in, already past where real traffic turns off the STAR (UAL1664 at KORD when traffic started, 19 Nov):
+    // it joins the real track passing nearest, not a made-up downwind.
+    var g = world.SpawnArrival(20, true, entry: (new V2(-6 * nm, 10.5 * nm), 6000, 6000))!;
+    var gDw = double.MaxValue;
+    for (var d = 0.0; d < g.Path!.Length; d += 200) gDw = Math.Min(gDw, (g.Path.At(d).p - downwind).Length);
+    Console.WriteLine($"  started close in: {g.Route}; passes {gDw / nm:0.0} nm from the real downwind");
+    Check(g.Route.Contains("real traffic") && gDw < 1.5 * nm, "an arrival started past the turn-off joins the nearest real track");
 }
 
 Console.WriteLine("== Airport rules read from the FAA's AAUP text (any airport, no airport-specific code)");

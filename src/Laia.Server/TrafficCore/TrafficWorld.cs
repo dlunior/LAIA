@@ -3096,6 +3096,13 @@ public sealed partial class TrafficWorld
             // and not one it would have to pass and then turn back from by more than 90° to follow the STAR. The whole sky
             // flies the great circle, so an arrival can be beside its STAR's first fix (JBU228 from San Juan, east of
             // MUNGI): it then goes direct to the next fix (HIJON) instead of flying back to MUNGI and looping round.
+            // Many STARs run on to a fix at or near the airport and end in "expect radar vectors" (LaGuardia's VADDR1
+            // ends right over the field). Real controllers turn the traffic off them well before that, onto a downwind
+            // or base, so the STAR is only flown until it's about 8 nm from the airport.
+            var near0 = starPts.FindIndex(p => p.P.Length < 8 * Geo2.MPerNm);
+            if (near0 >= 0) starPts.RemoveRange(near0, starPts.Count - near0);
+            var fullStar = starPts.ToList();
+            var trimmed = 0;
             if (entry is { } en0)
             {
                 bool Ahead(int k)
@@ -3110,29 +3117,54 @@ public sealed partial class TrafficWorld
                     return outb.Length < 1 || Math.Abs(Geo2.Diff(to.Bearing, outb.Bearing)) <= 90;
                 }
                 var k0 = Enumerable.Range(0, starPts.Count).FirstOrDefault(Ahead, -1);
-                if (k0 > 0) starPts.RemoveRange(0, k0);
-                else if (k0 < 0) starPts.Clear();
+                if (k0 > 0) { starPts.RemoveRange(0, k0); trimmed = k0; }
+                else if (k0 < 0) { trimmed = starPts.Count; starPts.Clear(); }
             }
-            // Many STARs run on to a fix at or near the airport and end in "expect radar vectors" (LaGuardia's VADDR1
-            // ends right over the field). Real controllers turn the traffic off them well before that, onto a downwind
-            // or base, so the STAR is only flown until it's about 8 nm from the airport.
-            var near = starPts.FindIndex(p => p.P.Length < 8 * Geo2.MPerNm);
-            if (near >= 0) starPts.RemoveRange(near, starPts.Count - near);
             // Where real traffic is turned off this STAR and how it's vectored onto final (adsb.lol): the STAR up to
             // there, then the way a real arrival on it flew to the final (user, 15 Nov, KORD: arrivals from the
             // northwest "blindly following the STAR and not taking into consideration the ADSB data on vectors to final").
             (int cut, List<V2> pts)? realVec = null;
-            var fan = starPts.Count >= 2 ? RealFan(rwy, starPts) : null;
+            // The fan comes from the whole STAR (as far as 8 nm out), so an arrival that starts part-way along it, or
+            // already past where real traffic turns off it, still flies the real tracks.
+            var fan = fullStar.Count >= 2 ? RealFan(rwy, fullStar) : null;
             var fanKey = $"{rwy.Ident}|{star?.Name}";
+            f.Fan = null;
             if (fan is { Count: >= 3 })
             {
                 if (f.FanKey != fanKey) { f.FanKey = fanKey; f.FanIdx = fan.Count / 2; }
                 f.FanIdx = Math.Clamp(f.FanIdx, 0, fan.Count - 1);
-                realVec = (fan[f.FanIdx].cut, fan[f.FanIdx].pts);
-                f.Fan = fan;
-                f.FanLeave = fan[f.FanIdx].pts[0];
+                var cutT = fan[f.FanIdx].cut - trimmed;
+                if (cutT >= 0 && cutT < starPts.Count)
+                {
+                    realVec = (cutT, fan[f.FanIdx].pts);
+                    f.Fan = fan;
+                    f.FanLeave = fan[f.FanIdx].pts[0];
+                }
+                else if (entry is { } en2)
+                {
+                    // Already past where real traffic turns off (user, 19 Nov, UAL1664 put on a made-up downwind when
+                    // traffic started close in): join the real track that passes nearest, from the point after the
+                    // nearest one, if one passes within 5 nm.
+                    var bestD = 5 * Geo2.MPerNm; int bi = -1, bj = -1;
+                    for (var t = 0; t < fan.Count; t++)
+                    {
+                        var tp = fan[t].pts;
+                        for (var j = 0; j + 3 < tp.Count; j++)
+                        {
+                            var d = (tp[j] - en2).Length;
+                            if (d < bestD) { bestD = d; bi = t; bj = j; }
+                        }
+                    }
+                    if (bi >= 0)
+                    {
+                        f.FanIdx = bi; f.Fan = fan; f.FanLeave = fan[bi].pts[0];
+                        starPts.Clear();
+                        starPts.AddRange(fan[bi].pts.Skip(bj + 1).Select(q => new AirPoint(q, "")));
+                        realVec = (starPts.Count - 1, new List<V2>());
+                    }
+                }
             }
-            else { f.Fan = null; f.FanKey = null; }
+            if (f.Fan is null) f.FanKey = null;
             if (realVec is { } rv)
             {
                 starPts.RemoveRange(rv.cut + 1, starPts.Count - rv.cut - 1);
@@ -3282,12 +3314,12 @@ public sealed partial class TrafficWorld
             // Came in on this STAR, not across it (user, 19 Nov, DAL2646 on WYNDE3: "no ADS-B track even comes close"):
             // traffic from another arrival running beside a piece of the STAR for 5 nm — a downwind passing over its
             // last leg — counted as having flown it, and its downwind became a "WYNDE3" track. The track must be on the
-            // STAR within its first 8 nm (it starts 45 nm out, on its way in) and move along it in the STAR's direction.
+            // STAR within its first 20 nm (it starts 45 nm out, on its way in) and move along it in the STAR's direction.
             int first = -1; double flown = 0;
             for (var k = 0; k < pts.Count; k++)
             {
                 if (k > 0) flown += (pts[k] - pts[k - 1]).Length;
-                if (flown > 8 * nm) break;
+                if (flown > 20 * nm) break;
                 if (ToStar(pts[k]) < 2 * nm) { first = k; break; }
             }
             if (first < 0 || Progress(pts[lastOn]) - Progress(pts[first]) < 4 * nm) continue;
