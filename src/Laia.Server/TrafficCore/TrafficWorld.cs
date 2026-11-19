@@ -3811,6 +3811,7 @@ public sealed partial class TrafficWorld
     {
         Log($"{f.Callsign}: going around ({why})");
         var rwy = f.Rwy!;
+        f.Frozen = false;   // re-sequenced at its new time: the arrivals behind no longer space on it
         f.SetPhase("go-around", Time);
         f.WentAround = true;
         var p = f.Pos;
@@ -3964,7 +3965,7 @@ public sealed partial class TrafficWorld
         ShiftRestrictions(f, oldS, at);
         f.S = 0;
         f.LastVector = Time;
-        f.Mgr = "vectored"; f.Frozen = false;
+        f.Mgr = "vectored";   // keeps its place in the landing order (the detour is how it gets there)
         _vectors++;
         var hdg = (mid - p).Bearing;
         var back = f.Fixes.FirstOrDefault(x => Math.Abs(x.S - at) < 300).Fix;
@@ -4586,7 +4587,9 @@ public sealed partial class TrafficWorld
         foreach (var o in Flights)
             if (o != f && !o.Done && (o.Reserve == runway || (o.OnRunway == runway && !(o.Kind == "departure" && !o.OnGround))))
                 return $"{o.Callsign} {(o.Reserve == runway && o.OnRunway != runway ? "crossing" : "on the runway")}";
-        if (ArrivalEta(runway) is var eta && eta < 60) return $"an arrival {eta:0} s out";
+        // Time to be across and clear of it (taxi speed about 15 kt from here to 60 m past the far side), plus 30 s.
+        var crossSec = f.Path is not null ? Math.Max(0, st.ExitS + 60 - f.S) / Math.Max(4, f.Gs * Kt) + 15 : 45;
+        if (ArrivalEta(runway) is var eta && eta < Math.Max(60, crossSec + 30)) return $"an arrival {eta:0} s out";
         if (Flights.FirstOrDefault(o => o.Rwy?.Runway == runway && o.Phase is "lined up" or "takeoff roll") is { } dep) return $"{dep.Callsign} departing";
         // Room on the far side: nobody on its way between the runway and 60 m past where it's clear of it.
         if (f.Path is { } path && st.ExitS > st.S)
@@ -4684,8 +4687,10 @@ public sealed partial class TrafficWorld
             var lat = Math.Abs(V2.Cross(mdir, r));
             var need = f.P.LengthM / 2 + o.P.LengthM / 2 + 25 + v * v / 2.0;
             if (ahead > 0 && ahead < need && lat < (f.P.SpanM + o.P.SpanM) / 2 * 0.6 + 6) { by = o; break; }
-            // Paths crossing (intersections): look a few seconds ahead; whoever gets there second waits.
-            if (ahead > -10 && dist < 160)
+            // Paths crossing (intersections): look a few seconds ahead; whoever gets there second waits — except that an
+            // aircraft on a runway (crossing it, or turning off it) always goes first, to clear it (KORD, 18 Nov: four
+            // arrivals went around for aircraft that stopped on a runway they were crossing).
+            if (ahead > -10 && dist < 160 && !(f.OnRunway >= 0 && o.OnRunway < 0))
             {
                 var odir = V2.FromBearing(o.Reverse ? Geo2.Norm(o.Heading + 180) : o.Heading);
                 var ov = o.Gs * Kt;
@@ -4697,7 +4702,7 @@ public sealed partial class TrafficWorld
                     if ((mine - theirs).Length >= minD) continue;
                     // The one closer to the meeting point goes first.
                     var meet = (mine + theirs) * 0.5;
-                    if ((o.Pos - meet).Length < (f.Pos - meet).Length) { by = o; }
+                    if ((o.Pos - meet).Length < (f.Pos - meet).Length || (o.OnRunway >= 0 && f.OnRunway < 0)) { by = o; }
                     break;
                 }
                 if (by is not null) break;
@@ -5253,6 +5258,7 @@ public sealed partial class TrafficWorld
             if (f.Seq > 1)
             {
                 leader = pool.FirstOrDefault(o => o != f && o.Kind == "arrival" && o.Rwy?.Runway == rwy.Runway && o.Seq == f.Seq - 1 && !o.OnGround && !o.Done && o.Phase != "go-around");
+                if (leader is not null && !double.IsNaN(leader.EtaSec) && !double.IsNaN(f.EtaSec) && leader.EtaSec > f.EtaSec + 240) leader = null;
                 if (leader is not null) leaderD = (leader.ThrS - leader.S) / Geo2.MPerNm;
             }
             if (leader is null)
