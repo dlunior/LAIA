@@ -1024,17 +1024,18 @@ public sealed partial class TrafficWorld
                     {
                         // Still before its STAR: taken over further back on its way in, at the same level.
                         var at = Apt.Map.ToXY(np.Lat, np.Lon);
-                        g = SpawnArrival(0, false, l, plan, entry: (at + at.Unit * ((d - mine) * Geo2.MPerNm), np.AltFt, np.CruiseFt));
+                        g = SpawnArrival(0, false, l, plan, entry: (at + at.Unit * ((d - mine + 0.3 + tries * 0.5) * Geo2.MPerNm), np.AltFt, np.CruiseFt));
                     }
                     else g = SpawnArrival(d, false, l, plan);
                     if (g is null) return null;
                     var near2 = OtherField(g);
-                    if (near2 is null)
+                    if (near2 is null && !SameRunway(g))
                     {
                         Log($"{g.Callsign}: taken over from the whole sky, sequenced: starts {(g.ThrS - g.S) / Geo2.MPerNm:0} track nm out (it was {mine:0}, too close to {(near is not null ? $"{near.Callsign} ({near.Airport})" : "the traffic ahead")}), {g.Route} for runway {g.Rwy?.Ident}");
                         return g;
                     }
-                    near = near2;
+                    near = near2 ?? near;
+                    d = Math.Max(d, (g.ThrS - g.S) / Geo2.MPerNm);
                     Flights.Remove(g);
                 }
                 return null;
