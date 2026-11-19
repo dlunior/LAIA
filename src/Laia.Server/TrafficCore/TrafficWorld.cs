@@ -71,6 +71,8 @@ public sealed class Flight
     public double BlockedFor;
     public Flight? BlockedBy, Ignore;
     public double IgnoreUntil;
+    /// <summary>Everyone else in a standoff ring this one was told to go first in (not only the one it saw first).</summary>
+    public HashSet<Flight>? IgnoreAll;
     public bool LandingChecked, WentAround, BlockedByUser;
     public double StuckFor;
     public double RerouteTime = -999;
@@ -1565,7 +1567,10 @@ public sealed partial class TrafficWorld
     /// The planned altitude bent to the procedure's restrictions ahead: never above an "at or below" (or "at") one,
     /// starting down in time to meet it at about 300 ft per nm; never below an "at or above" (or "at") one until its fix.
     /// </summary>
-    private static double Restricted(Flight f, double plan, double atS = double.NaN)
+    private static double Restricted(Flight f, double plan, double atS = double.NaN) => Restricted(f, plan, out _, atS);
+
+    /// <summary>As above; <paramref name="floor"/> is the published floor still ahead that holds it up (NaN when none).</summary>
+    private static double Restricted(Flight f, double plan, out double floor, double atS = double.NaN)
     {
         var s0 = double.IsNaN(atS) ? f.S : atS;
         double hi = double.MaxValue, lo = double.MinValue, hiS = double.MaxValue, loS = double.MaxValue;
@@ -1580,6 +1585,10 @@ public sealed partial class TrafficWorld
             // there needs its level piece too (MCO WHOVL "9,000–14,000, max 250": taken over 12 nm before it at
             // 17,500 ft and 280 kt, WJA1272 crossed at 13,000–14,300 ft and 254–280 kt every session).
             var high = c.Max > 10500 || (c.Max <= 0 && c.Min > 10500);
+            // Coming down from above 10,000 ft to a ceiling at or below it: 91.117's 250 kt applies there, so it needs
+            // the same level piece to slow from its descent speed (Midway JILLZ "at 10,000" crossed at 10,460 ft and
+            // 254 kt — still levelled at 10,000 slowing when it got there).
+            if (kt == 0 && c.Max > 0 && c.Max <= 10500 && f.AltFt > 10500 && f.Kind == "arrival") { kt = 250; high = true; }
             var from = high ? (f.P.Family == "turboprop" ? 230 : 280) : 250;
             var slowNm = kt > 0 && kt < from ? (from - kt) / 10 + 1 : 0;
             if (c.Max > 0) { var h = c.Max + Math.Max(0, ahead - slowNm) * 300; if (h < hi) { hi = h; hiS = c.S; } }
@@ -1599,6 +1608,7 @@ public sealed partial class TrafficWorld
         // for the farther fix and cross MIDDL at 7,600 ft; MCO's DORII "at or above 8,000" before BRICE "at 5,000"
         // is the same pattern). Only a ceiling at the same or a nearer fix can take it below a floor.
         if (t < lo) t = hiS > loS + 50 ? lo : Math.Min(lo, hi);
+        floor = lo > 0 && Math.Abs(t - lo) < 1 ? lo : double.NaN;
         return t;
     }
 
@@ -3345,7 +3355,11 @@ public sealed partial class TrafficWorld
                 // tighter than the 3:1 descent to a published "at or below" ahead would allow anyway is needed.
                 var floor = published.Where(c => c.S >= sR && c.Min > 0).Select(c => c.Min).DefaultIfEmpty(0).Max();
                 if (published.Any(c => Math.Abs(c.S - sR) < 2 * nmR && c.Max > 0)) continue;   // a published one right there
-                f.AltLimits.Add((sR, 0, Math.Max(ceil, floor)));
+                // …nor so soon after a published floor that it couldn't be met: room to be at that floor over its fix and
+                // come down at 300 ft per nm after it (Midway, 19 Nov: STKNY/HALIE "at 6,000" crossed at 5,550 ft — a
+                // real-traffic ceiling 2–3 nm past the fix pulled the descent through it).
+                var behind = published.Where(c => c.S < sR && c.Min > 0).Select(c => c.Min - (sR - c.S) / nmR * 300).DefaultIfEmpty(0).Max();
+                f.AltLimits.Add((sR, 0, Math.Max(Math.Max(ceil, floor), behind)));
             }
             f.AltLimits.Sort((x, y) => x.S.CompareTo(y.S));
         }
@@ -5184,7 +5198,7 @@ public sealed partial class TrafficWorld
         foreach (var o in Flights)
         {
             if (o == f || o.Done || !o.OnGround || o.Phase is not ("taxi" or "taxi in")) continue;
-            if (f.Ignore == o && Time < f.IgnoreUntil) continue;   // a standoff this one was told to go first in
+            if ((f.Ignore == o || f.IgnoreAll?.Contains(o) == true) && Time < f.IgnoreUntil) continue;   // a standoff this one was told to go first in
             if (NextEdge(o) is not { } it) continue;
             // It's on (or entering first) the same segment the other way round.
             if (it.u == me.v && it.v == me.u && it.toU < me.toU) return o;
@@ -5205,7 +5219,7 @@ public sealed partial class TrafficWorld
         foreach (var o in Flights)
         {
             if (o == f || !o.OnGround || o.Done || o.Phase is "parked" or "boarding" or "takeoff roll") continue;
-            if (f.Ignore == o && Time < f.IgnoreUntil) continue;
+            if ((f.Ignore == o || f.IgnoreAll?.Contains(o) == true) && Time < f.IgnoreUntil) continue;
             // A pushback has the right of way over taxiing traffic (the taxiing aircraft holds for it), so the two
             // never wait for each other.
             if (f.Phase == "pushback" && o.Phase is "taxi" or "taxi in") continue;
@@ -5262,7 +5276,11 @@ public sealed partial class TrafficWorld
             if (f == oldest && f.BlockedFor > 20)
             {
                 if (f.BlockedFor < 20.3) Log($"{f.Callsign}: standoff with {string.Join(", ", ring.Where(x => x != f).Select(x => x.Callsign))}; going first");
+                // Past every one of them, not just the one it saw first: in a ring of three it only ever passed one,
+                // then waited for the next (KORD, 19 Nov: UAL590 "going first" for 7 minutes between UAL2059 and
+                // AAL2636 while eleven aircraft behind them were removed as stuck).
                 f.Ignore = by;
+                f.IgnoreAll = ring.Where(x => x != f).ToHashSet();
                 f.IgnoreUntil = Time + 45;
                 return userBlock;
             }
@@ -5900,7 +5918,7 @@ public sealed partial class TrafficWorld
             else
             {
                 var plan = f.CruiseFt > 0 ? Math.Min(Profile(rwy, dth), f.CruiseFt) : Profile(rwy, dth);
-                var want = Restricted(f, plan);
+                var want = Restricted(f, plan, out var floorAhead);
                 if (Time - f.DescentProbeAt >= 2)
                 {
                     f.DescentProbeAt = Time;
@@ -5927,6 +5945,11 @@ public sealed partial class TrafficWorld
                 // ("descend OR slow down"); it catches up with the path afterwards.
                 // Not when an "at or below" restriction ahead is what's bringing it down: that has to be met too.
                 if (f.Ias - target > 5 && dth > 6.5 && !f.Gear && want >= plan - 50 && err < 2000) vsTarget = Math.Max(vsTarget, -400);   // well above the path: get down first
+                // Levelling at a published floor ("at 6,000", "at or above 24,000"): ease the descent as it gets close,
+                // as an autopilot captures an altitude — coming down at 2,500–3,000 ft/min it used to sink 400–650 ft
+                // through it (Midway STKNY/HALIE at 5,550, JNSNN at 23,470, O'Hare KRENA at 10,340; 19 Nov).
+                if (!double.IsNaN(floorAhead) && f.AltFt > floorAhead && f.AltFt - floorAhead < 1500)
+                    vsTarget = Math.Max(vsTarget, -Math.Max(150, (f.AltFt - floorAhead) * 4));
                 // Kept above the main airport's traffic (a satellite's arrival crossing the big airport's flows): level
                 // at the floor until clear.
                 if (!double.IsNaN(f.DescentFloor) && f.AltFt > f.DescentFloor - 100) vsTarget = Math.Max(vsTarget, Math.Min(0, (f.DescentFloor - f.AltFt) * 2));
