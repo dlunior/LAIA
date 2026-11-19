@@ -672,6 +672,12 @@ public sealed partial class TrafficWorld
                 _timeline[g.Key].Add((slot, f));
                 if (f == UserArr) { prev = f; prevSlot = slot; continue; }
                 f.Delay = slot - f.EtaNominal;
+                if (!f.Frozen && f.Delay >= 60 && !f.Test)
+                {
+                    var was0 = f.Rwy;
+                    try { BalanceRunway(f); } catch { }
+                    if (f.Rwy != was0) { f.RwyCheckAt = Time; continue; }   // placed on its new runway next pass
+                }
                 f.Frozen = true; f.FrozenSlot = slot;
                 if (Time - f.RwyCheckAt >= 30) { f.RwyCheckAt = Time; try { BalanceRunway(f); } catch { } }
                 if (Time - f.SlowAt >= 5) { f.SlowAt = Time; try { AssignSequenceSpeed(f); } catch (Exception ex) { Log($"{f.Callsign}: speed planning failed: {ex.Message}"); } }
@@ -3880,7 +3886,10 @@ public sealed partial class TrafficWorld
     {
         if (f.Rwy is not { } cur || f.Path is null || f.Phase != "arriving" || f.Test) return;
         var dth = (f.ThrS - f.S) / Geo2.MPerNm;
-        if (dth < 50 || f.Delay < 120 || Time - f.RwySwitchAt < 600 || ArrRwys.Count < 2 || double.IsNaN(f.EtaNominal)) return;
+        // When first sequenced, any runway with a slot 45 s sooner (the first choice is by STAR and a count of the queue,
+        // not by time); after that, two minutes or more of delay and 90 s gained, at most every 10 minutes.
+        var first = !f.Frozen;
+        if (dth < 50 || f.Delay < (first ? 60 : 120) || (!first && Time - f.RwySwitchAt < 600) || ArrRwys.Count < 2 || double.IsNaN(f.EtaNominal)) return;
         var star = f.StarPick?.p;
         double best = f.Delay; RunwayEnd? pick = null;
         foreach (var r in ArrRwys)
@@ -3890,7 +3899,7 @@ public sealed partial class TrafficWorld
             // Its time to that runway instead: the difference in distance at about 220 kt.
             var eta = f.EtaNominal + ((f.Pos - r.Threshold).Length - (f.Pos - cur.Threshold).Length) / (220 * Kt);
             var d = EarliestSlot(r.Runway, eta, f) - f.EtaNominal;
-            if (d < best - 90) { best = d; pick = r; }
+            if (d < best - (first ? 45 : 90)) { best = d; pick = r; }
         }
         if (pick is null) return;
         var was = f.Delay;
