@@ -159,6 +159,11 @@ app.MapPost("/api/network", async (HttpContext ctx, NetworkStore net) =>
 app.MapGet("/api/notices", (TrafficEngine t) => Results.Json(t.UserNotices(), jsonOpts));
 app.MapGet("/notices", () => Results.Content(NoticesPage.Html, "text/html; charset=utf-8"));
 app.MapGet("/api/map/flow", (TrafficEngine t) => t.TaxiFlowMap() is { } r ? Results.Json(r, jsonOpts) : Results.NotFound());
+// Learned real-traffic profiles of the airports in use, so LAIA Sim keeps a copy beside the logs (the offline tests
+// replay real airports from them).
+app.MapGet("/api/learned", (TrafficEngine t, AdsbHistory h) => Results.Json(t.AirportsInUse().Select(i => new { icao = i, file = h.ProfileFile(i) })
+    .Where(x => x.file is not null).Select(x => new { x.icao, modified = File.GetLastWriteTimeUtc(x.file!) }), jsonOpts));
+app.MapGet("/api/learned/{icao}", (string icao, AdsbHistory h) => h.ProfileFile(icao) is { } f ? Results.File(f, "application/json") : Results.NotFound());
 app.MapGet("/api/map/real", (TrafficEngine t) => t.RealTracks() is { } r ? Results.Json(r, jsonOpts) : Results.NotFound());
 app.MapGet("/api/map/net/{id}", (string id, TrafficEngine t) => t.MapNetPath(id) is { } p ? Results.Json(p, jsonOpts) : Results.NotFound());
 app.MapPost("/api/traffic/catalog", async (HttpContext ctx, FlightSource src) =>

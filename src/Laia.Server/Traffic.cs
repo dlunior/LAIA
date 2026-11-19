@@ -795,6 +795,12 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     }
 
     /// <summary>The airports the map shows learned data for: the traffic airport and the destination prepared ahead.</summary>
+    /// <summary>The traffic airport, the destination prepared ahead and the satellite fields.</summary>
+    public List<string> AirportsInUse()
+    {
+        lock (_gate) return MapAirports().Concat(_neighbours).Select(w => w.Apt.Icao).Distinct().ToList();
+    }
+
     private IEnumerable<TrafficWorld> MapAirports()
     {
         if (_world is not null) yield return _world;

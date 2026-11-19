@@ -54,6 +54,7 @@ internal sealed class Updater
         if (DateTime.UtcNow - _lastCheck > TimeSpan.FromHours(3)) await CheckAsync();
         if (server is not null && DateTime.UtcNow - _lastLogCopy > TimeSpan.FromSeconds(60)) { _lastLogCopy = DateTime.UtcNow; await CopyLogAsync(server, "server", "server.log"); }
         if (server is not null && DateTime.UtcNow - _lastSetupCopy > TimeSpan.FromMinutes(30)) { _lastSetupCopy = DateTime.UtcNow; await CopyLogAsync(server, "setup", "server-setup.log"); }
+        if (server is not null && DateTime.UtcNow - _lastLearnedCopy > TimeSpan.FromMinutes(15)) { _lastLearnedCopy = DateTime.UtcNow; await CopyLearnedAsync(server); }
     }
 
     public async Task CheckAsync()
@@ -145,6 +146,9 @@ internal sealed class Updater
         catch (Exception ex) { Log.Write("Couldn't set up the restart after the update: " + ex.Message); }
     }
 
+    private DateTime _lastLearnedCopy = DateTime.MinValue;
+    private string? _lastLogLine;
+
     private async Task CopyLogAsync(ServerInfo server, string name, string fileName)
     {
         try
@@ -153,7 +157,68 @@ internal sealed class Updater
             if (text.Length == 0) return;
             Directory.CreateDirectory(Log.Dir);
             await File.WriteAllTextAsync(Path.Combine(Log.Dir, fileName), text);
+            if (name == "server") ArchiveServerLog(text);
         }
         catch { /* older server without the log endpoint, or briefly unreachable */ }
+    }
+
+    /// <summary>
+    /// The server log copy only holds its last 3 MB, so an overnight run's start was lost. New lines are also appended to
+    /// a daily archive (logs\server-YYYY-MM-DD.log, kept 7 days), so a whole session can be read afterwards.
+    /// </summary>
+    private void ArchiveServerLog(string text)
+    {
+        try
+        {
+            var lines = text.Split('\n');
+            var start = 0;
+            if (_lastLogLine is not null)
+            {
+                var i = Array.LastIndexOf(lines, _lastLogLine);
+                start = i >= 0 ? i + 1 : 0;
+            }
+            else
+            {
+                // First copy since LAIA Sim started: carry on after the last line already archived today, if any.
+                var today = Path.Combine(Log.Dir, "logs", $"server-{DateTime.Now:yyyy-MM-dd}.log");
+                if (File.Exists(today))
+                {
+                    var last = File.ReadLines(today).LastOrDefault(l => l.Length > 0);
+                    var i = last is null ? -1 : Array.LastIndexOf(lines, last);
+                    start = i >= 0 ? i + 1 : 0;
+                }
+            }
+            var fresh = lines.Skip(start).Where(l => l.Length > 0).ToList();
+            if (lines.LastOrDefault(l => l.Length > 0) is { } lastLine) _lastLogLine = lastLine;
+            if (fresh.Count == 0) return;
+            var dir = Path.Combine(Log.Dir, "logs");
+            Directory.CreateDirectory(dir);
+            File.AppendAllLines(Path.Combine(dir, $"server-{DateTime.Now:yyyy-MM-dd}.log"), fresh);
+            foreach (var old in Directory.GetFiles(dir, "server-*.log").Where(f => File.GetLastWriteTimeUtc(f) < DateTime.UtcNow.AddDays(-7))) File.Delete(old);
+        }
+        catch { }
+    }
+
+    /// <summary>Copies the learned real-traffic profiles of the airports in use (when changed) to learned\ICAO.json.</summary>
+    private async Task CopyLearnedAsync(ServerInfo server)
+    {
+        try
+        {
+            var list = await _local.GetStringAsync($"{server.BaseUrl}/api/learned");
+            using var doc = System.Text.Json.JsonDocument.Parse(list);
+            var dir = Path.Combine(Log.Dir, "learned");
+            Directory.CreateDirectory(dir);
+            foreach (var e in doc.RootElement.EnumerateArray())
+            {
+                var icao = e.GetProperty("icao").GetString();
+                if (string.IsNullOrEmpty(icao)) continue;
+                var mod = e.GetProperty("modified").GetDateTime();
+                var path = Path.Combine(dir, icao + ".json");
+                if (File.Exists(path) && File.GetLastWriteTimeUtc(path) >= mod) continue;
+                var bytes = await _local.GetByteArrayAsync($"{server.BaseUrl}/api/learned/{icao}");
+                await File.WriteAllBytesAsync(path, bytes);
+            }
+        }
+        catch { /* older server, or briefly unreachable */ }
     }
 }

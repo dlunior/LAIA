@@ -26,6 +26,14 @@ public sealed class AdsbHistory(ILogger<AdsbHistory> log, SettingsStore settings
     public string Status { get; private set; } = "nothing learned yet";
     private static string Dir => Path.Combine(Paths.DataDir, "data", "learned");
 
+    /// <summary>The saved profile file for an airport (for LAIA Sim to keep a copy, so the offline tests can replay it).</summary>
+    public string? ProfileFile(string icao)
+    {
+        if (icao.Length is < 3 or > 5 || !icao.All(char.IsLetterOrDigit)) return null;
+        var file = Path.Combine(Dir, icao.ToUpperInvariant() + ".json");
+        return File.Exists(file) ? file : null;
+    }
+
     public AirportProfile? Profile(string icao)
     {
         lock (_gate)
