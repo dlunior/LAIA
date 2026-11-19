@@ -3316,6 +3316,26 @@ public sealed partial class TrafficWorld
             if (c.AltMinFt > 0 || c.AltMaxFt > 0) f.AltLimits.Add((f.Path.PointS[i], c.AltMinFt, c.AltMaxFt));
             if (c.Fix.Length > 0 && !onRoute.Any(x => x.Item2.Fix == c.Fix)) onRoute.Add((f.Path.PointS[i], c));
         }
+        // Real traffic's altitudes along the whole way in, as ceilings where nothing published says otherwise (user, 19
+        // Nov: "at the very least it could give the injection some guidance at what altitudes to start aircraft if the
+        // STAR data is missing or not specified"): every 3 nm from where it is to 8 nm out, no higher than the real
+        // arrivals to this runway near there (median + 500 ft, five or more needed) — never below a published floor
+        // still ahead. The hand-over starts an arrival no higher than these allow (and down in time for them).
+        if (Learned is { Samples.Count: > 0 })
+        {
+            var published = f.AltLimits.ToList();
+            var nmR = Geo2.MPerNm;
+            for (var sR = 0.0; sR < f.ThrS - 8 * nmR; sR += 3 * nmR)
+            {
+                var alt = RealAltAt(rwy, f.Path.At(sR).p);
+                if (double.IsNaN(alt)) continue;
+                var ceil = Math.Ceiling((alt + 500) / 100) * 100;
+                var floor = published.Where(c => c.S >= sR && c.Min > 0).Select(c => c.Min).DefaultIfEmpty(0).Max();
+                if (published.Any(c => Math.Abs(c.S - sR) < 2 * nmR && c.Max > 0)) continue;   // a published one right there
+                f.AltLimits.Add((sR, 0, Math.Max(ceil, floor)));
+            }
+            f.AltLimits.Sort((x, y) => x.S.CompareTo(y.S));
+        }
         SetChecks(f, onRoute);
         // Every named fix still on the route (for the predicted times at the fixes).
         f.Fixes.Clear(); f.FixEtas.Clear(); f.FixPred10.Clear();
