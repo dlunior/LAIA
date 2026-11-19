@@ -989,29 +989,55 @@ public sealed partial class TrafficWorld
         // spaces them with speed; close in it can't, so a clashing one starts on its arrival route one slot further
         // back (5 nm behind the one it clashed with), as if it had been sequenced before it got here.
         // How far apart in track miles (user, 19 Nov): at least 5 on the approach (vectors and final), 7 on the STAR,
-        // 10 before it — measured to the same runway, by the farther of the two.
+        // 10 before it — measured to the same runway, by the farther of the two. And the same distances (straight line,
+        // within 1,000 ft) from the arrivals of the other airports LAIA runs, the satellite fields and the main airport
+        // ("make sure that includes aircraft to satellite fields as well").
         if (f is not null && plan.rwy is not null)
         {
             var mine = f.ThrS / Geo2.MPerNm;
             var need = InjectGap(f.AppNm, f.StarNm);
-            var clash = Flights.Any(o => o != f && !o.Done && o.Kind == "arrival" && !o.OnGround && o.Rwy?.Runway == plan.rwy.Runway
-                && (o.Phase == "go-around" ? 12.0 : (o.ThrS - o.S) / Geo2.MPerNm) is var od && Math.Abs(od - mine) < need(Math.Max(od, mine)));
-            if (clash)
+            var starNm = f.StarNm;
+            bool SameRunway(Flight g)
+            {
+                var gd = (g.ThrS - g.S) / Geo2.MPerNm;
+                return Flights.Any(o => o != g && !o.Done && o.Kind == "arrival" && !o.OnGround && o.Rwy?.Runway == plan.rwy.Runway
+                    && (o.Phase == "go-around" ? 12.0 : (o.ThrS - o.S) / Geo2.MPerNm) is var od && Math.Abs(od - gd) < need(Math.Max(od, gd)));
+            }
+            Foreign? OtherField(Flight g)
+            {
+                var gd = (g.ThrS - g.S) / Geo2.MPerNm;
+                return Others.FirstOrDefault(o => o.Kind == "arrival" && o.Phase != "user" && o.AltFt > 500 && Math.Abs(o.AltFt - g.AltFt) < 1000
+                    && (o.Pos - g.Pos).Length < need(gd) * Geo2.MPerNm);
+            }
+            var near = OtherField(f);
+            if (SameRunway(f) || near is not null)
             {
                 Flights.Remove(f);
-                var before = mine > f.StarNm + 0.5;
-                var d = ArrivalSlot(mine, plan.rwy, before ? mine + 60 : Math.Max(60, mine + 40), need);
-                if (d < 0) return null;
-                if (before)
+                var before = mine > starNm + 0.5;
+                var d = mine;
+                for (var tries = 0; tries < 8; tries++)
                 {
-                    // Still before its STAR: taken over further back on its way in, at the same level.
-                    var at = Apt.Map.ToXY(np.Lat, np.Lon);
-                    var back = at + at.Unit * ((d - mine) * Geo2.MPerNm);
-                    f = SpawnArrival(0, false, l, plan, entry: (back, np.AltFt, np.CruiseFt));
+                    d = ArrivalSlot(tries == 0 ? d : d + need(d), plan.rwy, before ? mine + 80 : Math.Max(60, mine + 40), need);
+                    if (d < 0) return null;
+                    Flight? g;
+                    if (before)
+                    {
+                        // Still before its STAR: taken over further back on its way in, at the same level.
+                        var at = Apt.Map.ToXY(np.Lat, np.Lon);
+                        g = SpawnArrival(0, false, l, plan, entry: (at + at.Unit * ((d - mine) * Geo2.MPerNm), np.AltFt, np.CruiseFt));
+                    }
+                    else g = SpawnArrival(d, false, l, plan);
+                    if (g is null) return null;
+                    var near2 = OtherField(g);
+                    if (near2 is null)
+                    {
+                        Log($"{g.Callsign}: taken over from the whole sky, sequenced: starts {(g.ThrS - g.S) / Geo2.MPerNm:0} track nm out (it was {mine:0}, too close to {(near is not null ? $"{near.Callsign} ({near.Airport})" : "the traffic ahead")}), {g.Route} for runway {g.Rwy?.Ident}");
+                        return g;
+                    }
+                    near = near2;
+                    Flights.Remove(g);
                 }
-                else f = SpawnArrival(d, false, l, plan);
-                if (f is not null) Log($"{f.Callsign}: taken over from the whole sky, sequenced: starts {d:0} track nm out (it was {mine:0}, too close to the traffic ahead), {f.Route} for runway {f.Rwy?.Ident}");
-                return f;
+                return null;
             }
         }
         if (f is not null) Log($"{f.Callsign}: taken over from the whole sky {Geo2.DistanceNm(Apt.Data.Lat, Apt.Data.Lon, np.Lat, np.Lon):0} nm out at {np.AltFt:0} ft ({np.Phase}), {f.Route} for runway {f.Rwy?.Ident}");
