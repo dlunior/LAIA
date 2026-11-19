@@ -1,0 +1,30 @@
+name: Traffic tests (branches)
+
+# Work in progress on a branch: the offline traffic tests only — no installers, no release, so nothing reaches the
+# "Update LAIA" button until it's merged into main.
+on:
+  push:
+    branches-ignore: [main]
+    paths-ignore: ["**.md", "docs/**"]
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_NOLOGO: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Check traffic logic (offline simulation)
+        shell: pwsh
+        run: |
+          dotnet run --project src/Laia.Tests -c Release *>&1 | Tee-Object -FilePath traffic-tests.log
+          if ($LASTEXITCODE) { throw "traffic checks failed" }
