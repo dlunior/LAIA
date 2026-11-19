@@ -146,6 +146,12 @@ public sealed class Flight
     public double OrderKey = double.NaN;
     /// <summary>Broken off or gone around: placed behind everyone nearer the runway than it when re-sequenced.</summary>
     public bool Rejoin;
+    /// <summary>The real tracks off its STAR (shortest to longest), which one it flies, and where that one leaves the STAR.</summary>
+    public List<(int cut, List<V2> pts, double lenNm)>? Fan;
+    public int FanIdx = -1;
+    public string? FanKey;
+    public V2 FanLeave;
+    public double FanAt = -999;
     public double EtaSec = double.NaN, EtaAt = -999, Pred30 = double.NaN, Pred10 = double.NaN, Pred5 = double.NaN;
     public int Seq;
     /// <summary>Arrival manager: seconds this arrival must lose to land at its slot behind the one ahead (0 = none),
@@ -3106,7 +3112,18 @@ public sealed partial class TrafficWorld
             // Where real traffic is turned off this STAR and how it's vectored onto final (adsb.lol): the STAR up to
             // there, then the way a real arrival on it flew to the final (user, 15 Nov, KORD: arrivals from the
             // northwest "blindly following the STAR and not taking into consideration the ADSB data on vectors to final").
-            var realVec = starPts.Count >= 2 ? RealVectors(rwy, starPts) : null;
+            (int cut, List<V2> pts)? realVec = null;
+            var fan = starPts.Count >= 2 ? RealFan(rwy, starPts) : null;
+            var fanKey = $"{rwy.Ident}|{star?.Name}";
+            if (fan is { Count: >= 3 })
+            {
+                if (f.FanKey != fanKey) { f.FanKey = fanKey; f.FanIdx = fan.Count / 2; }
+                f.FanIdx = Math.Clamp(f.FanIdx, 0, fan.Count - 1);
+                realVec = (fan[f.FanIdx].cut, fan[f.FanIdx].pts);
+                f.Fan = fan;
+                f.FanLeave = fan[f.FanIdx].pts[0];
+            }
+            else { f.Fan = null; f.FanKey = null; }
             if (realVec is { } rv)
             {
                 starPts.RemoveRange(rv.cut + 1, starPts.Count - rv.cut - 1);
@@ -3250,15 +3267,49 @@ public sealed partial class TrafficWorld
             found.Add((pts[lastOn].Length / nm, pts[lastOn], rest));
         }
         if (found.Count < 3) return null;
-        var typical = found.OrderBy(x => x.leaveNm).ElementAt(found.Count / 2);
-        // Where on the STAR it was turned off: the STAR point before the nearest segment.
+        _fanFound = found.OrderBy(x => x.leaveNm).ToList();
+        var typical = _fanFound[_fanFound.Count / 2];
+        return Fanned(typical, star);
+    }
+    private List<(double leaveNm, V2 leave, List<V2> rest)>? _fanFound;
+
+    /// <summary>One real track off the STAR as a path piece: where on the STAR it turned off, and its points 1 nm apart.</summary>
+    private (int cut, List<V2> pts) Fanned((double leaveNm, V2 leave, List<V2> rest) tr, List<V2> star)
+    {
+        var nm = Geo2.MPerNm;
         int cut = 0; double best = double.MaxValue;
-        for (var k = 0; k + 1 < star.Count; k++) { var d = DistToSegment(typical.leave, star[k], star[k + 1]); if (d < best) { best = d; cut = k; } }
+        for (var k = 0; k + 1 < star.Count; k++) { var d = DistToSegment(tr.leave, star[k], star[k + 1]); if (d < best) { best = d; cut = k; } }
         // Thin the real track to points at least 1 nm apart (the radar positions are dense and a little noisy).
         var thin = new List<V2>();
-        foreach (var q in typical.rest) if (thin.Count == 0 || (q - thin[^1]).Length >= 1 * nm) thin.Add(q);
-        if ((typical.rest[^1] - thin[^1]).Length > 1) thin.Add(typical.rest[^1]);
+        foreach (var q in tr.rest) if (thin.Count == 0 || (q - thin[^1]).Length >= 1 * nm) thin.Add(q);
+        if ((tr.rest[^1] - thin[^1]).Length > 1) thin.Add(tr.rest[^1]);
         return (cut, thin);
+    }
+
+    /// <summary>
+    /// The real tracks off this STAR, as path pieces, each with its length from the STAR's first point to established
+    /// on final (nm) — the fan real controllers spread arrivals across (user, 18 Nov: "not following the real world
+    /// tracks close enough on the STAR, downwind or approach"). Up to 15, from the shortest to the longest way round.
+    /// </summary>
+    private List<(int cut, List<V2> pts, double lenNm)>? RealFan(RunwayEnd rwy, List<AirPoint> starPts)
+    {
+        if (RealVectors(rwy, starPts) is null || _fanFound is not { Count: >= 3 } found) return null;
+        var star = starPts.Select(p => p.P).ToList();
+        var nm = Geo2.MPerNm;
+        var res = new List<(int cut, List<V2> pts, double lenNm)>();
+        var n = Math.Min(15, found.Count);
+        for (var i = 0; i < n; i++)
+        {
+            var tr = found[(int)Math.Round(i * (found.Count - 1) / (double)Math.Max(1, n - 1))];
+            var (cut, pts) = Fanned(tr, star);
+            double len = 0;
+            for (var k = 0; k < cut && k + 1 < star.Count; k++) len += (star[k + 1] - star[k]).Length;
+            var prev = star[Math.Min(cut, star.Count - 1)];
+            foreach (var q in pts) { len += (q - prev).Length; prev = q; }
+            len += -rwy.Along(prev);
+            res.Add((cut, pts, len / nm));
+        }
+        return res.OrderBy(x => x.lenNm).ToList();
     }
 
     /// <summary>The final approach from where a real-vectors path is established on it: the runway's approach points
@@ -3932,7 +3983,38 @@ public sealed partial class TrafficWorld
         _rwySwitches++;
         Log($"{f.Callsign}: runway {pick.Ident} instead of {cur.Ident} for less delay ({best:0} s instead of {was:0} s)");
     }
-    private int _rwySwitches, _leftOut;
+    private int _rwySwitches, _leftOut, _fanMoves;
+
+    /// <summary>
+    /// Spacing along the real tracks (user, 18 Nov): while still on its STAR before it's turned off, an arrival is moved
+    /// to the real track in the fan whose length gains (or saves) the time needed — turned off later for a longer way
+    /// round, earlier for a shorter one — so it flies the way real arrivals were actually vectored. Returns the seconds it
+    /// couldn't absorb (0 when it fits); NaN when it's past the turn-off (or has no fan).
+    /// </summary>
+    private double FanPick(Flight f, double addSec, string why)
+    {
+        if (f.Fan is not { Count: >= 3 } fan || f.Path is null || f.Rwy is null) return double.NaN;
+        // Past the turn-off (within 3 nm of it, or beyond it towards the runway): nothing left to choose.
+        double FromLeave(List<V2> pts) { double l = 0; for (var k = 1; k < pts.Count; k++) l += (pts[k] - pts[k - 1]).Length; return (l - f.Rwy.Along(pts[^1])) / Geo2.MPerNm; }
+        var toGo = (f.ThrS - f.S) / Geo2.MPerNm;
+        var curPts = fan[Math.Clamp(f.FanIdx, 0, fan.Count - 1)].pts;
+        if ((f.Pos - f.FanLeave).Length < 3 * Geo2.MPerNm || toGo < FromLeave(curPts) + 3) return double.NaN;
+        if (Math.Abs(addSec) < 1) return 0;
+        var gs = Math.Max(160, Math.Min(f.Gs, 260));
+        var cur = fan[Math.Clamp(f.FanIdx, 0, fan.Count - 1)].lenNm;
+        var wantNm = cur + addSec * gs / 3600;
+        var best = Enumerable.Range(0, fan.Count).OrderBy(i => Math.Abs(fan[i].lenNm - wantNm)).First();
+        // Its turn-off must still be ahead.
+        if (best == f.FanIdx || (f.Pos - fan[best].pts[0]).Length < 3 * Geo2.MPerNm || toGo < FromLeave(fan[best].pts) + 3) return (wantNm - cur) * 3600 / gs;
+        var was = f.FanIdx;
+        f.FanIdx = best;
+        BuildArrivalPath(f, null, f.Pos);
+        f.S = 0; f.EtaAt = -99; f.LastTrombone = Time; f.FanAt = Time;
+        _fanMoves++;
+        f.Mgr = fan[best].lenNm > fan[was].lenNm ? "longer real track" : "shorter real track";
+        Log($"{f.Callsign}: {(fan[best].lenNm > cur ? "a longer" : "a shorter")} real track off its STAR ({fan[best].lenNm:0} nm instead of {cur:0}) — {why}");
+        return (wantNm - fan[best].lenNm) * 3600 / gs;
+    }
 
     private void AssignSequenceSpeed(Flight f)
     {
@@ -5381,6 +5463,8 @@ public sealed partial class TrafficWorld
                     var wantGap = ThresholdGapNeeded(leader, f, forDepartures: false) + 10;
                     var add = wantGap - gapSec;
                     f.TromboneLeft = Trombone(f, add > 10 || add < -25 ? add : 0, $"{gapSec:0} s behind {leader.Callsign} at the runway, {wantGap:0} wanted");
+                    if (double.IsNaN(f.TromboneLeft) && f.Fan is not null)
+                        f.TromboneLeft = FanPick(f, add > 10 || add < -25 ? add : 0, $"{gapSec:0} s behind {leader.Callsign} at the runway, {wantGap:0} wanted");
                 }
                 if (dth <= 4) f.TromboneLeft = double.NaN;
                 var trombone = !double.IsNaN(f.TromboneLeft) && f.TromboneLeft < 40 && !tooClose;
