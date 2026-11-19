@@ -664,7 +664,7 @@ public sealed partial class TrafficWorld
                 // …unless the one behind is already established on the final: then the detour has put the one ahead
                 // behind it, and the only other way out is to break it off (KORD, 19 Nov: UAL770 vectored off for DAL1390
                 // while AAL2740 was on the final 8 nm behind — AAL2740 was broken off "327 s short").
-                var bOnFinal = db < 15 && b.Rwy is { } brw && Math.Abs(brw.Offset(b.Pos)) < 0.6 * Geo2.MPerNm && brw.Along(b.Pos) < 0;
+                var bOnFinal = false && db < 15 && b.Rwy is { } brw && Math.Abs(brw.Offset(b.Pos)) < 0.6 * Geo2.MPerNm && brw.Along(b.Pos) < 0;
                 if (!bOnFinal && (Time - a.LastVector < 600 || Time - a.LastTrombone < 60 && !double.IsNaN(a.BaseTurnNm))) continue;
                 // …and it also fits behind the one ahead of them both (AAL1974 swapped ahead of AAL2616 and then had to
                 // be broken off, 111 s short behind UAL770).
@@ -6007,7 +6007,7 @@ public sealed partial class TrafficWorld
                     && Vector(f, Math.Max(short_, 45) + 15, $"{gapText}, {short_:0} s short at the runway")) return;
                 // Short only because the one ahead was just turned off on a detour while this one is on the final, well
                 // behind it: it'll be put ahead in the next sequence pass, so no break-off for that (AAL2740, 19 Nov).
-                var leaderDetour = leader is { } ld && Time - ld.LastVector < 120 && !tooClose && OnFinal(f, dth);
+                var leaderDetour = false;
                 if (!trombone && !leaderDetour && (tooClose || (short_ > 20 && OnFinal(f, dth))) && dth > 5 && dth <= 12 && Time - f.LastOrbit > 240) { BreakOff(f, $"{gapText}, {short_:0} s short at the runway"); return; }
             }
             if (f.Phase == "flare") target = f.P.Vapp - 5;
