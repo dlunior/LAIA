@@ -3930,6 +3930,89 @@ public sealed partial class TrafficWorld
     /// same altitude, then vectors back around — calmer and more realistic than a go-around at half a mile.
     /// </summary>
     private double _lastBreakoffAt = -999, _lastBreakoffSide;
+    /// <summary>
+    /// A real turn at the start of a new path (user, 19 Nov, UAL415: "a sharp turn that's not even possible"): a path
+    /// built from the aircraft's position straight to a point off its heading made it swing round on the spot. Now the
+    /// path starts with the arc it can fly — its speed's radius at 25° of bank, in 10° steps — from its heading until it
+    /// points at the next point far enough beyond the turn; points it can no longer reach are dropped. Returns the full
+    /// list (p first) and how many points were added in front of <paramref name="rest"/>'s first kept one.
+    /// </summary>
+    private (List<V2> pts, int added, int dropped) WithTurn(V2 p, double dir, List<V2> rest, double ias, double altFt)
+    {
+        var v = Wind.Tas(Math.Max(ias, 140), altFt) * Kt;
+        var r = Math.Max(1200, v * v / (G * Math.Tan(25 * Math.PI / 180)));
+        var res = new List<V2> { p };
+        var drop = 0;
+        // A point inside the circle it turns on can't be pointed at: go on to the next.
+        bool Inside(V2 t) { var tn = Geo2.Diff(dir, (t - p).Bearing); var c = p + V2.FromBearing(dir + (tn >= 0 ? 90 : -90), r); return (t - c).Length < 1.1 * r || (t - p).Length < 0.5 * r; }
+        while (drop < rest.Count - 1 && Inside(rest[drop])) drop++;
+        var target = rest[drop];
+        var turn = Geo2.Diff(dir, (target - p).Bearing);       // + clockwise (right)
+        if (Math.Abs(turn) > 12)
+        {
+            var step = Math.Sign(turn) * 10.0; var h = dir; var q = p; var arc = r * 10 * Math.PI / 180;
+            for (var k = 0; k < 34; k++)
+            {
+                q += V2.FromBearing(h + step / 2, arc); h += step;
+                res.Add(q);
+                if (Math.Abs(Geo2.Diff(h, (target - q).Bearing)) <= 10) break;
+            }
+        }
+        var added = res.Count - 1;
+        for (var i = drop; i < rest.Count; i++) res.Add(rest[i]);
+        return (res, added, drop);
+    }
+
+    /// <summary>
+    /// Close in, short of room behind the one ahead: another landing runway whose final it's nearer to than its own,
+    /// where it lands sooner than it can on its own runway (30 s or more) — vectored straight there instead of being
+    /// vectored off or broken off. Re-sequenced on that runway behind the arrivals nearer to it.
+    /// </summary>
+    private bool OtherRunway(Flight f, double shortSec, string why)
+    {
+        if (f.Rwy is not { } cur || f.Path is null || f.Test || f == UserArr || ArrRwys.Count < 2 || Time - f.RwySwitchAt < 300) return false;
+        var nm = Geo2.MPerNm;
+        var (p, dir, _) = f.Path.At(f.S);
+        var dth = (f.ThrS - f.S) / nm;
+        var mine = Time + EtaToThreshold(f, dth) + shortSec;
+        var kt = Math.Max(170, Math.Min(f.Gs, 250) * 0.85 + f.P.Vapp * 0.15);
+        RunwayEnd? best = null; List<V2>? bestPts = null; var bestAt = mine - 30;
+        foreach (var r in ArrRwys)
+        {
+            if (r.Runway == cur.Runway || r.LengthM < f.P.MinRunwayM) continue;
+            // Nearer that final than its own, and still outside it (not turning back to it).
+            if (Math.Abs(r.Offset(p)) >= Math.Abs(cur.Offset(p)) || r.Along(p) > -6 * nm) continue;
+            var after = Vectors(p, r, ShapeFor(r));
+            if (after.Count == 0) continue;
+            var pts = WithTurn(p, dir, after, f.Ias, f.AltFt).pts;
+            double len = 0; for (var k = 1; k < pts.Count; k++) len += (pts[k] - pts[k - 1]).Length;
+            len += (r.Threshold - pts[^1]).Length;
+            var at = Time + len / (kt * Kt);
+            var slot = EarliestSlot(r.Runway, at, f);
+            if (slot - at > 20 || slot >= bestAt) continue;
+            best = r; bestPts = pts; bestAt = slot;
+        }
+        if (best is null || bestPts is null) return false;
+        var thrIndex = bestPts.Count;
+        bestPts.Add(best.Threshold); bestPts.Add(best.FarEnd);
+        f.Rwy = best; f.Fan = null; f.FanKey = null;
+        f.Path = AirPath(bestPts, i => i >= thrIndex ? 1 : 200, f.AltFt);
+        f.ThrS = f.Path.PointS[thrIndex];
+        f.S = 0;
+        f.SpeedLimits.Clear();
+        f.AltLimits.Clear(); f.Checks.Clear(); f.Fixes.Clear(); f.FixEtas.Clear();
+        f.LandingChecked = false; f.StableChecked = false;
+        if (f.Phase == "final") f.SetPhase("approach", Time);
+        f.Frozen = false; f.Rejoin = true; f.SlowDv = 0; f.EtaAt = -99;
+        f.RwySwitchAt = Time; f.LastVector = Time; f.LastTrombone = Time;
+        f.Mgr = "vectored";
+        _rwySwitches++;
+        var far = bestPts.FirstOrDefault(q => (q - p).Length > 2 * nm, bestPts[^1]);
+        var hdg = (far - p).Bearing;
+        Log($"{f.Callsign}: runway {best.Ident} instead of {cur.Ident} ({why}): lands about {(mine - bestAt):0} s sooner there — vectors for {best.Ident}, turn {(Geo2.Diff(dir, hdg) < 0 ? "left" : "right")} heading {Geo2.Norm(hdg):000}");
+        return true;
+    }
+
     private void BreakOff(Flight f, string why)
     {
         var rwy = f.Rwy!;
@@ -3945,8 +4028,9 @@ public sealed partial class TrafficWorld
         _breakoffs++; f.Mgr = "vectored around"; f.Frozen = false; f.Rejoin = true;   // re-sequenced behind those nearer in
         Log($"{f.Callsign}: breaking off the approach for spacing ({why}): turn {(V2.Cross(V2.FromBearing(dir), outPt - p) > 0 ? "left" : "right")} heading {heading:000}, vectors back around");
         f.LastOrbit = Time; f.LastVector = Time; f.LastTrombone = Time;   // nothing else for it straight away
-        var pts = new List<V2> { p, p + V2.FromBearing(dir, 700), outPt };
-        pts.AddRange(Vectors(outPt, rwy, ShapeFor(rwy)));
+        var after = new List<V2> { outPt };
+        after.AddRange(Vectors(outPt, rwy, ShapeFor(rwy)));
+        var pts = WithTurn(p, dir, after, f.Ias, f.AltFt).pts;
         var thrIndex = pts.Count;
         pts.Add(rwy.Threshold);
         pts.Add(rwy.FarEnd);
@@ -4152,14 +4236,17 @@ public sealed partial class TrafficWorld
         }
         if (!ok) return false;
         addSec = addM / gs;
-        var pts = new List<V2> { p, mid, rj };
+        var after = new List<V2> { mid, rj };
         var oldS = keptS[j];
-        for (var i = j + 1; i < path.Points.Count; i++) pts.Add(path.Points[i]);
+        for (var i = j + 1; i < path.Points.Count; i++) after.Add(path.Points[i]);
+        var (pts, added, dropped) = WithTurn(p, dir, after, f.Ias, f.AltFt);
+        if (dropped > 0) return false;   // the dogleg's corner is inside the turn: not a vector it can fly
+        var rjIdx = 2 + added;
         var oldLimits = f.SpeedLimits.Where(l => l.S > oldS).Select(l => (off: l.S - oldS, l.Kt)).ToList();
         var thrIndex = pts.Count - 2;
-        f.Path = AirPath(pts, i => i >= thrIndex ? 1 : i <= 2 ? f.Ias : 180, f.AltFt);
+        f.Path = AirPath(pts, i => i >= thrIndex ? 1 : i <= rjIdx ? f.Ias : 180, f.AltFt);
         f.ThrS = f.Path.PointS[thrIndex];
-        var at = f.Path.PointS[2];
+        var at = f.Path.PointS[rjIdx];
         f.SpeedLimits = oldLimits.Select(l => (at + l.off, l.Kt)).ToList();
         ShiftRestrictions(f, oldS, at);
         f.S = 0;
@@ -5543,6 +5630,10 @@ public sealed partial class TrafficWorld
                 // arrival manager plans the delay far out with speed, a runway with less delay, delay vectors on the
                 // way in and the trombone. Close in, vectors only with real route left (beyond 20 nm), and a break-off
                 // only when radar spacing would actually be lost or the gap is far too short to make up.
+                // Another landing runway it's already nearer to, with room there (user, 19 Nov, UAL415 broken off at
+                // KORD: "could have easily been sequenced for 28C instead") — before vectoring off or breaking off.
+                if (!trombone && (short_ > (dth > 20 ? 45 : 20) || tooClose) && dth > 6 && !OnFinal(f, dth)
+                    && OtherRunway(f, Math.Max(short_, 0), $"{gapText}, {short_:0} s short at the runway")) return;
                 if (!trombone && (short_ > (dth > 20 ? 45 : 20) || tooClose) && dth > 13 && short_ <= 300 && Time - f.LastVector > 240
                     && Vector(f, Math.Max(short_, 45) + 15, $"{gapText}, {short_:0} s short at the runway")) return;
                 if (!trombone && (tooClose || (short_ > 20 && OnFinal(f, dth))) && dth > 5 && dth <= 12 && Time - f.LastOrbit > 240) { BreakOff(f, $"{gapText}, {short_:0} s short at the runway"); return; }

@@ -919,10 +919,21 @@ Console.WriteLine("== A rush of arrivals far out: planned with speed, delay vect
         for (var t = 0; t < 120; t++) world.Step(0.5);   // one a minute: half as many again as the runway takes
     }
     var lands = new Dictionary<string, double>();
+    var lastHdg = new Dictionary<Flight, double>();
+    var sharp = new List<string>();
     for (var t = 0.0; t < 3 * 3600 && lands.Count < rush.Count; t += 0.5)
     {
         world.Step(0.5);
         foreach (var f in rush) if (f.OnGround && !lands.ContainsKey(f.Callsign)) lands[f.Callsign] = world.Time;
+        // Turns an airliner can fly (user, 19 Nov, UAL415: "a sharp turn that's not even possible"): no more than
+        // 8°/s anywhere in the air (25° of bank is about 2.5°/s at 200 kt, 4°/s at 140).
+        foreach (var f in rush)
+        {
+            if (f.OnGround || f.Path is null || f.Done) { lastHdg.Remove(f); continue; }
+            var h = f.Path.At(f.S).dir;
+            if (lastHdg.TryGetValue(f, out var h0) && Math.Abs(Geo2.Diff(h0, h)) > 4 && sharp.Count < 6) sharp.Add($"{f.Callsign} {Math.Abs(Geo2.Diff(h0, h)) * 2:0}°/s at {world.Time:0} s, {(f.ThrS - f.S) / Geo2.MPerNm:0.0} nm to go, {f.Phase}");
+            lastHdg[f] = h;
+        }
     }
     var order = lands.OrderBy(x => x.Value).ToList();
     var gaps = order.Zip(order.Skip(1), (a, b) => b.Value - a.Value).ToList();
@@ -943,6 +954,8 @@ Console.WriteLine("== A rush of arrivals far out: planned with speed, delay vect
     // do too; more means the delay isn't being planned far out.
     Check(C("breaking off") <= 2 && C("going around") == 0, "at most two break-offs in the whole rush, no go-arounds");
     Check(negative == 0, "nobody is broken off for an aircraft that's behind it");
+    foreach (var x in sharp) Console.WriteLine("    turned too sharply: " + x);
+    Check(sharp.Count == 0, "no turn sharper than 8°/s in the air (vectors and break-offs start with a real turn)");
 }
 
 Console.WriteLine("== The trombone: arrivals 3.5 nm apart on the downwind are spaced by moving their base turns — no holds, no 360s (CYYZ, 17 Nov)");
