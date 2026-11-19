@@ -4776,6 +4776,29 @@ public sealed partial class TrafficWorld
             if (level > f.AltFt + 200) continue;   // it's below already: the other side's rules keep them apart
             if (double.IsNaN(floor) || level > floor) { floor = level; who = $"{o.Callsign} ({o.Airport})"; }
         }
+        // This airport's own departures climbing out below (KORD, 18 Nov: departures stopped their climb 1,000 ft
+        // below an arrival, which then kept descending onto them — 0.7 nm and 860 ft apart). The same probe along
+        // both paths: it stops 1,000 ft above the highest the departure gets while near.
+        foreach (var o in Flights)
+        {
+            if (o.Kind != "departure" || o.OnGround || o.Done || o.Path is null || o.AltFt > f.AltFt + 500 || (o.Pos - f.Pos).Length > 20 * Geo2.MPerNm) continue;
+            double highest = double.MinValue; var conflict = false;
+            for (var t = 0.0; t <= 120; t += 10)
+            {
+                var fp = f.Path.At(Math.Min(f.Path.Length, f.S + f.Gs * 0.5144 * t)).p;
+                var op = o.Path.At(Math.Min(o.Path.Length, o.S + o.Gs * 0.5144 * t)).p;
+                var cap = !double.IsNaN(o.ClimbStop) ? o.ClimbStop : 40000;
+                var oAlt = Math.Min(cap, o.AltFt + Math.Max(0, o.Vs) * t / 60);
+                var fAlt = f.AltFt + Math.Min(0, f.Vs) * t / 60;
+                var lat = (fp - op).Length;
+                if (lat < 5 * Geo2.MPerNm) highest = Math.Max(highest, Math.Max(o.AltFt, oAlt));
+                if (lat < 3.5 * Geo2.MPerNm && Math.Abs(fAlt - oAlt) < 1000) conflict = true;
+            }
+            if (!conflict || highest == double.MinValue) continue;
+            var level = Math.Ceiling((highest + 1000) / 1000) * 1000;
+            if (level > f.AltFt + 200) continue;   // already below it: the departure's climb stop keeps them apart
+            if (double.IsNaN(floor) || level > floor) { floor = level; who = o.Callsign; }
+        }
         if (who is not null && f.FloorFor != who)
         {
             f.FloorFor = who; _descentStops++;
