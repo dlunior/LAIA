@@ -920,6 +920,7 @@ Console.WriteLine("== A rush of arrivals far out: planned with speed, delay vect
     Check(lands.Count == rush.Count, "every arrival lands");
     Check(gaps.Count > 0 && gaps.Min() >= 75, "spaced at the runway (75 s or more between landings)");
     Check(C("holding") == 0 && C("making a 360") == 0, "no holds and no 360s");
+    Check(C("failed") == 0, "no step of the arrival manager fails");
     // Half as many again as the runway can take: a break-off or two at the end of the rush is what a controller would
     // do too; more means the delay isn't being planned far out.
     Check(C("breaking off") <= 2 && C("going around") == 0, "at most two break-offs in the whole rush, no go-arounds");

@@ -653,12 +653,28 @@ public sealed partial class TrafficWorld
                     }
                     slot = Math.Max(slot, prevSlot + gapNeed + 15);
                 }
+                if (f != UserArr && !f.Frozen && !f.Test && slot - f.EtaNominal > 900 && f.Path is not null && (f.ThrS - f.S) / Geo2.MPerNm > 100)
+                {
+                    // More than 15 minutes late on arrival, still 100 nm or more out (Peak beyond what the runways take,
+                    // KORD 18 Nov: number 36 for 27C with 28 minutes to lose): another runway if one has room, else it's
+                    // left out — no 10-minute detours and no holds.
+                    f.Delay = slot - f.EtaNominal;
+                    var was = f.Rwy;
+                    try { f.RwySwitchAt = -999; BalanceRunway(f); } catch { }
+                    if (f.Rwy != was) continue;
+                    if (f.Delay > 900)
+                    {
+                        f.Done = true; _leftOut++;
+                        Log($"{f.Callsign}: left out — {f.Delay / 60:0} min of delay for {was!.Ident} at this traffic level (more than the runways take)");
+                        continue;
+                    }
+                }
                 _timeline[g.Key].Add((slot, f));
                 if (f == UserArr) { prev = f; prevSlot = slot; continue; }
                 f.Delay = slot - f.EtaNominal;
                 f.Frozen = true; f.FrozenSlot = slot;
                 if (Time - f.RwyCheckAt >= 30) { f.RwyCheckAt = Time; try { BalanceRunway(f); } catch { } }
-                if (Time - f.SlowAt >= 5) { f.SlowAt = Time; AssignSequenceSpeed(f); }
+                if (Time - f.SlowAt >= 5) { f.SlowAt = Time; try { AssignSequenceSpeed(f); } catch (Exception ex) { Log($"{f.Callsign}: speed planning failed: {ex.Message}"); } }
                 f.Slowed = f.SlowDv > 0;
                 prev = f; prevSlot = slot;
             }
@@ -3884,7 +3900,7 @@ public sealed partial class TrafficWorld
         _rwySwitches++;
         Log($"{f.Callsign}: runway {pick.Ident} instead of {cur.Ident} for less delay ({best:0} s instead of {was:0} s)");
     }
-    private int _rwySwitches;
+    private int _rwySwitches, _leftOut;
 
     private void AssignSequenceSpeed(Flight f)
     {
@@ -3914,7 +3930,7 @@ public sealed partial class TrafficWorld
                 var byTrombone = double.IsNaN(tromb) || double.IsNaN(f.BaseTurnNm) ? 0 : Math.Max(0, 25 - f.BaseTurnNm) * 2 * Geo2.MPerNm / (200 * Kt) * 0.6;
                 var left = f.Delay - bySpeed - byTrombone;
                 if (left > 90)
-                    Vector(f, Math.Min(left, dth > 60 ? 600 : 300), rejoinNm: Math.Clamp(dth - 30, 25, 45), why: $"{f.Delay:0} s delay for the sequence (number {f.Seq} for {f.Rwy.Ident}), {bySpeed:0} s of it by speed");
+                    Vector(f, Math.Min(left, 300), rejoinNm: Math.Clamp(dth - 30, 25, 45), why: $"{f.Delay:0} s delay for the sequence (number {f.Seq} for {f.Rwy.Ident}), {bySpeed:0} s of it by speed");
             }
         }
         if (f.SlowDv > 0 && (old == 0 || Math.Abs(f.SlowDv - old) >= 10))
@@ -4018,6 +4034,7 @@ public sealed partial class TrafficWorld
         var minNm = Math.Max(joinNm + 1.5, -rwy.Along(f.Pos) / nm + 1.0);
         var maxNm = 25.0;
         var wantNm = baseNm + addSec * gs / 2 / nm;
+        if (minNm > maxNm) return double.NaN;   // still further out than any base turn could be: nothing to move yet
         var newNm = Math.Clamp(wantNm, minNm, maxNm);
         // Never pushed out when it isn't short: an aircraft already near its base turn turns there (it would otherwise
         // ride the "1 nm ahead" limit down an endless downwind).
