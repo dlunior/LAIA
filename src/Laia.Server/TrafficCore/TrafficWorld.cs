@@ -4496,7 +4496,7 @@ public sealed partial class TrafficWorld
             }
             // One delay vector at a time: not another before it's back on its route from the last (UAL2211, 19 Nov: six
             // in 18 minutes, each 3 minutes after the one before and before it had rejoined).
-            if (dv >= 40 && dth > 40 && Time - f.LastVector > 180 && f.S >= f.VectorRejoinS)
+            if (dv >= 40 && dth > 40 && Time - f.LastVector > 180)
             {
                 var bySpeed = EtaToThreshold(f, dth) - base0;
                 var tromb = Trombone(f, 0, "");
