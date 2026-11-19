@@ -6050,7 +6050,7 @@ public sealed partial class TrafficWorld
                     // Already below what it wants: follow the slope ahead, not the one behind (19 Nov, the cause of the
                     // Midway misses: "aiming for 6,004" at 5,584 ft and still descending 812 ft/min — the steep slope
                     // over the last half mile carried it down through a level-off at STKNY, HALIE, JILLZ, GERMN).
-                    if (f.AltFt < want - 30)
+                    if (false && f.AltFt < want - 30)
                     {
                         var plan3 = f.CruiseFt > 0 ? Math.Min(Profile(rwy, Math.Max(0, dth - 0.5)), f.CruiseFt) : Profile(rwy, Math.Max(0, dth - 0.5));
                         var want3 = Restricted(f, plan3, f.S + 0.5 * Geo2.MPerNm);
