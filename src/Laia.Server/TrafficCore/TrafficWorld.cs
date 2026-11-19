@@ -144,6 +144,8 @@ public sealed class Flight
     /// <summary>Its place in the landing order: its unhindered time when first sequenced (NaN: not yet). Stretching its
     /// path (delay vectors, the trombone) doesn't change it, so it can't swap the order.</summary>
     public double OrderKey = double.NaN;
+    /// <summary>Broken off or gone around: placed behind everyone nearer the runway than it when re-sequenced.</summary>
+    public bool Rejoin;
     public double EtaSec = double.NaN, EtaAt = -999, Pred30 = double.NaN, Pred10 = double.NaN, Pred5 = double.NaN;
     public int Seq;
     /// <summary>Arrival manager: seconds this arrival must lose to land at its slot behind the one ahead (0 = none),
@@ -620,6 +622,16 @@ public sealed partial class TrafficWorld
             // unhindered time among the others' slots; an arrival that can no longer make its slot (its unhindered time
             // is past the next one's) drops back. The user is placed by their predicted time.
             foreach (var f in g) if (f == UserArr || double.IsNaN(f.OrderKey) || !f.Frozen) f.OrderKey = f.EtaNominal;
+            // One coming back round (a break-off, a go-around) goes behind every arrival nearer the runway than it — never
+            // in front of one already on its way in, which would then be broken off in turn (KORD Peak, 18 Nov: AAL1974
+            // broke off, then AAL2616 and UAL415 behind it, each "200+ s short" behind the one before).
+            foreach (var f in g.Where(x => x.Rejoin && x != UserArr && x.Path is not null))
+            {
+                var d = (f.ThrS - f.S) / Geo2.MPerNm;
+                var ahead = g.Where(o => o != f && !o.Rejoin && o.Path is not null && (o.ThrS - o.S) / Geo2.MPerNm < d && !double.IsNaN(o.OrderKey)).Select(o => o.OrderKey).DefaultIfEmpty(double.NaN).Max();
+                if (!double.IsNaN(ahead)) f.OrderKey = Math.Max(f.OrderKey, ahead + 1);
+                f.Rejoin = false; f.Frozen = true;
+            }
             var ordered = g.OrderBy(f => f.OrderKey).ToList();
             // One that will clearly be first after all (it couldn't lose its delay, or the one ahead was slowed or
             // stretched more than planned): closer to the runway along its route by 2 nm or more, and landing with the
@@ -631,7 +643,11 @@ public sealed partial class TrafficWorld
                 // Not when the one ahead is on a planned detour (delay vectors, an extended downwind): that's the plan.
                 if (Time - a.LastVector < 600 || Time - a.LastTrombone < 60 && !double.IsNaN(a.BaseTurnNm)) continue;
                 var da = (a.ThrS - a.S) / Geo2.MPerNm; var db = (b.ThrS - b.S) / Geo2.MPerNm;
-                if (db < da - 2 && b.EtaSec + ThresholdGapNeeded(b, a, forDepartures: false) < a.EtaSec)
+                // …and it also fits behind the one ahead of them both (AAL1974 swapped ahead of AAL2616 and then had to
+                // be broken off, 111 s short behind UAL770).
+                var before = k > 0 ? ordered[k - 1] : null;
+                var fits = before is null || double.IsNaN(before.EtaSec) || b.EtaSec >= before.EtaSec + ThresholdGapNeeded(before, b, forDepartures: false);
+                if (fits && db < da - 2 && b.EtaSec + ThresholdGapNeeded(b, a, forDepartures: false) < a.EtaSec)
                 {
                     (a.OrderKey, b.OrderKey) = (b.OrderKey, a.OrderKey);
                     ordered[k] = b; ordered[k + 1] = a;
@@ -3818,7 +3834,7 @@ public sealed partial class TrafficWorld
         _lastBreakoffAt = Time; _lastBreakoffSide = side;
         var outPt = p + left * (side * (wide ? 7 : 4) * nm) - rwy.Dir * ((wide ? 8 : 4) * nm);
         var heading = (outPt - p).Bearing;
-        _breakoffs++; f.Mgr = "vectored around"; f.Frozen = false;   // re-sequenced at its new time
+        _breakoffs++; f.Mgr = "vectored around"; f.Frozen = false; f.Rejoin = true;   // re-sequenced behind those nearer in
         Log($"{f.Callsign}: breaking off the approach for spacing ({why}): turn {(V2.Cross(V2.FromBearing(dir), outPt - p) > 0 ? "left" : "right")} heading {heading:000}, vectors back around");
         f.LastOrbit = Time; f.LastVector = Time; f.LastTrombone = Time;   // nothing else for it straight away
         var pts = new List<V2> { p, p + V2.FromBearing(dir, 700), outPt };
@@ -3840,7 +3856,7 @@ public sealed partial class TrafficWorld
     {
         Log($"{f.Callsign}: going around ({why})");
         var rwy = f.Rwy!;
-        f.Frozen = false;   // re-sequenced at its new time: the arrivals behind no longer space on it
+        f.Frozen = false; f.Rejoin = true;   // re-sequenced behind those nearer in: the arrivals behind no longer space on it
         f.SetPhase("go-around", Time);
         f.WentAround = true;
         var p = f.Pos;
