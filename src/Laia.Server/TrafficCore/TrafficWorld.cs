@@ -1565,7 +1565,10 @@ public sealed partial class TrafficWorld
     /// The planned altitude bent to the procedure's restrictions ahead: never above an "at or below" (or "at") one,
     /// starting down in time to meet it at about 300 ft per nm; never below an "at or above" (or "at") one until its fix.
     /// </summary>
-    private static double Restricted(Flight f, double plan, double atS = double.NaN)
+    private static double Restricted(Flight f, double plan, double atS = double.NaN) => Restricted(f, plan, out _, atS);
+
+    /// <summary>As above; <paramref name="floor"/> is the published floor still ahead that holds it up (NaN when none).</summary>
+    private static double Restricted(Flight f, double plan, out double floor, double atS = double.NaN)
     {
         var s0 = double.IsNaN(atS) ? f.S : atS;
         double hi = double.MaxValue, lo = double.MinValue, hiS = double.MaxValue, loS = double.MaxValue;
@@ -1599,6 +1602,7 @@ public sealed partial class TrafficWorld
         // for the farther fix and cross MIDDL at 7,600 ft; MCO's DORII "at or above 8,000" before BRICE "at 5,000"
         // is the same pattern). Only a ceiling at the same or a nearer fix can take it below a floor.
         if (t < lo) t = hiS > loS + 50 ? lo : Math.Min(lo, hi);
+        floor = lo > 0 && Math.Abs(t - lo) < 1 ? lo : double.NaN;
         return t;
     }
 
@@ -5894,7 +5898,7 @@ public sealed partial class TrafficWorld
             else
             {
                 var plan = f.CruiseFt > 0 ? Math.Min(Profile(rwy, dth), f.CruiseFt) : Profile(rwy, dth);
-                var want = Restricted(f, plan);
+                var want = Restricted(f, plan, out var floorAhead);
                 if (Time - f.DescentProbeAt >= 2)
                 {
                     f.DescentProbeAt = Time;
@@ -5921,6 +5925,11 @@ public sealed partial class TrafficWorld
                 // ("descend OR slow down"); it catches up with the path afterwards.
                 // Not when an "at or below" restriction ahead is what's bringing it down: that has to be met too.
                 if (f.Ias - target > 5 && dth > 6.5 && !f.Gear && want >= plan - 50 && err < 2000) vsTarget = Math.Max(vsTarget, -400);   // well above the path: get down first
+                // Levelling at a published floor ("at 6,000", "at or above 24,000"): ease the descent as it gets close,
+                // as an autopilot captures an altitude — coming down at 2,500–3,000 ft/min it used to sink 400–650 ft
+                // through it (Midway STKNY/HALIE at 5,550, JNSNN at 23,470, O'Hare KRENA at 10,340; 19 Nov).
+                if (!double.IsNaN(floorAhead) && f.AltFt > floorAhead && f.AltFt - floorAhead < 1500)
+                    vsTarget = Math.Max(vsTarget, -Math.Max(150, (f.AltFt - floorAhead) * 4));
                 // Kept above the main airport's traffic (a satellite's arrival crossing the big airport's flows): level
                 // at the floor until clear.
                 if (!double.IsNaN(f.DescentFloor) && f.AltFt > f.DescentFloor - 100) vsTarget = Math.Max(vsTarget, Math.Min(0, (f.DescentFloor - f.AltFt) * 2));
