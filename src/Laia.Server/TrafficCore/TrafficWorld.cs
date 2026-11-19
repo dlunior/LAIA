@@ -73,6 +73,8 @@ public sealed class Flight
     public double IgnoreUntil;
     /// <summary>Everyone else in a standoff ring this one was told to go first in (not only the one it saw first).</summary>
     public HashSet<Flight>? IgnoreAll;
+    /// <summary>The descent's last aim, published floor held and ceilings from other traffic (for a missed restriction's log line).</summary>
+    public double DbgWant = double.NaN, DbgFloor = double.NaN, DbgPlan = double.NaN;
     public bool LandingChecked, WentAround, BlockedByUser;
     public double StuckFor;
     public double RerouteTime = -999;
@@ -2521,7 +2523,9 @@ public sealed partial class TrafficWorld
                 if (c.Kt > 0) w.Add($"max {c.Kt:0} kt");
                 return string.Join(", ", w);
             }
-            var miss = $"{c.Fix} at {f.AltFt:N0} ft {f.Ias:0} kt (published {Want()})";
+            var why = altOk ? "" : $" [aiming for {f.DbgWant:N0}, plan {f.DbgPlan:N0}, floor {(double.IsNaN(f.DbgFloor) ? "none" : f.DbgFloor.ToString("N0"))}, {f.Vs:0} ft/min" +
+                (double.IsNaN(f.DescentFloor) ? "" : $", kept above {f.DescentFloor:N0}") + (double.IsNaN(f.UserCeiling) ? "" : $", below the user {f.UserCeiling:N0}") + "]";
+            var miss = $"{c.Fix} at {f.AltFt:N0} ft {f.Ias:0} kt (published {Want()}){why}";
             f.ChecksMissed.Add(miss);
             _recentMisses.Add($"{f.Callsign} {miss}");
             if (_recentMisses.Count > 5) _recentMisses.RemoveAt(0);
@@ -5926,6 +5930,7 @@ public sealed partial class TrafficWorld
                     f.UserCeiling = ProbeUserLevel(f);
                 }
                 if (!double.IsNaN(f.UserCeiling)) want = Math.Min(want, f.UserCeiling);
+                f.DbgWant = want; f.DbgFloor = floorAhead; f.DbgPlan = plan;
                 // Follow the slope of the wanted altitude itself (the descent path bent by the restrictions), not
                 // always the 3° path: level where a restriction holds it ("at 7,000" at BANYA), 300 ft/nm towards an
                 // "at or below". Following the 3° slope while held at a level let it sink ~600 ft below "at" fixes.
