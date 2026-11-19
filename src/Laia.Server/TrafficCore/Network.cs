@@ -20,6 +20,41 @@ public sealed class NetLeg
     /// before it takes off (a departure clearance time), eased in at no more than 15% slower once airborne.
     /// </summary>
     public double MeterMin, MeterTarget;
+    /// <summary>
+    /// Its route (user, 18 Nov: "would adding the real world routes to our sim traffic help?" — "yes"): points from the
+    /// departure airport to the arrival airport (both included) along its FAA preferred route and, into an airport LAIA
+    /// runs, the STAR it would fly; RouteCum the distance (nm) to each point. Null: the great circle.
+    /// </summary>
+    public double[]? RouteLat, RouteLon, RouteCum;
+    /// <summary>What its route was made from ("preferred", "STAR …").</summary>
+    public string? RouteFrom;
+    /// <summary>The distance it flies: along its route, else the great circle.</summary>
+    public double PathNm => RouteCum is { Length: > 1 } c ? c[^1] : DistNm;
+    public void SetRoute(List<(double lat, double lon)>? pts, string? from)
+    {
+        if (pts is null || pts.Count < 2) { RouteLat = RouteLon = RouteCum = null; RouteFrom = null; return; }
+        var cum = new double[pts.Count];
+        for (var i = 1; i < pts.Count; i++) cum[i] = cum[i - 1] + Geo2.DistanceNm(pts[i - 1].lat, pts[i - 1].lon, pts[i].lat, pts[i].lon);
+        RouteLat = pts.Select(p => p.lat).ToArray(); RouteLon = pts.Select(p => p.lon).ToArray(); RouteCum = cum; RouteFrom = from;
+    }
+    /// <summary>The point s nm along its path, and the bearing it's flying there.</summary>
+    public (double lat, double lon, double hdg) PointAt(double s)
+    {
+        if (RouteCum is not { Length: > 1 } c)
+        {
+            var (la, lo) = NetworkModel.Intermediate(DepLat, DepLon, ArrLat, ArrLon, Math.Clamp(s / Math.Max(1e-6, DistNm), 0, 1));
+            var h = DistNm - s < 0.5 ? Geo2.BearingDeg(DepLat, DepLon, ArrLat, ArrLon) : Geo2.BearingDeg(la, lo, ArrLat, ArrLon);
+            return (la, lo, h);
+        }
+        s = Math.Clamp(s, 0, c[^1]);
+        var i = Array.BinarySearch(c, s);
+        if (i < 0) i = ~i;
+        i = Math.Clamp(i, 1, c.Length - 1);
+        var segLen = c[i] - c[i - 1];
+        var f = segLen < 1e-6 ? 1 : (s - c[i - 1]) / segLen;
+        var (lat, lon) = NetworkModel.Intermediate(RouteLat![i - 1], RouteLon![i - 1], RouteLat[i], RouteLon[i], f);
+        return (lat, lon, Geo2.BearingDeg(RouteLat[i - 1], RouteLon[i - 1], RouteLat[i], RouteLon[i]));
+    }
     public string Callsign => Operator + Flight.TrimStart('0');
     public string Id => $"net-{Reg}-{DepMin}";
     /// <summary>Gate to gate, minutes (a leg can run over the end of the week).</summary>
@@ -80,7 +115,7 @@ public static class NetworkModel
             if (!includeGround) return null;
             var atDep = e < taxiOut;
             return new NetPos(l, atDep ? l.DepLat : l.ArrLat, atDep ? l.DepLon : l.ArrLon, atDep ? l.DepElev : l.ArrElev, 0, 0,
-                atDep ? "taxiing out" : "taxiing in", 0, atDep ? 0 : l.DistNm, atDep ? block - taxiIn - e : 0);
+                atDep ? "taxiing out" : "taxiing in", 0, atDep ? 0 : l.PathNm, atDep ? block - taxiIn - e : 0);
         }
         var cruise = CruiseFt(l);
         var jet = Perf.For(l.Type).Family != "turboprop";
@@ -93,7 +128,7 @@ public static class NetworkModel
         {
             var c0 = Math.Min((cruise - l.DepElev) / (jet ? 2000 : 1300), 0.45 * t);
             var d0 = Math.Min((cruise - l.ArrElev) / (jet ? 2200 : 1400), 0.45 * t);
-            var tMin = 1.08 * (l.DistNm / nominal + 0.3 * (c0 + d0));
+            var tMin = 1.08 * (l.PathNm / nominal + 0.3 * (c0 + d0));
             if (t <= tMin + 0.01) break;
             taxiOut += t - tMin; t = tMin;
         }
@@ -106,7 +141,8 @@ public static class NetworkModel
         var c = Math.Min((cruise - l.DepElev) / (jet ? 2000 : 1300), 0.45 * t);
         var d = Math.Min((cruise - l.ArrElev) / (jet ? 2200 : 1400), 0.45 * t);
         // Speed ramps from 40% to 100% in the climb (and back down in the descent): 70% on average.
-        var v = l.DistNm / (0.7 * c + 0.7 * d + (t - c - d)); // nm per minute in the cruise
+        var path = l.PathNm;
+        var v = path / (0.7 * c + 0.7 * d + (t - c - d)); // nm per minute in the cruise
         double s, alt, gs; string phase;
         if (tau < c)
         {
@@ -127,16 +163,15 @@ public static class NetworkModel
             alt = cruise - (cruise - l.ArrElev) * (y / d);
             gs = v * (1 - 0.6 * y / d); phase = "descending";
         }
-        s = Math.Clamp(s, 0, l.DistNm);
+        s = Math.Clamp(s, 0, path);
         // Coming down, never above an airliner's 3:1 path to the destination (about 300 ft per nm still to go, plus a
         // little to slow down): the timed descent alone slows near the end and left arrivals thousands of feet high
         // when the airport took them over (WJA1272 at 26,490 ft 52 nm out).
         // The cruise ends where that path meets the cruise level, so the top of descent is where an airliner's would be.
-        var cap = l.ArrElev + (l.DistNm - s) * 300 + 1500;
+        var cap = l.ArrElev + (path - s) * 300 + 1500;
         if (tau >= c) { alt = Math.Min(cruise, cap); phase = alt < cruise - 50 ? "descending" : "cruising"; }
         else alt = Math.Min(alt, cap);
-        var (lat, lon) = Intermediate(l.DepLat, l.DepLon, l.ArrLat, l.ArrLon, s / l.DistNm);
-        var hdg = l.DistNm - s < 0.5 ? Geo2.BearingDeg(l.DepLat, l.DepLon, l.ArrLat, l.ArrLon) : Geo2.BearingDeg(lat, lon, l.ArrLat, l.ArrLon);
+        var (lat, lon, hdg) = l.PointAt(s);
         return new NetPos(l, lat, lon, Math.Round(alt / 10) * 10, gs * 60, hdg, phase, cruise, s, t - tau + taxiIn);
     }
 
@@ -158,12 +193,18 @@ public static class NetworkModel
     /// <summary>Points along the great circle from a fraction f0 to f1 (for drawing a route on the map).</summary>
     public static List<double[]> Line(NetLeg l, double f0, double f1, int maxPoints = 64)
     {
-        var n = Math.Clamp((int)(l.DistNm * Math.Abs(f1 - f0) / 25), 2, maxPoints);
+        var path = l.PathNm;
+        var n = Math.Clamp((int)(path * Math.Abs(f1 - f0) / 25), 2, maxPoints);
         var pts = new List<double[]>();
+        double prev = double.NaN;
+        void Add(double s0) { var (la, lo, _) = l.PointAt(s0); pts.Add(new[] { Math.Round(la, 4), Math.Round(lo, 4) }); prev = s0; }
         for (var i = 0; i <= n; i++)
         {
-            var (la, lo) = Intermediate(l.DepLat, l.DepLon, l.ArrLat, l.ArrLon, f0 + (f1 - f0) * i / n);
-            pts.Add(new[] { Math.Round(la, 4), Math.Round(lo, 4) });
+            var sNow = path * (f0 + (f1 - f0) * i / n);
+            // Keep the route's corners.
+            if (l.RouteCum is { } c && !double.IsNaN(prev))
+                foreach (var cs in c) if ((cs > prev && cs < sNow) || (cs < prev && cs > sNow)) Add(cs);
+            Add(sNow);
         }
         return pts;
     }

@@ -385,7 +385,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         return res;
     }
 
-    private double _windsAt = -99, _windsLogAt = -9999, _meterAt = -99, _meterLogAt = -9999;
+    private double _windsAt = -99, _windsLogAt = -9999, _meterAt = -99, _meterLogAt = -9999, _routesAt = -99;
 
     /// <summary>
     /// Arrival metering for the airports LAIA runs (user, 18 Nov: Peak at KORD, the busiest real three hours, "isn't the
@@ -831,7 +831,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         double clock;
         lock (_gate) clock = _world?.ScheduleClock ?? WeekMinuteNow();
         var p = NetworkModel.At(l, clock, includeGround: true);
-        var f = p is null ? 0 : p.FlownNm / l.DistNm;
+        var f = p is null ? 0 : p.FlownNm / l.PathNm;
         return new
         {
             id, dep = l.Dep, arr = l.Arr, distNm = Math.Round(l.DistNm),
@@ -1231,6 +1231,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                     if (live) UpdateFlCorrection(sim!);
                     if (live && now - _enrouteAt > 2) { _enrouteAt = now; _enroute = EnRoute(sim!); Part("en route"); }
                     if (live) UpdateWinds(sim!, now);
+                    if (now - _routesAt >= 60 && routesDb.Routes is { } prr && nasrDb.Nav is { } navr) { _routesAt = now; try { network.ApplyRoutes(prr, navr); } catch (Exception ex) { log.LogInformation("Whole-sky routes failed: {msg}", ex.Message); } }
                     if (now - _meterAt >= 30) { _meterAt = now; try { MeterArrivals(); } catch (Exception ex) { log.LogInformation("Metering failed: {msg}", ex.Message); } Part("metering"); }
                     foreach (var w in Worlds().ToList())
                     {

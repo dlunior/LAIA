@@ -832,7 +832,7 @@ public sealed partial class TrafficWorld
         {
             var r = RouteFor(l, arr, type ?? l.Type, key ?? $"{(arr ? 'A' : 'D')}|{l.Reg}|{l.Flight}|{l.DepMin}");
             if (r is null || r.LengthNm < 1) return p;
-            var frac = Math.Clamp(p.FlownNm / Math.Max(1, l.DistNm), 0, 1);
+            var frac = Math.Clamp(p.FlownNm / Math.Max(1, l.PathNm), 0, 1);
             var at = frac * r.LengthNm;
             var i = Array.FindIndex(r.Cum, c => c >= at);
             if (i <= 0) i = 1;

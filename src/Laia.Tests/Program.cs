@@ -1049,6 +1049,27 @@ foreach (var (aloftFrom, label) in new[] { (90.0, "tailwind"), (270.0, "headwind
     Check(errs.Count > 0 && errs.All(e => Math.Abs(e.s) <= 30), $"{label}: landing times predicted within 30 s (the wind at each height is in the prediction)");
 }
 
+Console.WriteLine("== Whole sky: a flight with a real route flies along it, not the great circle");
+{
+    var leg = new NetLeg { Airline = "DAL", Operator = "DAL", Type = "A321", Reg = "N-RTE", Flight = "88", Dep = "KATL", Arr = "KORD",
+        DepMin = 4000, ArrMin = 4000 + 140, DepLat = 33.64, DepLon = -84.43, ArrLat = 41.98, ArrLon = -87.90, DepElev = 1026, ArrElev = 680, Located = true };
+    leg.DistNm = Geo2.DistanceNm(leg.DepLat, leg.DepLon, leg.ArrLat, leg.ArrLon);
+    // A dog-leg via Nashville-ish and Indianapolis-ish.
+    leg.SetRoute(new() { (33.64, -84.43), (36.14, -86.68), (39.73, -86.27), (41.98, -87.90) }, "test");
+    var mid = NetworkModel.At(leg, 4000 + 70);
+    double off = double.MaxValue;
+    for (var i = 1; i < leg.RouteLat!.Length; i++)
+        for (var f = 0.0; f <= 1; f += 0.01)
+        {
+            var (la, lo) = NetworkModel.Intermediate(leg.RouteLat[i - 1], leg.RouteLon![i - 1], leg.RouteLat[i], leg.RouteLon[i], f);
+            if (mid is not null) off = Math.Min(off, Geo2.DistanceNm(mid.Lat, mid.Lon, la, lo));
+        }
+    var line = NetworkModel.Line(leg, 0, 1);
+    Console.WriteLine($"  great circle {leg.DistNm:0} nm, route {leg.PathNm:0} nm; halfway it's {off:0.0} nm off the route; line {line.Count} points");
+    Check(leg.PathNm > leg.DistNm && mid is not null && off < 2, "it flies along its route");
+    Check(line.Any(p => Math.Abs(p[0] - 36.14) < 0.01 && Math.Abs(p[1] + 86.68) < 0.01), "the map line keeps the route's corners");
+}
+
 Console.WriteLine("== Whole sky: a metered flight runs late by its metering, landing in its slot");
 {
     var leg = new NetLeg { Airline = "UAL", Operator = "UAL", Type = "B39M", Reg = "N-MTR", Flight = "77", Dep = "KIAH", Arr = "KORD",

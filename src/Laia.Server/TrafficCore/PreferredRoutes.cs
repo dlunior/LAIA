@@ -94,6 +94,9 @@ public sealed class PreferredRoutes
         return a.Contains("TURBOPROP") || a.Contains("PROP") ? 0 : a.Contains("JET") ? 2 : 0;
     }
 
+    /// <summary>The route a pair's flights file (not tied to one flow), jets' high-altitude one first; null when the pair isn't in the database.</summary>
+    public string[]? RouteTokens(string orig, string dest, bool jet) => Rows(orig, dest, double.NaN, jet).FirstOrDefault()?.Route;
+
     /// <summary>The rows for a pair, best first for this flow and aircraft (high-altitude routes for jets).</summary>
     private List<Row> Rows(string orig, string dest, double landingHeading, bool jet)
     {

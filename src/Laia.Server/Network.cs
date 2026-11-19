@@ -101,7 +101,7 @@ public sealed class NetworkStore(WorldAirports world, ILogger<NetworkStore> log)
             using var f = File.OpenRead(File_);
             var (legs, read) = NetworkModel.Parse(f);
             legs = legs.Where(l => !Laia.Server.TrafficCore.TrafficWorld.LeaveOut(l.Airline, l.Operator)).ToList();
-            lock (_gate) { _legs = legs; _readUtc = read == DateTime.MinValue ? File.GetLastWriteTimeUtc(File_) : read; _locatedWith = -1; }
+            lock (_gate) { _legs = legs; _readUtc = read == DateTime.MinValue ? File.GetLastWriteTimeUtc(File_) : read; _locatedWith = -1; _legsVersion++; }
             log.LogInformation("Network schedule from cache: {n} flights a week", legs.Count);
         }
         catch (Exception ex) { log.LogWarning("Network cache unreadable: {msg}", ex.Message); }
@@ -117,7 +117,7 @@ public sealed class NetworkStore(WorldAirports world, ILogger<NetworkStore> log)
         var (legs, read) = NetworkModel.Parse(new MemoryStream(bytes));
         legs = legs.Where(l => !Laia.Server.TrafficCore.TrafficWorld.LeaveOut(l.Airline, l.Operator)).ToList();
         if (legs.Count == 0) return 0;
-        lock (_gate) { _legs = legs; _readUtc = read == DateTime.MinValue ? DateTime.UtcNow : read; _locatedWith = -1; }
+        lock (_gate) { _legs = legs; _readUtc = read == DateTime.MinValue ? DateTime.UtcNow : read; _locatedWith = -1; _legsVersion++; }
         try { Directory.CreateDirectory(Paths.DataDir); await File.WriteAllBytesAsync(File_, bytes, ct); } catch { }
         log.LogInformation("Network schedule received: {n} flights a week ({kb:N0} kB)", legs.Count, bytes.Length / 1024);
         return legs.Count;
@@ -142,6 +142,57 @@ public sealed class NetworkStore(WorldAirports world, ILogger<NetworkStore> log)
         _locatedWith = world.Count;
         var missing = _legs.Where(l => !l.Located).SelectMany(l => new[] { l.Dep, l.Arr }).Where(a => world.Find(a) is null).Distinct().Take(8).ToList();
         Status = $"{_legs.Count:N0} flights a week, {_located:N0} placeable" + (missing.Count > 0 ? $" (unknown airports: {string.Join(", ", missing)})" : "") + $"; {world.Status}";
+    }
+
+    private int _routedFor = -1, _legsVersion;
+    public string RouteStatus { get; private set; } = "";
+
+    /// <summary>
+    /// Real routes for the whole sky (user, 18 Nov: "would adding the real world routes to our sim traffic help?" —
+    /// "yes"): each flight between a pair in the FAA's preferred routes flies that route — its fixes and airways
+    /// expanded from the FAA's data — instead of the great circle (SIDs and STARs are left to the airports LAIA runs,
+    /// which put their own flights on them). A route that comes out more than half as long again as the great circle
+    /// (a name placed in the wrong part of the country) is not used. Once per schedule.
+    /// </summary>
+    public void ApplyRoutes(PreferredRoutes pr, TrafficCore.NavDb nav)
+    {
+        lock (_gate)
+        {
+            EnsureLocated();
+            if (_routedFor == _legsVersion) return;
+            _routedFor = _legsVersion;
+            var cache = new Dictionary<(string, string, bool), List<(double lat, double lon)>?>();
+            int routed = 0, pairs = 0;
+            foreach (var l in _legs)
+            {
+                if (!l.Located || l.DistNm < 80) continue;
+                var jet = TrafficCore.Perf.For(l.Type).Family != "turboprop";
+                var key = (l.Dep, l.Arr, jet);
+                if (!cache.TryGetValue(key, out var pts))
+                {
+                    pts = null;
+                    if (pr.RouteTokens(l.Dep, l.Arr, jet) is { Length: > 0 } toks)
+                    {
+                        var exp = nav.Expand(toks, l.DepLat, l.DepLon)
+                            .Where(p => Geo2.DistanceNm(p.lat, p.lon, l.DepLat, l.DepLon) > 15 && Geo2.DistanceNm(p.lat, p.lon, l.ArrLat, l.ArrLon) > 15)
+                            .Select(p => (p.lat, p.lon)).ToList();
+                        if (exp.Count > 0)
+                        {
+                            var all = new List<(double lat, double lon)> { (l.DepLat, l.DepLon) };
+                            all.AddRange(exp);
+                            all.Add((l.ArrLat, l.ArrLon));
+                            double len = 0;
+                            for (var i = 1; i < all.Count; i++) len += Geo2.DistanceNm(all[i - 1].lat, all[i - 1].lon, all[i].lat, all[i].lon);
+                            if (len <= 1.5 * l.DistNm + 50) { pts = all; pairs++; }
+                        }
+                    }
+                    cache[key] = pts;
+                }
+                if (pts is not null) { l.SetRoute(pts, "preferred"); routed++; }
+            }
+            RouteStatus = $"{routed:N0} flights a week fly their FAA preferred route ({pairs:N0} airport pairs)";
+            log.LogInformation("Whole sky: {s}", RouteStatus);
+        }
     }
 
     /// <summary>The week's flights to an airport.</summary>
