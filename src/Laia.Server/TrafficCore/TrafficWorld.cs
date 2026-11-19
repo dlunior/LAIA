@@ -73,6 +73,13 @@ public sealed class Flight
     public double IgnoreUntil;
     /// <summary>Everyone else in a standoff ring this one was told to go first in (not only the one it saw first).</summary>
     public HashSet<Flight>? IgnoreAll;
+    /// <summary>The rest of its filed route (airways, fixes) from the hand-over to its STAR — flown before the STAR.</summary>
+    public List<V2>? Via;
+    /// <summary>Path distance where its last delay vector rejoins (no new one before it's back on its route).</summary>
+    public double VectorRejoinS = double.NegativeInfinity;
+    /// <summary>A lower level to keep 1,000 ft under another of this airport's arrivals en route (NaN when none), until when.</summary>
+    public double SepCeiling = double.NaN, SepUntil;
+    public string? SepFrom;
     /// <summary>The descent's last aim, published floor held and ceilings from other traffic (for a missed restriction's log line).</summary>
     public double DbgWant = double.NaN, DbgFloor = double.NaN, DbgPlan = double.NaN;
     public bool LandingChecked, WentAround, BlockedByUser;
@@ -616,7 +623,7 @@ public sealed partial class TrafficWorld
         }
         foreach (var f in Flights.Where(f => f.Done && f.Spot is not null)) f.Spot = null;
         if (Time - _lastDepPredict >= 5) { _lastDepPredict = Time; try { PredictDepartures(); } catch { } }
-        if (Time - _lastSepWatch >= 2) { _lastSepWatch = Time; try { WatchSeparation(); } catch { } }
+        if (Time - _lastSepWatch >= 2) { _lastSepWatch = Time; try { WatchSeparation(); } catch { } try { SeparateOwnArrivals(); } catch { } }
         // Landing order on each runway, by predicted time, and the arrival manager: each arrival's slot is the later of
         // its own unhindered time and the slot ahead plus the gap needed; the difference is the delay it should lose
         // far out with speed (cruise and descent slower), so it reaches the approach already spaced instead of holding.
@@ -653,8 +660,12 @@ public sealed partial class TrafficWorld
                 var a = ordered[k]; var b = ordered[k + 1];
                 if (a == UserArr || b == UserArr || a.Path is null || b.Path is null || double.IsNaN(a.EtaSec) || double.IsNaN(b.EtaSec)) continue;
                 // Not when the one ahead is on a planned detour (delay vectors, an extended downwind): that's the plan.
-                if (Time - a.LastVector < 600 || Time - a.LastTrombone < 60 && !double.IsNaN(a.BaseTurnNm)) continue;
                 var da = (a.ThrS - a.S) / Geo2.MPerNm; var db = (b.ThrS - b.S) / Geo2.MPerNm;
+                // …unless the one behind is already established on the final: then the detour has put the one ahead
+                // behind it, and the only other way out is to break it off (KORD, 19 Nov: UAL770 vectored off for DAL1390
+                // while AAL2740 was on the final 8 nm behind — AAL2740 was broken off "327 s short").
+                var bOnFinal = db < 15 && b.Rwy is { } brw && Math.Abs(brw.Offset(b.Pos)) < 0.6 * Geo2.MPerNm && brw.Along(b.Pos) < 0;
+                if (!bOnFinal && (Time - a.LastVector < 600 || Time - a.LastTrombone < 60 && !double.IsNaN(a.BaseTurnNm))) continue;
                 // …and it also fits behind the one ahead of them both (AAL1974 swapped ahead of AAL2616 and then had to
                 // be broken off, 111 s short behind UAL770).
                 var before = k > 0 ? ordered[k - 1] : null;
@@ -801,7 +812,9 @@ public sealed partial class TrafficWorld
     }
 
     /// <summary>How far out arrivals are taken over from the whole sky (nm).</summary>
-    public double HandoverNm { get; set; } = 200;
+    /// <summary>How far out arrivals are taken over from the whole sky (user, 19 Nov: "Let's push the bar... 400 —
+    /// I rather hit a hardware limit than an arbitrary distance"; was 200).</summary>
+    public double HandoverNm { get; set; } = 400;
 
     /// <summary>An arrival still far out (beyond 60 nm): simulated, but not near enough to count or be drawn.</summary>
     private static bool Far(Flight f) => f.Kind == "arrival" && !f.OnGround && f.Path is not null && (f.ThrS - f.S) / Geo2.MPerNm > 60;
@@ -830,7 +843,11 @@ public sealed partial class TrafficWorld
     // ------------------------------------------------------------------ filed routes in the whole sky
 
     /// <summary>A whole-sky flight's route near this airport (lat/lon points, origin first) and the plan it was made with.</summary>
-    private sealed record NetRoute(List<(double lat, double lon)> Pts, double[] Cum, double LengthNm, (RunwayEnd? rwy, (Procedure p, Transition? t)? star)? Plan, string Runways, double MadeAt);
+    private sealed record NetRoute(List<(double lat, double lon)> Pts, double[] Cum, double LengthNm, (RunwayEnd? rwy, (Procedure p, Transition? t)? star)? Plan, string Runways, double MadeAt)
+    {
+        /// <summary>Index of the first STAR point (arrivals): the filed route's en-route points are before it.</summary>
+        public int StarIdx { get; init; } = -1;
+    }
     private readonly Dictionary<string, NetRoute> _netRoutes = new();
 
     /// <summary>
@@ -868,6 +885,28 @@ public sealed partial class TrafficWorld
             return p with { Lat = lat, Lon = lon, Heading = hdg, AltFt = Math.Round(alt / 10) * 10, Phase = phase };
         }
         catch { return p; }
+    }
+
+    /// <summary>
+    /// The filed route's en-route points still ahead of a whole-sky arrival being taken over (airways and fixes up to
+    /// its STAR), so it keeps flying them after the hand-over — at 400 nm the hand-over can't just go direct to the STAR
+    /// (user, 19 Nov: "Let's push the bar... 400").
+    /// </summary>
+    private List<V2>? FiledAhead(ScheduleLeg sl, NetPos np)
+    {
+        try
+        {
+            var l = np.Leg;
+            var r = RouteFor(l, true, sl.Type, Key(sl, 'A'));
+            if (r is null || r.StarIdx <= 1 || r.LengthNm < 1) return null;
+            var frac = Math.Clamp(np.FlownNm / Math.Max(1, l.PathNm), 0, 1);
+            var at = frac * r.LengthNm;
+            var res = new List<V2>();
+            for (var k = 1; k < r.StarIdx && k < r.Pts.Count; k++)
+                if (r.Cum[k] > at + 3) res.Add(Apt.Map.ToXY(r.Pts[k].lat, r.Pts[k].lon));
+            return res.Count > 0 ? res : null;
+        }
+        catch { return null; }
     }
 
     private NetRoute? RouteFor(NetLeg l, bool arr, string type, string key)
@@ -927,7 +966,7 @@ public sealed partial class TrafficWorld
         }
         var cum = new double[pts.Count];
         for (var k = 1; k < pts.Count; k++) cum[k] = cum[k - 1] + Geo2.DistanceNm(pts[k - 1].lat, pts[k - 1].lon, pts[k].lat, pts[k].lon);
-        var r = new NetRoute(pts, cum, cum[^1], plan, rw, Time);
+        var r = new NetRoute(pts, cum, cum[^1], plan, rw, Time) { StarIdx = arr ? 1 + enroute.Count : -1 };
         _netRoutes[key] = r;
         return r;
     }
@@ -996,7 +1035,7 @@ public sealed partial class TrafficWorld
         // Never taken over just off the ground far away (it would be flown on from there at that height).
         if (np.AltFt < 3000 && Geo2.DistanceNm(Apt.Data.Lat, Apt.Data.Lon, np.Lat, np.Lon) > 25) return null;
         var plan = RoutePlan(Key(l, 'A')) ?? PlanArrival(l.Dep, l.Type);
-        var f = SpawnArrival(0, false, l, plan, entry: (Apt.Map.ToXY(np.Lat, np.Lon), np.AltFt, np.CruiseFt));
+        var f = SpawnArrival(0, false, l, plan, entry: (Apt.Map.ToXY(np.Lat, np.Lon), np.AltFt, np.CruiseFt), via: FiledAhead(l, np));
         // The whole sky flies every leg on its own, so two arrivals can be almost on top of each other when they're
         // taken over (most at the start, when everything within 200 nm appears at once). Far out the arrival manager
         // spaces them with speed; close in it can't, so a clashing one starts on its arrival route one slot further
@@ -1037,7 +1076,7 @@ public sealed partial class TrafficWorld
                     {
                         // Still before its STAR: taken over further back on its way in, at the same level.
                         var at = Apt.Map.ToXY(np.Lat, np.Lon);
-                        g = SpawnArrival(0, false, l, plan, entry: (at + at.Unit * ((d - mine + 0.3 + tries * 0.5) * Geo2.MPerNm), np.AltFt, np.CruiseFt));
+                        g = SpawnArrival(0, false, l, plan, entry: (at + at.Unit * ((d - mine + 0.3 + tries * 0.5) * Geo2.MPerNm), np.AltFt, np.CruiseFt), via: FiledAhead(l, np));
                     }
                     else g = SpawnArrival(d, false, l, plan);
                     if (g is null) return null;
@@ -1365,7 +1404,7 @@ public sealed partial class TrafficWorld
         // placed behind the ones already there, never in front of them.
         var npAt = new Dictionary<ScheduleLeg, NetPos?>();
         double UntilArr(ScheduleLeg l) => Until(l.ArrMin) + (MeterOf?.Invoke(l) ?? 0);   // later by its metering
-        var arrOrder = arrs.Where(l => UntilArr(l) is var u0 && u0 <= 75 && u0 >= 1)
+        var arrOrder = arrs.Where(l => UntilArr(l) is var u0 && u0 <= 100 && u0 >= 1)
             .Select(l => { var np0 = NetworkPosition(l); npAt[l] = np0; return (l, d: np0 is null ? double.MaxValue : Geo2.DistanceNm(Apt.Data.Lat, Apt.Data.Lon, np0.Lat, np0.Lon)); })
             .OrderBy(x => x.d).Select(x => x.l).ToList();
         NetPos? NetPosOf(ScheduleLeg l) => npAt.TryGetValue(l, out var v) ? v : NetworkPosition(l);
@@ -3005,7 +3044,7 @@ public sealed partial class TrafficWorld
 
     /// <summary>Spawns an arrival <paramref name="distNm"/> track miles from touchdown.</summary>
     public Flight? SpawnArrival(double distNm, bool test, ScheduleLeg? leg = null, (RunwayEnd? rwy, (Procedure p, Transition? t)? star)? planned = null,
-        (V2 pos, double altFt, double cruiseFt)? entry = null)
+        (V2 pos, double altFt, double cruiseFt)? entry = null, List<V2>? via = null)
     {
         if (ArrRwy is null) SelectRunways(true);
         var plan = planned ?? (leg is not null ? PlanArrival(leg.Dep, leg.Type) : (ArrRwy, null));
@@ -3036,6 +3075,7 @@ public sealed partial class TrafficWorld
         var f = new Flight { Id = NewId(), Callsign = cs, Airline = id.Airline, Type = id.Type, Other = other, Kind = "arrival", P = perf, Rwy = rwy, Test = test,
             Reg = leg?.Reg ?? "", Title = leg?.Title ?? "", Brand = leg?.Airline };
         f.StarPick = plan.Item2;
+        f.Via = via;
         f.OnGround = false;
         f.Gear = false;
         if (entry is { } en)
@@ -3131,6 +3171,7 @@ public sealed partial class TrafficWorld
     /// <summary>The arrival route: STAR, then the approach (or vectors to final), then the runway.</summary>
     private void BuildArrivalPath(Flight f, V2? from, V2? entry = null)
     {
+        f.VectorRejoinS = double.NegativeInfinity;
         var altFixes = new List<AirPoint>();
         var named = new List<AirPoint>();
         var rwy = f.Rwy!;
@@ -3192,7 +3233,18 @@ public sealed partial class TrafficWorld
             if (near0 >= 0) starPts.RemoveRange(near0, starPts.Count - near0);
             var fullStar = starPts.ToList();
             var trimmed = 0;
-            if (entry is { } en0)
+            // Still on its filed route (airways) to the STAR: those points first, dropping the ones it has passed; the
+            // STAR is joined from the last of them.
+            var via = new List<V2>();
+            if (entry is { } env && f.Via is { Count: > 0 } fv)
+            {
+                var k0 = 0;
+                while (k0 < fv.Count && ((fv[k0] - env).Length < 3 * Geo2.MPerNm
+                    || (k0 + 1 < fv.Count && (fv[k0 + 1] - env).Length < (fv[k0 + 1] - fv[k0]).Length))) k0++;
+                via = fv.Skip(k0).ToList();
+                f.Via = via.Count > 0 ? via : null;
+            }
+            if ((via.Count > 0 ? via[^1] : entry) is { } en0)
             {
                 bool Ahead(int k)
                 {
@@ -3279,6 +3331,7 @@ public sealed partial class TrafficWorld
             {
                 route.Add(en1);
                 speeds.Add(0);
+                foreach (var v in via) { route.Add(v); speeds.Add(0); }
             }
             else if (starPts.Count == 0)
             {
@@ -4438,7 +4491,9 @@ public sealed partial class TrafficWorld
                 var bySpeed0 = EtaToThreshold(f, dth) - base0;
                 if (f.Delay - bySpeed0 > 20) FanPick(f, f.Delay - bySpeed0, $"{f.Delay:0} s delay for the sequence (number {f.Seq} for {f.Rwy.Ident}), {bySpeed0:0} s of it by speed");
             }
-            if (dv >= 40 && dth > 40 && Time - f.LastVector > 180)
+            // One delay vector at a time: not another before it's back on its route from the last (UAL2211, 19 Nov: six
+            // in 18 minutes, each 3 minutes after the one before and before it had rejoined).
+            if (dv >= 40 && dth > 40 && Time - f.LastVector > 180 && f.S >= f.VectorRejoinS)
             {
                 var bySpeed = EtaToThreshold(f, dth) - base0;
                 var tromb = Trombone(f, 0, "");
@@ -4507,6 +4562,7 @@ public sealed partial class TrafficWorld
         f.Path = AirPath(pts, i => i >= thrIndex ? 1 : i <= rjIdx ? f.Ias : 180, f.AltFt);
         f.ThrS = f.Path.PointS[thrIndex];
         var at = f.Path.PointS[rjIdx];
+        f.VectorRejoinS = at;
         f.SpeedLimits = oldLimits.Select(l => (at + l.off, l.Kt)).ToList();
         ShiftRestrictions(f, oldS, at);
         f.S = 0;
@@ -5292,6 +5348,47 @@ public sealed partial class TrafficWorld
         return true;
     }
 
+    /// <summary>
+    /// This airport's own arrivals kept apart en route, whatever runway they're for (user, 19 Nov: DAL2879 and UAL2211
+    /// both at FL360 a few miles apart on VEECK5, one for 28C and one for 27C — the landing sequence only spaces arrivals
+    /// to the same runway). Beyond 30 nm and above 10,000 ft, every 2 s each pair is projected 5 minutes ahead along
+    /// their routes; where they'd come within 5 nm and 1,000 ft, the one later in its landing order is given the level
+    /// 1,000 ft under the other (whole thousands) — an early descent, as en-route ATC would give — until clear.
+    /// </summary>
+    private void SeparateOwnArrivals()
+    {
+        var nm = Geo2.MPerNm;
+        var arr = Flights.Where(f => f.Kind == "arrival" && !f.Done && !f.OnGround && f.Path is not null && f.Rwy is not null
+            && f != UserArr && (f.ThrS - f.S) > 30 * nm && f.AltFt > 10000 && f.Phase != "go-around").ToList();
+        foreach (var f in arr) if (!double.IsNaN(f.SepCeiling) && Time > f.SepUntil) { f.SepCeiling = double.NaN; f.SepFrom = null; }
+        for (var i = 0; i < arr.Count; i++)
+            for (var j = i + 1; j < arr.Count; j++)
+            {
+                var a = arr[i]; var b = arr[j];
+                if ((a.Pos - b.Pos).Length > 60 * nm || Math.Abs(a.AltFt - b.AltFt) >= 1000 && Math.Sign(a.Vs) == Math.Sign(b.Vs)) continue;
+                var meet = false;
+                for (var t = 0.0; t <= 300 && !meet; t += 20)
+                {
+                    var pa = a.Path!.At(Math.Min(a.Path.Length, a.S + a.Gs * Kt * t)).p;
+                    var pb = b.Path!.At(Math.Min(b.Path.Length, b.S + b.Gs * Kt * t)).p;
+                    var za = a.AltFt + Math.Clamp(a.Vs, -3000, 3000) * Math.Min(t, 120) / 60;
+                    var zb = b.AltFt + Math.Clamp(b.Vs, -3000, 3000) * Math.Min(t, 120) / 60;
+                    meet = (pa - pb).Length < 5 * nm && Math.Abs(za - zb) < 1000;
+                }
+                if (!meet) continue;
+                // The later one in the landing order (by its unhindered landing time) goes under.
+                var (lead, under) = (double.IsNaN(a.EtaNominal) ? double.MaxValue : a.EtaNominal) <= (double.IsNaN(b.EtaNominal) ? double.MaxValue : b.EtaNominal) ? (a, b) : (b, a);
+                var level = Math.Floor((lead.AltFt - 1000) / 1000) * 1000;
+                if (level < 11000) continue;
+                if (double.IsNaN(under.SepCeiling) || level < under.SepCeiling)
+                {
+                    if (under.SepFrom != lead.Callsign) Log($"{under.Callsign}: descending early to {level:N0} ft below {lead.Callsign} (en route, both for {Apt.Icao}, {(a.Pos - b.Pos).Length / nm:0} nm apart)");
+                    under.SepCeiling = level; under.SepFrom = lead.Callsign;
+                }
+                under.SepUntil = Time + 30;
+            }
+    }
+
     private static bool tooCloseNow(double gapNm, double needNm) => gapNm < needNm - 0.5;
 
     /// <summary>
@@ -5903,7 +6000,10 @@ public sealed partial class TrafficWorld
                     && OtherRunway(f, Math.Max(short_, 0), $"{gapText}, {short_:0} s short at the runway")) return;
                 if (!trombone && (short_ > (dth > 20 ? 45 : 20) || tooClose) && dth > 13 && short_ <= 300 && Time - f.LastVector > 240
                     && Vector(f, Math.Max(short_, 45) + 15, $"{gapText}, {short_:0} s short at the runway")) return;
-                if (!trombone && (tooClose || (short_ > 20 && OnFinal(f, dth))) && dth > 5 && dth <= 12 && Time - f.LastOrbit > 240) { BreakOff(f, $"{gapText}, {short_:0} s short at the runway"); return; }
+                // Short only because the one ahead was just turned off on a detour while this one is on the final, well
+                // behind it: it'll be put ahead in the next sequence pass, so no break-off for that (AAL2740, 19 Nov).
+                var leaderDetour = leader is { } ld && Time - ld.LastVector < 120 && !tooClose && OnFinal(f, dth);
+                if (!trombone && !leaderDetour && (tooClose || (short_ > 20 && OnFinal(f, dth))) && dth > 5 && dth <= 12 && Time - f.LastOrbit > 240) { BreakOff(f, $"{gapText}, {short_:0} s short at the runway"); return; }
             }
             if (f.Phase == "flare") target = f.P.Vapp - 5;
             // Energy: it slows only as fast as its configuration and descent allow (descend OR slow, not both).
@@ -5930,6 +6030,7 @@ public sealed partial class TrafficWorld
                     f.UserCeiling = ProbeUserLevel(f);
                 }
                 if (!double.IsNaN(f.UserCeiling)) want = Math.Min(want, f.UserCeiling);
+                if (!double.IsNaN(f.SepCeiling)) want = Math.Min(want, f.SepCeiling);
                 f.DbgWant = want; f.DbgFloor = floorAhead; f.DbgPlan = plan;
                 // Follow the slope of the wanted altitude itself (the descent path bent by the restrictions), not
                 // always the 3° path: level where a restriction holds it ("at 7,000" at BANYA), 300 ft/nm towards an
@@ -5941,6 +6042,15 @@ public sealed partial class TrafficWorld
                     var want2 = Restricted(f, plan2, f.S - 0.5 * Geo2.MPerNm);
                     // Always: the plan's own level pieces (slowing 250→210, 210→180, 180→170) are level too.
                     glideVs = Math.Min(0, (want - want2) / 0.5 * Math.Max(60, f.Gs) / 60);
+                    // Already below what it wants: follow the slope ahead, not the one behind (19 Nov, the cause of the
+                    // Midway misses: "aiming for 6,004" at 5,584 ft and still descending 812 ft/min — the steep slope
+                    // over the last half mile carried it down through a level-off at STKNY, HALIE, JILLZ, GERMN).
+                    if (f.AltFt < want - 30)
+                    {
+                        var plan3 = f.CruiseFt > 0 ? Math.Min(Profile(rwy, Math.Max(0, dth - 0.5)), f.CruiseFt) : Profile(rwy, Math.Max(0, dth - 0.5));
+                        var want3 = Restricted(f, plan3, f.S + 0.5 * Geo2.MPerNm);
+                        glideVs = Math.Max(glideVs, Math.Min(0, (want3 - want) / 0.5 * Math.Max(60, f.Gs) / 60));
+                    }
                 }
                 var err = f.AltFt - want;
                 // Below the descent path (after a go-around, or vectored in low): level off until the path comes down
