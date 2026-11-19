@@ -385,7 +385,58 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         return res;
     }
 
-    private double _windsAt = -99, _windsLogAt = -9999;
+    private double _windsAt = -99, _windsLogAt = -9999, _meterAt = -99, _meterLogAt = -9999;
+
+    /// <summary>
+    /// Arrival metering for the airports LAIA runs (user, 18 Nov: Peak at KORD, the busiest real three hours, "isn't the
+    /// amount of traffic but how they are spaced when injected"): the real schedule bunches arrivals (many at the same
+    /// minute), and they were handed to the airport's arrival manager 200 nm out already bunched, with more delay than
+    /// speed and the downwind could take. As the FAA's time-based flow does, each flight landing in the next 3 hours gets
+    /// a slot in order of its scheduled time, one per landing runway about every 95 s (after the arrivals the airport
+    /// already has), and runs late by the difference — a departure delay at its origin if it hasn't left yet, a slower
+    /// cruise (no more than 15% slower) if it's flying. So it reaches the 200 nm hand-over at about its slot.
+    /// </summary>
+    private void MeterArrivals()
+    {
+        var clock = NetClock;
+        foreach (var w in Worlds().ToList())
+        {
+            if (w.RunwayOnly || w.ArrRwys.Count == 0 || w.Level == TrafficLevel.Off) continue;
+            var spacing = 95.0 / 60 / w.ArrRwys.Count;
+            var mine = w.Flights.Where(f => f.Kind == "arrival" && !f.OnGround && !f.Done).Select(f => f.Reg).Where(r => r.Length > 0).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var t = clock + w.Flights.Count(f => f.Kind == "arrival" && !f.OnGround && !f.Done) * spacing;
+            var legs = new List<(NetLeg l, double eta)>();
+            foreach (var l in network.ArrivingAt(w.Apt.Icao))
+            {
+                if (mine.Contains(l.Reg) || TrafficWorld.IsCargo(l.Airline) || TrafficWorld.IsCargo(l.Operator) || Perf.For(l.Type).Family == "turboprop") continue;
+                if (!TrafficWorld.KeepAtLevel(w.Level, l.Reg.Length > 0 ? l.Reg : l.Callsign)) continue;
+                var rel = ((NetworkModel.LandingMin(l) - clock) % 10080 + 10080) % 10080;
+                // Landed (late as metered) a while ago: its metering is done.
+                if (l.MeterMin != 0 && ((NetworkModel.LandingMin(l) + l.MeterMin - clock) % 10080 + 10080) % 10080 > 9000) { l.MeterMin = 0; l.MeterTarget = 0; }
+                if (rel + l.MeterMin < 30 || rel > 180) continue;   // inside 30 minutes it's (about to be) the airport's own
+                legs.Add((l, clock + rel));
+            }
+            double total = 0; var n = 0; var maxD = 0.0;
+            foreach (var (l, eta) in legs.OrderBy(x => x.eta))
+            {
+                var slot = Math.Max(eta, t + spacing);
+                var target = Math.Min(25, slot - eta);
+                var airborne = NetworkModel.At(l, clock) is not null;
+                var departed = ((clock - l.MeterMin - l.DepMin) % 10080 + 10080) % 10080 < l.BlockMin;
+                if (!departed) l.MeterMin = target;
+                else if (airborne) l.MeterMin += Math.Clamp(target - l.MeterMin, -0.10, 0.075);   // per 30 s: at most 15% slower
+                l.MeterTarget = target;
+                t = Math.Max(t, eta + l.MeterMin);
+                total += l.MeterMin; n++; maxD = Math.Max(maxD, l.MeterMin);
+            }
+            if (_meterAt - _meterLogAt > 900 && w == _world && n > 0)
+            {
+                _meterLogAt = _meterAt;
+                log.LogInformation("Arrival metering for {icao}: {n} flights landing in the next 3 hours, {runways} landing runways — average {avg:0.0} min late, most {max:0} min (departure delays at their origins, slower cruise once flying)",
+                    w.Apt.Icao, n, w.ArrRwys.Count, total / n, maxD);
+            }
+        }
+    }
 
     /// <summary>
     /// The wind MSFS gives the user goes into the winds-aloft field as they fly, and every 15 s each airport's traffic
@@ -1180,6 +1231,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                     if (live) UpdateFlCorrection(sim!);
                     if (live && now - _enrouteAt > 2) { _enrouteAt = now; _enroute = EnRoute(sim!); Part("en route"); }
                     if (live) UpdateWinds(sim!, now);
+                    if (now - _meterAt >= 30) { _meterAt = now; try { MeterArrivals(); } catch (Exception ex) { log.LogInformation("Metering failed: {msg}", ex.Message); } Part("metering"); }
                     foreach (var w in Worlds().ToList())
                     {
                         partSw.Restart();

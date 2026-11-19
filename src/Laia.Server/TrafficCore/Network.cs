@@ -14,6 +14,12 @@ public sealed class NetLeg
     public int DepMin, ArrMin;
     public double DepLat, DepLon, DepElev, ArrLat, ArrLon, ArrElev, DistNm;
     public bool Located;
+    /// <summary>
+    /// Metering (user, 18 Nov: "maybe the issue isn't the amount of traffic but how they are spaced when injected into
+    /// the planning"): minutes this flight runs late so it reaches a busy airport in an arrival slot — set straight away
+    /// before it takes off (a departure clearance time), eased in at no more than 15% slower once airborne.
+    /// </summary>
+    public double MeterMin, MeterTarget;
     public string Callsign => Operator + Flight.TrimStart('0');
     public string Id => $"net-{Reg}-{DepMin}";
     /// <summary>Gate to gate, minutes (a leg can run over the end of the week).</summary>
@@ -54,9 +60,13 @@ public static class NetworkModel
     };
 
     /// <summary>The flight's position at this minute of the week, or null if it isn't flying (or taxiing) now.</summary>
+    /// <summary>When the flight lands (week minute), without metering.</summary>
+    public static double LandingMin(NetLeg l) => l.DepMin + l.BlockMin - Math.Min(6, l.BlockMin * 0.1);
+
     public static NetPos? At(NetLeg l, double weekMin, bool includeGround = false)
     {
         if (!l.Located || l.DistNm < 15) return null;
+        weekMin -= l.MeterMin;
         var block = l.BlockMin;
         if (block < 10) return null;
         var e = ((weekMin - l.DepMin) % 10080 + 10080) % 10080;

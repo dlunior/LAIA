@@ -144,6 +144,20 @@ public sealed class NetworkStore(WorldAirports world, ILogger<NetworkStore> log)
         Status = $"{_legs.Count:N0} flights a week, {_located:N0} placeable" + (missing.Count > 0 ? $" (unknown airports: {string.Join(", ", missing)})" : "") + $"; {world.Status}";
     }
 
+    /// <summary>The week's flights to an airport.</summary>
+    public List<NetLeg> ArrivingAt(string icao)
+    {
+        lock (_gate)
+        {
+            EnsureLocated();
+            if (_arrCache.TryGetValue(icao, out var c) && ReferenceEquals(c.legs, _legs)) return c.list;
+            var list = _legs.Where(l => l.Located && l.Arr.Equals(icao, StringComparison.OrdinalIgnoreCase)).ToList();
+            _arrCache[icao] = (_legs, list);
+            return list;
+        }
+    }
+    private readonly Dictionary<string, (List<NetLeg> legs, List<NetLeg> list)> _arrCache = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>Flights in the air now within a radius, nearest first, leaving out the airports run in detail.</summary>
     public List<NetPos> Around(double weekMin, double lat, double lon, double radiusNm, ICollection<string> excludeRegs, int max = 1500)
     {

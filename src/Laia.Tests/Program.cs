@@ -1049,6 +1049,20 @@ foreach (var (aloftFrom, label) in new[] { (90.0, "tailwind"), (270.0, "headwind
     Check(errs.Count > 0 && errs.All(e => Math.Abs(e.s) <= 30), $"{label}: landing times predicted within 30 s (the wind at each height is in the prediction)");
 }
 
+Console.WriteLine("== Whole sky: a metered flight runs late by its metering, landing in its slot");
+{
+    var leg = new NetLeg { Airline = "UAL", Operator = "UAL", Type = "B39M", Reg = "N-MTR", Flight = "77", Dep = "KIAH", Arr = "KORD",
+        DepMin = 3000, ArrMin = 3000 + 180, DepLat = 29.98, DepLon = -95.34, ArrLat = 41.98, ArrLon = -87.90, DepElev = 97, ArrElev = 680, Located = true };
+    leg.DistNm = Geo2.DistanceNm(leg.DepLat, leg.DepLon, leg.ArrLat, leg.ArrLon);
+    var a = NetworkModel.At(leg, 3100);
+    leg.MeterMin = 12;
+    var b = NetworkModel.At(leg, 3112);
+    var landedLate = NetworkModel.At(leg, 3000 + 180 - 6 + 5) is not null;
+    Console.WriteLine($"  unmetered at 3100: {a?.Lat:0.000},{a?.Lon:0.000}; metered 12 min at 3112: {b?.Lat:0.000},{b?.Lon:0.000}; still flying 5 min after its scheduled landing: {landedLate}");
+    Check(a is not null && b is not null && Math.Abs(a.Lat - b.Lat) < 1e-6 && Math.Abs(a.Lon - b.Lon) < 1e-6, "12 minutes of metering puts it where it was 12 minutes earlier");
+    Check(landedLate, "it lands later by its metering");
+}
+
 Console.WriteLine("== Whole sky: a padded schedule doesn't make a jet crawl (UAL2458, 17 Nov)");
 {
     // About 380 nm (Houston–Dallas-ish is shorter; this is IAH–MEM-like) with a padded 150-minute block.
