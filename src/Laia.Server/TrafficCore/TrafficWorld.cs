@@ -3275,6 +3275,28 @@ public sealed partial class TrafficWorld
             if (rest.Count < 2 || Math.Abs(rwy.Offset(rest[^1])) >= 0.3 * nm) continue;
             found.Add((pts[lastOn].Length / nm, pts[lastOn], rest));
         }
+        // Only the ordinary ways in (user, 19 Nov: WYNDE3 arrivals put on downwinds "no ADS-B track even comes close to
+        // doing"; the fan ran from 41 to 113 nm): no track that loops (a hold, a 360, a go-around: turning through more
+        // than 300° in all), and none much shorter or longer than the usual one.
+        static double Len(List<V2> p) { double l = 0; for (var k = 1; k < p.Count; k++) l += (p[k] - p[k - 1]).Length; return l; }
+        static double Turned(List<V2> p)
+        {
+            double t = 0; double? prev = null;
+            for (var k = 1; k < p.Count; k++)
+            {
+                var seg = p[k] - p[k - 1];
+                if (seg.Length < 300) continue;
+                var b = seg.Bearing;
+                if (prev is { } pb) t += Math.Abs(Geo2.Diff(b, pb));
+                prev = b;
+            }
+            return t;
+        }
+        found = found.Where(x => Turned(x.rest) <= 300).ToList();
+        if (found.Count < 3) return null;
+        var lens = found.Select(x => Len(x.rest)).OrderBy(x => x).ToList();
+        var med = lens[lens.Count / 2];
+        found = found.Where(x => Len(x.rest) is var lx && lx >= med * 0.6 && lx <= med * 1.35).ToList();
         if (found.Count < 3) return null;
         _fanFound = found.OrderBy(x => x.leaveNm).ToList();
         var typical = _fanFound[_fanFound.Count / 2];
@@ -4012,6 +4034,8 @@ public sealed partial class TrafficWorld
         var gs = Math.Max(160, Math.Min(f.Gs, 260));
         var cur = fan[Math.Clamp(f.FanIdx, 0, fan.Count - 1)].lenNm;
         var wantNm = cur + addSec * gs / 3600;
+        // One step at a time: at most 12 nm longer or shorter per change (the next look can go further).
+        wantNm = Math.Clamp(wantNm, cur - 12, cur + 12);
         var best = Enumerable.Range(0, fan.Count).OrderBy(i => Math.Abs(fan[i].lenNm - wantNm)).First();
         // Its turn-off must still be ahead.
         if (best == f.FanIdx || (f.Pos - fan[best].pts[0]).Length < 3 * Geo2.MPerNm || toGo < FromLeave(fan[best].pts) + 3) return (wantNm - cur) * 3600 / gs;
@@ -4087,11 +4111,21 @@ public sealed partial class TrafficWorld
         if (j < 0) return false;
         var rj = path.Points[j];
         var L = (rj - p).Length;
-        var d = Math.Sqrt(Math.Pow((L + addM) / 2, 2) - Math.Pow(L / 2, 2));
-        if (Math.Atan2(d, L / 2) * 180 / Math.PI > 70) return false;
         var right = V2.Cross(V2.FromBearing(dir), f.Rwy!.Threshold - p) > 0;
         var axis = (rj - p).Unit;
-        var mid = p + (rj - p) * 0.5 + axis.Perp * (right ? 1 : -1) * d;
+        // A real vector: no more than 60° off the way it's flying now (user, 19 Nov: DAL1084 on WYNDE3 given headings
+        // 175, 189, 232 and 010 in turn) — when the time wanted needs more than that, the most a 60° turn gives.
+        V2 mid = default; var ok = false;
+        for (var tries = 0; tries < 6 && addM > 20 * gs; tries++, addM *= 0.7)
+        {
+            var d = Math.Sqrt(Math.Pow((L + addM) / 2, 2) - Math.Pow(L / 2, 2));
+            if (Math.Atan2(d, L / 2) * 180 / Math.PI > 70) continue;
+            var m = p + (rj - p) * 0.5 + axis.Perp * (right ? 1 : -1) * d;
+            if (Math.Abs(Geo2.Diff((m - p).Bearing, dir)) > 60) continue;
+            mid = m; ok = true; break;
+        }
+        if (!ok) return false;
+        addSec = addM / gs;
         var pts = new List<V2> { p, mid, rj };
         var oldS = keptS[j];
         for (var i = j + 1; i < path.Points.Count; i++) pts.Add(path.Points[i]);
@@ -5483,7 +5517,7 @@ public sealed partial class TrafficWorld
                 // arrival manager plans the delay far out with speed, a runway with less delay, delay vectors on the
                 // way in and the trombone. Close in, vectors only with real route left (beyond 20 nm), and a break-off
                 // only when radar spacing would actually be lost or the gap is far too short to make up.
-                if (!trombone && (short_ > (dth > 20 ? 45 : 20) || tooClose) && dth > 13 && short_ <= 300 && Time - f.LastVector > 150
+                if (!trombone && (short_ > (dth > 20 ? 45 : 20) || tooClose) && dth > 13 && short_ <= 300 && Time - f.LastVector > 240
                     && Vector(f, Math.Max(short_, 45) + 15, $"{gapText}, {short_:0} s short at the runway")) return;
                 if (!trombone && (tooClose || (short_ > 20 && OnFinal(f, dth))) && dth > 5 && dth <= 12 && Time - f.LastOrbit > 240) { BreakOff(f, $"{gapText}, {short_:0} s short at the runway"); return; }
             }
