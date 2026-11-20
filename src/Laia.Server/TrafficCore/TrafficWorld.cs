@@ -4507,7 +4507,10 @@ public sealed partial class TrafficWorld
         var arrs = Flights.Where(f => f.Kind == "arrival" && !f.OnGround && !f.Done && f.Rwy is not null && f.Path is not null
             && f.Phase != "go-around" && !double.IsNaN(f.EtaNominal)).ToList();
         if (arrs.Count == 0) return;
-        bool Movable(Flight f) => f != UserArr && !f.Test && f.Phase == "arriving" && (f.ThrS - f.S) / nm >= 40 && f.RwySwitches < 3;
+        // Not one already on a delay vector: the detour was given for its runway's plan, and a new runway throws it away
+        // (offline rush, 20 Nov: DAL608 vectored 209 s for 27, moved to 27R 20 s later, the detour gone — the delay came
+        // back close in as vectors, a break-off and a go-around).
+        bool Movable(Flight f) => f != UserArr && !f.Test && f.Phase == "arriving" && (f.ThrS - f.S) / nm >= 40 && f.RwySwitches < 3 && f.DetourSec <= 0;
         // The plan's timelines, per runway: the fixed ones booked first.
         var book = ArrRwys.ToDictionary(r => r.Runway, _ => new List<(double slot, Flight f)>());
         double Earliest(int r, double eta, Flight f)
@@ -4687,7 +4690,10 @@ public sealed partial class TrafficWorld
             }
             // At most three delay vectors for one arrival (UAL2211, 19 Nov: six in 18 minutes). Waiting for each to
             // rejoin before the next left too much delay for close in (offline rush: 23 min and 2 break-offs, not 18 and 0).
-            if (dv >= 40 && dth > 40 && Time - f.LastVector > 180 && f.DelayVectors < 3)
+            // With the runway planner on, only straight after a planning pass (it runs just before), so the runway is the
+            // one the plan has just confirmed — the planner won't move it once it's on a delay vector.
+            var planOk = !Planner || ArrRwys.Count < 2 || Time == _lastPlan;
+            if (dv >= 40 && dth > 40 && Time - f.LastVector > 180 && f.DelayVectors < 3 && planOk)
             {
                 var bySpeed = EtaToThreshold(f, dth) - base0;
                 var tromb = Trombone(f, 0, "");
