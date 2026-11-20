@@ -3419,7 +3419,8 @@ public sealed partial class TrafficWorld
             {
                 for (var k = starPts.Count - 1; k >= 0; k--)
                 {
-                    var dir = k > 0 ? (starPts[k].P - starPts[k - 1].P).Bearing : starPts.Count > 1 ? (starPts[1].P - starPts[0].P).Bearing : double.NaN;
+                    // At the STAR's end any way on (as before); earlier along it, only traffic going the STAR's way.
+                    var dir = k == starPts.Count - 1 ? double.NaN : k > 0 ? (starPts[k].P - starPts[k - 1].P).Bearing : (starPts[1].P - starPts[0].P).Bearing;
                     if (DirectionTrack(rwy, starPts[k].P, dir) is not { } dtr) continue;
                     starPts.RemoveRange(k + 1, starPts.Count - k - 1);
                     starPts.AddRange(dtr.Select(q => new AirPoint(q, "")));
