@@ -78,6 +78,7 @@ public sealed class Flight
     /// <summary>Path distance where its last delay vector rejoins (no new one before it's back on its route).</summary>
     public double VectorRejoinS = double.NegativeInfinity;
     public int DelayVectors, RwySwitches;
+    public string? HoldWhy; public bool HoldWhyLogged;
     /// <summary>Departures: its number in its runway's departure order (0 when not in it: at the gate, boarding).</summary>
     public int DepSeq;
     /// <summary>Seconds its current delay vectors add (cleared when its route is built again); the planner counts
@@ -2334,15 +2335,19 @@ public sealed partial class TrafficWorld
         var first = Flights.Where(o => o.Kind == "departure" && !o.Done && o.Phase == "holding short" && o.Rwy?.Runway == r
                 && double.IsNaN(o.ReleaseWaitSince))
             .OrderBy(o => o.PhaseTime).FirstOrDefault();
-        if (first is not null && first != f && first.PhaseTime < f.PhaseTime - 0.5) return false;
+        if (first is not null && first != f && first.PhaseTime < f.PhaseTime - 0.5) { f.HoldWhy = $"{first.Callsign} is first in line"; return false; }
         // Line up and wait behind a take-off roll, or behind a landing rolling out (safety logic, fair weather).
         var behind = Flights.Where(o => o != f && !o.Done && (o.Reserve == r || (o.OnRunway == r && !(o.Kind == "departure" && !o.OnGround)))).ToList();
-        if (UserOnRunway(r) || behind.Any(o => !MayLineUpBehind(o, f))) return false;
+        if (UserOnRunway(r)) { f.HoldWhy = "your aircraft on the runway"; return false; }
+        if (behind.FirstOrDefault(o => !MayLineUpBehind(o, f)) is { } bo) { f.HoldWhy = $"{bo.Callsign} on the runway"; return false; }
         // During a runway change, no departures the new way while arrivals still come in the old way (the opposite
         // direction) within 30 nm: the airport turns round once the last of them has landed.
-        if (Flights.Any(a => a.Kind == "arrival" && !a.Done && !a.OnGround && a.Rwy is { } ar && Math.Abs(Geo2.Diff(ar.Heading, f.Rwy.Heading)) > 90
-                && (a.ThrS - a.S) < 30 * Geo2.MPerNm)) return false;
-        if (!Released(f)) return false;
+        // Only the opposite way on this runway or a parallel (within 30° of the reciprocal): a crossing runway's
+        // arrivals are the crossing rule's (20 Nov, KLAS landing 26L, departing 01R — 110° apart — every 01R departure
+        // waited while any 26L arrival was within 30 nm).
+        if (Flights.FirstOrDefault(a => a.Kind == "arrival" && !a.Done && !a.OnGround && a.Rwy is { } ar && Math.Abs(Geo2.Diff(ar.Heading, f.Rwy.Heading)) > 150
+                && (a.ThrS - a.S) < 30 * Geo2.MPerNm) is { } opp) { f.HoldWhy = $"{opp.Callsign} still landing the opposite way ({opp.Rwy!.Ident})"; return false; }
+        if (!Released(f)) { f.HoldWhy = "waiting for its release (traffic on its departure route)"; return false; }
         // Only line up if the takeoff can follow without delaying the next arrival.
         var eta = ArrivalEta(r);
         // Lining up (its own way onto the centreline at about 4 m/s, and a few seconds before the roll), overlapping the
@@ -2350,10 +2355,10 @@ public sealed partial class TrafficWorld
         // 6,000 ft down the runway, before the next arrival crosses the threshold (3-10-3); and 10 s to spare.
         var rollOut = behind.Where(o => o.Kind == "arrival").Select(TimeToClear).DefaultIfEmpty(0).Max();
         var needed = Math.Max(Math.Max(LineUpSec(f), rollOut), WakeRemaining(f)) + TimeToClearForArrival(f) + 10;
-        if (eta < needed) return false;
+        if (eta < needed) { f.HoldWhy = $"an arrival {eta:0} s out (needs {needed:0} s)"; return false; }
         // Don't line up and wait on the runway while arrivals to a crossing runway keep the takeoff from happening:
         // only line up when the takeoff can follow the line-up (about 30 s later).
-        if (!CrossingRunwayClearForTakeoff(f, extraSec: 30)) return false;
+        if (!CrossingRunwayClearForTakeoff(f, extraSec: 30)) { f.HoldWhy = "arrivals to a crossing runway"; return false; }
         Log($"{f.Callsign}: lining up runway {f.Rwy.Ident} (next arrival {(double.IsInfinity(eta) ? "none" : eta.ToString("0") + " s")})");
         return true;
     }
@@ -5202,6 +5207,12 @@ public sealed partial class TrafficWorld
                     }
                 }
                 if (LineUpAllowed(f)) StartLineUp(f);
+                // A departure waiting at its runway says why (20 Nov, KLAS: SWA2617 held short of 01R with nothing logged).
+                else if (Time - f.PhaseTime > 90 && !f.HoldWhyLogged && f.HoldWhy is { } hw)
+                {
+                    f.HoldWhyLogged = true;
+                    Log($"{f.Callsign}: holding short of {f.Rwy?.Ident} for departure for {Time - f.PhaseTime:0} s: {hw}");
+                }
                 break;
             case "lining up":
                 f.Lights = Nav | Beacon | Logo | Taxi | Strobes | Landing;
@@ -5377,6 +5388,18 @@ public sealed partial class TrafficWorld
             Log($"{f.Callsign}: stuck for 5 minutes at ({f.Pos.X:0}, {f.Pos.Y:0}), blocked by {f.BlockedBy?.Callsign ?? (f.BlockedByUser ? "your aircraft" : "nothing")}; removed");
             f.Done = true;
         }
+    }
+
+    /// <summary>Removed by the user from the map (user, 20 Nov: "we need a way for a user to remove stuck aircraft like
+    /// SWA2617"), with what it was doing logged so the cause can be found.</summary>
+    public string? RemoveByUser(Flight f)
+    {
+        if (f == UserArr || f.Done) return null;
+        var why = f.HoldWhy is { } hw && f.Phase == "holding short" ? $", waiting: {hw}" : "";
+        var blk = f.BlockedBy is { } b ? $", blocked by {b.Callsign}" : f.BlockedByUser ? ", blocked by your aircraft" : "";
+        Log($"{f.Callsign}: removed by the user — {f.Kind} {f.Phase} for {Time - f.PhaseTime:0} s at ({f.Pos.X:0}, {f.Pos.Y:0}){(f.Rwy is { } rr ? ", runway " + rr.Ident : "")}{blk}{why}{(f.StuckFor > 0 ? $", not moving for {f.StuckFor:0} s" : "")}");
+        f.Done = true;
+        return f.Callsign;
     }
 
     /// <summary>An arriving aircraft that can't get to its gate takes another free gate it can reach.</summary>

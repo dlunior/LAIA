@@ -205,7 +205,7 @@ function detailsHtml(f) {
   if (f.eta != null) rows.splice(6, 0, ["Lands in", `${fmtEta(f.eta)} (${new Date(Date.now() + f.eta * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })})${f.seq ? ` · number ${f.seq} for ${f.runway}` : ""}`]);
   return `<h2>${f.cs} <small>${f.airline}</small></h2>
     <dl>${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>
-    <div style="margin-top:8px;display:flex;gap:6px"><button id="bZoomSel">Zoom to it</button><button id="bClose">Close</button></div>`;
+    <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap"><button id="bZoomSel">Zoom to it</button>${f.user ? "" : `<button id="bRemove" title="Take this aircraft out of the sim (for one that's stuck)">Remove</button>`}<button id="bClose">Close</button></div>`;
 }
 
 function findSel(id) { return (data && data.flights.find(x => x.id === id)) || sky.find(x => x.id === id); }
@@ -357,6 +357,21 @@ function renderSel(f) {
   $("sel").innerHTML = f.dep !== undefined ? skyDetailsHtml(f) : detailsHtml(f);
   $("bClose").onclick = () => { selected = null; $("sel").hidden = true; layers.sel.clearLayers(); render(); };
   $("bZoomSel").onclick = () => map.setView([f.lat, f.lon], f.dep !== undefined ? 8 : f.ground ? 15 : 11);
+  // Remove (user, 20 Nov: for a stuck aircraft): a second click within 4 s confirms.
+  if ($("bRemove")) {
+    let armed = 0;
+    $("bRemove").onclick = async () => {
+      const b = $("bRemove");
+      if (Date.now() - armed > 4000) { armed = Date.now(); b.textContent = `Remove ${f.cs}? Click again`; return; }
+      b.disabled = true; b.textContent = "Removing…";
+      try {
+        const r = await fetch(`/api/traffic/remove/${encodeURIComponent(f.id)}`, { method: "POST" });
+        const d = await r.json();
+        b.textContent = d.message || (d.ok ? "Removed." : "Couldn't remove it.");
+        if (d.ok) setTimeout(() => { selected = null; $("sel").hidden = true; layers.sel.clearLayers(); render(); }, 1200);
+      } catch { b.textContent = "Couldn't reach the server."; b.disabled = false; }
+    };
+  }
 }
 
 async function drawPath(force) {
