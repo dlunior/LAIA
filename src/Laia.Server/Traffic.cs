@@ -735,6 +735,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                         other = f.Other, reg = f.Reg, wake = f.Wake.ToString(), title = f.Title,
                         eta = f.Kind == "arrival" && !f.OnGround && !double.IsNaN(f.EtaSec) ? Math.Round(Math.Max(0, f.EtaSec - (wd.Time - f.EtaAt))) : (double?)null,
                         seq = f.Kind == "arrival" && !f.OnGround ? f.Seq : 0,
+                        depSeq = f.Kind == "departure" && f.OnGround ? f.DepSeq : 0,
                         mgr = f.Kind == "arrival" && !f.OnGround && f.Mgr.Length > 0 ? f.Mgr : null,
                         gapnm = f.Kind == "arrival" && !f.OnGround && !double.IsNaN(f.GapNm) ? Math.Round(f.GapNm, 1) : (double?)null,
                         dth = f.Kind == "arrival" && !f.OnGround ? Math.Round((f.ThrS - f.S) / Geo2.MPerNm, 1) : (double?)null,
@@ -1113,7 +1114,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         var main = _world;
         if (main is null)
         {
-            foreach (var n in _neighbours) { n.Automatic = false; _retiring.Add(n); }
+            foreach (var n in _neighbours) Retire(n);
             _neighbours.Clear();
             return;
         }
@@ -1154,7 +1155,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         }
         foreach (var n in _neighbours.Where(n => !_neighbourWant.Contains(n.Apt.Icao) || n.ClockOwner != main).ToList())
         {
-            n.Automatic = false; _retiring.Add(n); _neighbours.Remove(n);
+            Retire(n); _neighbours.Remove(n);
         }
         var shared = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var icao in _neighbourWant)
@@ -1264,7 +1265,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         {
             log.LogInformation("Traffic airport {icao} let go: not your departure or destination", _world.Apt.Icao);
             _world.Automatic = false;
-            if (_world.Flights.Count > 0) _retiring.Add(_world);
+            if (_world.Flights.Count > 0) Retire(_world);
             _world = null; _prep = null;
         }
         var near = airports.Nearest(sim.Lat, sim.Lon, 40, icao => MayRun(icao, sim));
@@ -1279,7 +1280,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
             {
                 // Wait (up to a minute) for the list of installed models, so the first aircraft use real liveries.
                 if (!source.CatalogKnown && _started.Elapsed < TimeSpan.FromSeconds(60)) return;
-                if (_world is not null && _world.Flights.Count > 0) { _world.Automatic = false; _retiring.Add(_world); }
+                if (_world is not null && _world.Flights.Count > 0) Retire(_world);
                 if (_ahead is { } a && a.Apt == n.model)
                 {
                     // The destination prepared ahead: it carries on as the traffic airport, its traffic already flowing.
@@ -1309,10 +1310,24 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
             // The departure field keeps its traffic (departures still going, arrivals still coming) until the user is
             // well away (80 nm: beyond the 60 nm drawn), so it doesn't go quiet while still in sight.
             // Left the airport's area: let the remaining flights finish, but start nothing new.
-            _world.Automatic = false;
-            _retiring.Add(_world);
+            Retire(_world);
             _world = null;
         }
+    }
+
+    /// <summary>
+    /// An airport the user has left: nothing new starts, the aircraft on its ground and close in finish, and the rest
+    /// go back to the whole sky at once (user, 19 Nov: "TM seems still to work on the departure field's traffic way after
+    /// departure" — with the 400 nm hand-over it kept O'Hare's arrivals for 45 minutes after the user had gone).
+    /// </summary>
+    private void Retire(TrafficWorld w)
+    {
+        w.Automatic = false;
+        var nm = Geo2.MPerNm;
+        var gone = w.Flights.RemoveAll(f => !f.OnGround && f != w.UserArr
+            && (f.Kind == "arrival" && f.Pos.Length > 40 * nm || f.Kind == "departure" && f.Pos.Length > 20 * nm));
+        if (gone > 0) log.LogInformation("{icao}: {n} aircraft far from it handed back to the whole sky (you've left)", w.Apt.Icao, gone);
+        if (!_retiring.Contains(w)) _retiring.Add(w);
     }
 
     protected override async Task ExecuteAsync(CancellationToken ct)

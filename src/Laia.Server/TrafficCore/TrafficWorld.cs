@@ -77,7 +77,9 @@ public sealed class Flight
     public List<V2>? Via;
     /// <summary>Path distance where its last delay vector rejoins (no new one before it's back on its route).</summary>
     public double VectorRejoinS = double.NegativeInfinity;
-    public int DelayVectors;
+    public int DelayVectors, RwySwitches;
+    /// <summary>Departures: its number in its runway's departure order (0 when not in it: at the gate, boarding).</summary>
+    public int DepSeq;
     /// <summary>A lower level to keep 1,000 ft under another of this airport's arrivals en route (NaN when none), until when.</summary>
     public double SepCeiling = double.NaN, SepUntil;
     public string? SepFrom;
@@ -707,7 +709,7 @@ public sealed partial class TrafficWorld
                     // left out — no 10-minute detours and no holds.
                     f.Delay = slot - f.EtaNominal;
                     var was = f.Rwy;
-                    try { f.RwySwitchAt = -999; BalanceRunway(f); } catch { }
+                    try { BalanceRunway(f); } catch { }
                     if (f.Rwy != was) continue;
                     if (f.Delay > 900)
                     {
@@ -2315,6 +2317,13 @@ public sealed partial class TrafficWorld
     private bool LineUpAllowed(Flight f)
     {
         var r = f.Rwy!.Runway;
+        // First come, first served at the runway (user, 19 Nov: "it seemed to have no rhyme or reason who got lined up
+        // next"): not while another departure for this runway has been holding short longer — unless that one is
+        // waiting for its release (a departure route blocked), when the next may go.
+        var first = Flights.Where(o => o.Kind == "departure" && !o.Done && o.Phase == "holding short" && o.Rwy?.Runway == r
+                && double.IsNaN(o.ReleaseWaitSince))
+            .OrderBy(o => o.PhaseTime).FirstOrDefault();
+        if (first is not null && first != f && first.PhaseTime < f.PhaseTime - 0.5) return false;
         // Line up and wait behind a take-off roll, or behind a landing rolling out (safety logic, fair weather).
         var behind = Flights.Where(o => o != f && !o.Done && (o.Reserve == r || (o.OnRunway == r && !(o.Kind == "departure" && !o.OnGround)))).ToList();
         if (UserOnRunway(r) || behind.Any(o => !MayLineUpBehind(o, f))) return false;
@@ -2362,6 +2371,22 @@ public sealed partial class TrafficWorld
     /// reach the intersection before this departure is through it, or if a landed aircraft hasn't passed it yet.
     /// </summary>
     /// <param name="extraSec">Extra time needed before the roll starts (lining up first: about 30 s).</param>
+    /// <summary>
+    /// Where a runway's final, within 2 nm of its threshold, passes over another runway: the distance along the departure
+    /// runway and how far before the landing threshold. Null when it doesn't.
+    /// </summary>
+    private static (double alongDep, double beforeThr)? FinalOver(RunwayEnd dep, RunwayEnd land)
+    {
+        var a0 = dep.Threshold; var a1 = dep.Threshold + dep.Dir * dep.LengthM;
+        var b0 = land.Threshold - land.Dir * (2 * Geo2.MPerNm); var b1 = land.Threshold;
+        var r = a1 - a0; var q = b1 - b0;
+        var den = V2.Cross(r, q);
+        if (Math.Abs(den) < 1e-6) return null;
+        var t = V2.Cross(b0 - a0, q) / den; var u = V2.Cross(b0 - a0, r) / den;
+        if (t < 0 || t > 1 || u < 0 || u > 1) return null;
+        return (t * dep.LengthM, (1 - u) * 2 * Geo2.MPerNm);
+    }
+
     internal bool CrossingRunwayClearForTakeoff(Flight f, double extraSec = 0)
     {
         var d = f.Rwy!;
@@ -2369,7 +2394,23 @@ public sealed partial class TrafficWorld
         {
             if (end.Runway == d.Runway) continue;
             var x = Crossing(d, end);
-            if (x is null) continue;
+            if (x is null)
+            {
+                // The runways don't cross, but the departure runway lies under that runway's final, inside 2 nm (7110.65
+                // 3-9-8: runways whose flight paths intersect) — KORD, 19 Nov: UAL1583 rolled on 22L while UAL1813 passed
+                // over it at about 500 ft on short final to 28C ("next arrival none"). Not until the arrival is past.
+                if (FinalOver(d, end) is { } fo)
+                {
+                    var tPassF = RollTime(f, Math.Max(0, fo.alongDep - d.Along(f.Pos))) + 15 + extraSec;
+                    foreach (var o in Flights)
+                    {
+                        if (o == f || o.Done || o.Kind != "arrival" || o.OnGround || o.Rwy?.Runway != end.Runway || o.Phase == "go-around") continue;
+                        var toPoint = (o.ThrS - o.S - fo.beforeThr) / Math.Max(30, o.Gs * Kt);
+                        if (toPoint > -5 && toPoint < tPassF) return false;
+                    }
+                }
+                continue;
+            }
             var tPass = RollTime(f, x.Value.alongA - d.Along(f.Pos)) + 15 + extraSec;
             foreach (var o in Flights)
             {
@@ -2644,6 +2685,7 @@ public sealed partial class TrafficWorld
                 .OrderBy(x => x).ToList();
             var occ = _rotSeen.TryGetValue(g.First().Rwy!, out var seen) ? seen : 55;
             double prev = double.NegativeInfinity; Flight? prevF = null;
+            var depN = 0;
             // A departure held at the gate keeps its place in the queue (when it was ready as the hold began): its own
             // ready time slides on while it waits, and ordered by that, every held one stayed behind the rest and was
             // only let go by the 15-minute limit (KORD, 15 Nov: 13 held, three pushed together after 15 minutes).
@@ -2655,6 +2697,7 @@ public sealed partial class TrafficWorld
                 // Not into an arrival's window: it must be rolling ~45 s before the arrival and can't go while it's on the runway.
                 foreach (var a in arrs) if (t > a - 45 && t < a + occ) t = a + occ;
                 f.TakeoffAt = t;
+                f.DepSeq = f.Phase is "lined up" or "lining up" or "holding short" or "taxi" ? ++depN : 0;
                 if (double.IsNaN(f.TakeoffPred10) && t - Time is <= 600 and > 480) f.TakeoffPred10 = t;
                 if (double.IsNaN(f.TakeoffPred5) && t - Time is <= 300 and > 240) f.TakeoffPred5 = t;
                 prev = t; prevF = f;
@@ -2940,6 +2983,20 @@ public sealed partial class TrafficWorld
         {
             var ruled = serving.Where(i => rule.Runways.Contains(list[i].Ident)).ToList();
             if (ruled.Count > 0) serving = ruled;
+        }
+        // A landing runway the ATIS lists but real traffic hardly lands on is left to the others (user, 19 Nov, KLAS
+        // "landing 26L, 19L": 19L had 6 real arrivals in 7 days against 500+ on 26L, yet every arrival from the
+        // north-west was sent to its RNAV approach — "the RNAV 19L arrivals were a real problem"): under 5% of the real
+        // arrivals to the listed runways, with 30 or more learned, it isn't given arrivals while another one is in use.
+        if (serving.Count > 1 && Learned is { Samples.Count: > 0 } lp)
+        {
+            var real = serving.ToDictionary(i => i, i => lp.Samples.Count(sm => sm.Kind == "arrival" && sm.Runway == list[i].Ident));
+            var tot = real.Values.Sum();
+            if (tot >= 30)
+            {
+                var used = serving.Where(i => real[i] >= tot * 0.05).ToList();
+                if (used.Count > 0) serving = used;
+            }
         }
         var side = star is { } st ? SideOf(axis, EntryFix(st.p, st.t)) : BearingTo(origin) is { } b ? V2.Cross(axis, V2.FromBearing(b)) : 0;
         // The STAR's side is a firm preference (user: SNFLD/MUNGI to the east runway, PRICY/GRNCH to the west "9 out of
@@ -4283,7 +4340,7 @@ public sealed partial class TrafficWorld
         RunwayEnd? best = null; List<V2>? bestPts = null; var bestAt = mine - 30;
         foreach (var r in ArrRwys)
         {
-            if (r.Runway == cur.Runway || r.LengthM < f.P.MinRunwayM) continue;
+            if (r.Runway == cur.Runway || r.LengthM < f.P.MinRunwayM || RarelyLanded(r)) continue;
             // Nearer that final than its own, and still outside it (not turning back to it).
             if (Math.Abs(r.Offset(p)) >= Math.Abs(cur.Offset(p)) || r.Along(p) > -6 * nm) continue;
             var after = Vectors(p, r, ShapeFor(r));
@@ -4404,6 +4461,15 @@ public sealed partial class TrafficWorld
     /// minutes or more of delay on its runway moves to another landing runway its STAR serves when that one has a slot
     /// at least 90 s sooner — as the arrival manager balances parallel runways — at most once every 10 minutes.
     /// </summary>
+    /// <summary>A landing runway in use that real traffic hardly lands on (under 5% of the real arrivals to the runways in use).</summary>
+    private bool RarelyLanded(RunwayEnd r)
+    {
+        if (Learned is not { Samples.Count: > 0 } lp || ArrRwys.Count < 2) return false;
+        int N(RunwayEnd e) => lp.Samples.Count(sm => sm.Kind == "arrival" && sm.Runway == e.Ident);
+        var tot = ArrRwys.Sum(N);
+        return tot >= 30 && N(r) < tot * 0.05;
+    }
+
     private void BalanceRunway(Flight f)
     {
         if (f.Rwy is not { } cur || f.Path is null || f.Phase != "arriving" || f.Test) return;
@@ -4411,13 +4477,18 @@ public sealed partial class TrafficWorld
         // When first sequenced, any runway with a slot 45 s sooner (the first choice is by STAR and a count of the queue,
         // not by time); after that, two minutes or more of delay and 90 s gained, at most every 10 minutes.
         var first = !f.Frozen;
-        if (dth < 50 || f.Delay < (first ? 60 : 120) || (!first && Time - f.RwySwitchAt < 600) || ArrRwys.Count < 2 || double.IsNaN(f.EtaNominal)) return;
+        // Never back and forth (19 Nov, the first 400 nm hand-over: 40,699 switches in five hours, AAL814 alone 9,408 —
+        // not yet frozen, it was "first sequenced" again every pass and each runway looked better than the one it was on
+        // once it had left it): two minutes between switches, ten after the first, and at most three in all.
+        if (Time - f.RwySwitchAt < (f.RwySwitches == 0 ? 120 : 600) || f.RwySwitches >= 3) return;
+        if (dth < 50 || f.Delay < (first ? 60 : 120) || ArrRwys.Count < 2 || double.IsNaN(f.EtaNominal)) return;
         var star = f.StarPick?.p;
         double best = f.Delay; RunwayEnd? pick = null;
         foreach (var r in ArrRwys)
         {
             if (r.Runway == cur.Runway || r.LengthM < f.P.MinRunwayM) continue;
             if (star is not null && !ServesStar(star, r)) continue;
+            if (RarelyLanded(r)) continue;
             // Its time to that runway instead: the difference in distance at about 220 kt.
             var eta = f.EtaNominal + ((f.Pos - r.Threshold).Length - (f.Pos - cur.Threshold).Length) / (220 * Kt);
             var d = EarliestSlot(r.Runway, eta, f) - f.EtaNominal;
@@ -4427,7 +4498,7 @@ public sealed partial class TrafficWorld
         var was = f.Delay;
         f.Rwy = pick;
         BuildArrivalPath(f, null, f.Pos);
-        f.S = 0; f.Frozen = false; f.SlowDv = 0; f.RwySwitchAt = Time; f.EtaAt = -99;
+        f.S = 0; f.Frozen = false; f.SlowDv = 0; f.RwySwitchAt = Time; f.EtaAt = -99; f.RwySwitches++;
         _rwySwitches++;
         Log($"{f.Callsign}: runway {pick.Ident} instead of {cur.Ident} for less delay ({best:0} s instead of {was:0} s)");
     }
