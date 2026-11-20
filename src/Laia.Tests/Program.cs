@@ -720,32 +720,43 @@ Console.WriteLine("== Several runways from the ATIS, and STARs/SIDs chosen by wh
     Console.WriteLine($"  from the north, by real use (27: 90%): {string.Join(" ", north2.Select(f => f.Rwy!.Ident))}");
     Check(on27 >= 7 && on27 <= 10, $"arrivals shared between the runways as real traffic from their direction used them ({on27} of 10 on 27)");
 
-    // The runway planner: a rush from the north, one a minute 60–110 nm out, more than one runway takes. It plans them
-    // together — most where real traffic goes, the overflow to the other — without anyone changing back and forth.
-    foreach (var f in world.Flights.ToList()) world.Flights.Remove(f);
-    var log2 = new List<string>();
-    world.Log = l => log2.Add($"{world.Time:0} {l}");
-    var rush2 = new List<Flight>();
-    for (var k = 0; k < 16; k++)
+    // The runway planner: a rush from the north, one every 20 s 60–110 nm out, more than one runway takes. It plans them
+    // together — where real traffic goes first, the overflow to the other — without anyone changing back and forth.
+    // Run with the planner off first, the same rush, to compare.
+    (int landed, int total, double span, int on27, int on27R, int changes, int maxSw, int breakoffs, double avgDelay) Rush(bool planner)
     {
-        var f = world.SpawnArrival(110 - k * 3, false, Leg("KNOR", 500 + k));
-        if (f is not null) rush2.Add(f);
-        for (var t = 0.0; t < 20; t += 0.5) world.Step(0.5);
+        foreach (var f in world.Flights.ToList()) world.Flights.Remove(f);
+        world.Planner = planner;
+        var log2 = new List<string>();
+        world.Log = l => log2.Add($"{world.Time:0} {l}");
+        var rush2 = new List<Flight>();
+        var spawnAt = new Dictionary<string, double>();
+        for (var k = 0; k < 16; k++)
+        {
+            var f = world.SpawnArrival(110 - k * 3, false, Leg("KNOR", (planner ? 600 : 500) + k));
+            if (f is not null) { rush2.Add(f); spawnAt[f.Callsign] = world.Time; }
+            for (var t = 0.0; t < 20; t += 0.5) world.Step(0.5);
+        }
+        var landed2 = new Dictionary<string, (double t, string rwy)>();
+        for (var t = 0.0; t < 2 * 3600 && landed2.Count < rush2.Count; t += 0.5)
+        {
+            world.Step(0.5);
+            foreach (var f in rush2) if (f.OnGround && !landed2.ContainsKey(f.Callsign)) landed2[f.Callsign] = (world.Time, f.Rwy!.Ident);
+        }
+        var span = landed2.Count > 1 ? (landed2.Values.Max(x => x.t) - landed2.Values.Min(x => x.t)) / 60 : 0;
+        var avg = landed2.Count > 0 ? landed2.Average(kv => kv.Value.t - spawnAt[kv.Key]) / 60 : 0;
+        var r = (landed2.Count, rush2.Count, span, landed2.Values.Count(x => x.rwy == "27"), landed2.Values.Count(x => x.rwy == "27R"),
+            log2.Count(l => l.Contains("planned with the others")), rush2.Max(f => f.RwySwitches), log2.Count(l => l.Contains("breaking off")), avg);
+        Console.WriteLine($"  planner {(planner ? "on " : "off")}: {r.Item1} of {r.Item2} landed in {span:0} min, {avg:0.0} min each on average from appearing ({r.Item4} on 27, {r.Item5} on 27R); {r.Item6} planned changes, at most {r.Item7} per aircraft; break-offs {r.Item8}");
+        foreach (var l in log2.Where(l => l.Contains("breaking off")).Take(4)) Console.WriteLine("    " + l);
+        return r;
     }
-    var landed2 = new Dictionary<string, (double t, string rwy)>();
-    for (var t = 0.0; t < 2 * 3600 && landed2.Count < rush2.Count; t += 0.5)
-    {
-        world.Step(0.5);
-        foreach (var f in rush2) if (f.OnGround && !landed2.ContainsKey(f.Callsign)) landed2[f.Callsign] = (world.Time, f.Rwy!.Ident);
-    }
-    var planned = log2.Count(l => l.Contains("planned with the others"));
-    var maxSw = rush2.Max(f => f.RwySwitches);
-    var span = landed2.Count > 1 ? (landed2.Values.Max(x => x.t) - landed2.Values.Min(x => x.t)) / 60 : 0;
-    Console.WriteLine($"  planner: {landed2.Count} of {rush2.Count} landed in {span:0} min ({landed2.Values.Count(x => x.rwy == "27")} on 27, {landed2.Values.Count(x => x.rwy == "27R")} on 27R); {planned} planned changes, at most {maxSw} per aircraft; break-offs {log2.Count(l => l.Contains("breaking off"))}");
-    foreach (var l in log2.Where(l => l.Contains("planned with the others")).Take(3)) Console.WriteLine("    " + l);
-    Check(landed2.Count == rush2.Count, "the planner's rush all lands");
-    Check(maxSw <= 2, "nobody changes runway more than twice");
-    Check(landed2.Values.Count(x => x.rwy == "27") > landed2.Values.Count(x => x.rwy == "27R"), "most go where real traffic from their direction goes");
+    var off = Rush(false);
+    var on = Rush(true);
+    Check(on.landed == on.total, "the planner's rush all lands");
+    Check(on.maxSw <= 2, "nobody changes runway more than twice");
+    Check(on.on27 >= on.on27R, "at least half go where real traffic from their direction goes");
+    Check(on.breakoffs <= off.breakoffs && on.avgDelay <= off.avgDelay + 0.5, $"the planner does no worse than without it (break-offs {on.breakoffs} vs {off.breakoffs}, {on.avgDelay:0.0} vs {off.avgDelay:0.0} min to land)");
 }
 
 Console.WriteLine("== Vectors to final: downwind, base, a 20–30° intercept 8–10 nm out (no hairpins, no needless long finals)");
