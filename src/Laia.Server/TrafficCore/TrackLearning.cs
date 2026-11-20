@@ -25,7 +25,7 @@ public sealed class AirportProfile
     public List<TaxiTrack> Taxi { get; set; } = new();
     /// <summary>What the profile holds: 2 = with taxi tracks; 3 = airline passenger jets only; 4 = three days. Older ones are learned again.</summary>
     public int Version { get; set; }
-    public const int CurrentVersion = 10;  // 10: arrivals counted by the direction they came from; 9: seen only well above the runway (KGPI)
+    public const int CurrentVersion = 11;  // 11: close parallels told apart (nearest centreline); 10: arrivals counted by the direction they came from; 9: seen only well above the runway (KGPI)
     // 8: thin flows;   // 7: more days when one flow wasn't seen (KATL);   // 5: landings seen only down to a few hundred feet count (KMCI); 6: arrival samples kept (KMCI)
 
     public sealed class TaxiTrack
@@ -110,6 +110,17 @@ public static class TrackLearner
 {
     private const double Nm = 1852;
 
+    /// <summary>Of the runways a track point fits, the one whose centreline it's nearest — not the first listed (KATL,
+    /// 20 Nov: 14 days learned 26L 3,995 arrivals and 26R none, 27L 3,705 and 28 none; real Atlanta lands 26R/27L/28 and
+    /// departs 26L/27R. Seen only down to a few hundred feet, the wider check fitted both close parallels — 1,000 ft
+    /// apart — and the first listed won).</summary>
+    private static RunwayEnd? Nearest(IReadOnlyList<RunwayEnd> ends, V2 p, Func<RunwayEnd, bool> ok)
+    {
+        RunwayEnd? best = null; var bd = double.MaxValue;
+        foreach (var e in ends) { if (!ok(e)) continue; var d = Math.Abs(e.Offset(p)); if (d < bd) { bd = d; best = e; } }
+        return best;
+    }
+
     public static AirportProfile Learn(string icao, LocalMap map, double elevFt, IReadOnlyList<RunwayEnd> ends, IEnumerable<IReadOnlyList<TrackPoint>> tracks,
         string source = "", string day = "")
     {
@@ -130,14 +141,14 @@ public static class TrackLearner
                 var low = tr[i].AltFt is null || tr[i].AltFt < elevFt + 300;
                 RunwayEnd? r = null;
                 if (low)
-                    r = ends.FirstOrDefault(e => e.Along(xy[i]) > -1000 && e.Along(xy[i]) < e.LengthM * 0.8 && Math.Abs(e.Offset(xy[i])) < 120
+                    r = Nearest(ends, xy[i], e => e.Along(xy[i]) > -1000 && e.Along(xy[i]) < e.LengthM * 0.8 && Math.Abs(e.Offset(xy[i])) < 120
                         && Math.Abs(Geo2.Diff(tr[i].Track, e.Heading)) < 25);
                 // Where the receivers don't see an aircraft below a few hundred feet (KMCI, 15 Nov: 57 arrivals learned
                 // against 336 departures, none at all to 19L/19R): the last of it, low on a final, descending, with
                 // nothing after it but the ground or the end of the track, is a landing on that runway too.
                 if (r is null && tr[i].AltFt is { } al && al < elevFt + 1500 && tr[i - 1].AltFt is { } ap && ap > al)
                 {
-                    r = ends.FirstOrDefault(e => e.Along(xy[i]) > -5 * Nm && e.Along(xy[i]) < 0 && Math.Abs(e.Offset(xy[i])) < 150 + 0.06 * -e.Along(xy[i])
+                    r = Nearest(ends, xy[i], e => e.Along(xy[i]) > -5 * Nm && e.Along(xy[i]) < 0 && Math.Abs(e.Offset(xy[i])) < 150 + 0.06 * -e.Along(xy[i])
                         && Math.Abs(Geo2.Diff(tr[i].Track, e.Heading)) < 20);
                     if (r is not null)
                     {
@@ -154,7 +165,7 @@ public static class TrackLearner
                 // a runway's final (inside a 6° cone), with nothing more of it for two minutes — a landing on that runway.
                 if (r is null && tr[i].AltFt is { } al2 && al2 < elevFt + 5000 && tr[i - 1].AltFt is { } ap2 && ap2 > al2
                     && (i + 1 == tr.Count || tr[i + 1].T - tr[i].T > 120))
-                    r = ends.FirstOrDefault(e => e.Along(xy[i]) > -15 * Nm && e.Along(xy[i]) < 0
+                    r = Nearest(ends, xy[i], e => e.Along(xy[i]) > -15 * Nm && e.Along(xy[i]) < 0
                         && Math.Abs(e.Offset(xy[i])) < 300 + 0.1 * -e.Along(xy[i])
                         && Math.Abs(Geo2.Diff(tr[i].Track, e.Heading)) < 15
                         && al2 - elevFt < 1500 + 500 * (-e.Along(xy[i]) / Nm));
@@ -188,14 +199,14 @@ public static class TrackLearner
             {
                 RunwayEnd? r = null;
                 if (i >= 1 && !(tr[i - 1].AltFt is not null && tr[i - 1].AltFt > elevFt + 200) && tr[i].AltFt is { } a1 && a1 <= elevFt + 1200)
-                    r = ends.FirstOrDefault(e => e.Along(xy[i]) > e.LengthM * 0.2 && e.Along(xy[i]) < e.LengthM + 3 * Nm && Math.Abs(e.Offset(xy[i])) < 300
+                    r = Nearest(ends, xy[i], e => e.Along(xy[i]) > e.LengthM * 0.2 && e.Along(xy[i]) < e.LengthM + 3 * Nm && Math.Abs(e.Offset(xy[i])) < 300
                         && Math.Abs(Geo2.Diff(tr[i].Track, e.Heading)) < 20);
                 // First seen already climbing out (KGPI: the receivers pick departures up only well above the runway):
                 // the start of the track, up to 15 nm past the runway's end, below 5,000 ft above the field and no higher
                 // than a steep climb, going up, on the runway's extended centreline (inside a 6° cone), heading out.
                 if (r is null && (i == 0 || tr[i].T - tr[i - 1].T > 120) && tr[i].AltFt is { } a2 && a2 < elevFt + 5000
                     && i + 1 < tr.Count && tr[i + 1].AltFt is { } an2 && an2 > a2)
-                    r = ends.FirstOrDefault(e => e.Along(xy[i]) > e.LengthM * 0.5 && e.Along(xy[i]) < e.LengthM + 15 * Nm
+                    r = Nearest(ends, xy[i], e => e.Along(xy[i]) > e.LengthM * 0.5 && e.Along(xy[i]) < e.LengthM + 15 * Nm
                         && Math.Abs(e.Offset(xy[i])) < 300 + 0.1 * Math.Max(0, e.Along(xy[i]) - e.LengthM)
                         && Math.Abs(Geo2.Diff(tr[i].Track, e.Heading)) < 15
                         && a2 - elevFt < 1500 + 700 * (Math.Max(0, e.Along(xy[i]) - e.LengthM) / Nm));
