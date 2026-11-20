@@ -80,6 +80,10 @@ public sealed class Flight
     public int DelayVectors, RwySwitches;
     /// <summary>Departures: its number in its runway's departure order (0 when not in it: at the gate, boarding).</summary>
     public int DepSeq;
+    /// <summary>Seconds its current delay vectors add (cleared when its route is built again); the planner counts
+    /// without them. Whether the runway planner has seen it yet.</summary>
+    public double DetourSec;
+    public bool Planned;
     /// <summary>A lower level to keep 1,000 ft under another of this airport's arrivals en route (NaN when none), until when.</summary>
     public double SepCeiling = double.NaN, SepUntil;
     public string? SepFrom;
@@ -632,7 +636,9 @@ public sealed partial class TrafficWorld
         // far out with speed (cruise and descent slower), so it reaches the approach already spaced instead of holding.
         // The user takes part with a generous planned slot (M8): LAIA's arrivals space around it.
         try { UpdateUserArrival(); } catch { UserArr = null; }
-        if (Time - _lastPlan >= 30) { _lastPlan = Time; try { PlanRunways(); } catch (Exception ex) { Log("Runway planning failed: " + ex.Message); } }
+        // Every 30 s, and at once when an arrival it hasn't planned yet appears (before its delay is taken anywhere).
+        if (Time - _lastPlan >= 30 || Flights.Any(f => f.Kind == "arrival" && !f.Planned && !f.Done && !f.OnGround && !double.IsNaN(f.EtaNominal)))
+        { _lastPlan = Time; try { PlanRunways(); } catch (Exception ex) { Log("Runway planning failed: " + ex.Message); } }
         var sequenced = Flights.Where(f => f.Kind == "arrival" && !f.OnGround && !f.Done && !double.IsNaN(f.EtaSec) && f.Rwy is not null && f.Phase != "go-around").ToList();
         if (UserArr is { } ua) sequenced.Add(ua);
         foreach (var g in sequenced.GroupBy(f => f.Rwy!.Runway))
@@ -3249,6 +3255,7 @@ public sealed partial class TrafficWorld
     private void BuildArrivalPath(Flight f, V2? from, V2? entry = null)
     {
         f.VectorRejoinS = double.NegativeInfinity;
+        f.DetourSec = 0;
         var altFixes = new List<AirPoint>();
         var named = new List<AirPoint>();
         var rwy = f.Rwy!;
@@ -4519,18 +4526,20 @@ public sealed partial class TrafficWorld
         foreach (var f in arrs.Where(x => !Movable(x)).OrderBy(x => x.EtaNominal))
             if (book.ContainsKey(f.Rwy!.Runway)) Book(f, f.Rwy.Runway, f.EtaNominal);
         if (UserArr is { Rwy: { } urw } u && book.ContainsKey(urw.Runway) && !double.IsNaN(u.EtaNominal)) Book(u, urw.Runway, u.EtaNominal);
-        foreach (var f in arrs.Where(Movable).OrderBy(x => x.EtaNominal))
+        foreach (var f in arrs) f.Planned = true;
+        foreach (var f in arrs.Where(Movable).OrderBy(x => x.EtaNominal - x.DetourSec))
         {
             var cur = f.Rwy!;
+            var nominal = f.EtaNominal - f.DetourSec;   // without the delay vectors it's on (a new runway drops them)
             var star = f.StarPick?.p;
             var opts = ArrRwys.Where(r => r.LengthM >= f.P.MinRunwayM && (star is null || ServesStar(star, r)) && !RarelyLanded(r)).ToList();
             if (!opts.Contains(cur)) opts.Add(cur);
             var share = RealShare(opts, f);
             double Cost(RunwayEnd r, out double eta, out double slot)
             {
-                eta = f.EtaNominal + (r.Runway == cur.Runway ? 0 : ((f.Pos - r.Threshold).Length - (f.Pos - cur.Threshold).Length) / (220 * Kt));
-                slot = Earliest(r.Runway, eta, f);
-                var c = slot - f.EtaNominal;                                   // delay plus the extra flying
+                eta = (r.Runway == cur.Runway ? f.EtaNominal : nominal + ((f.Pos - r.Threshold).Length - (f.Pos - cur.Threshold).Length) / (220 * Kt));
+                slot = Earliest(r.Runway, Math.Max(eta, nominal), f);
+                var c = slot - nominal;                                        // delay (detours included) plus the extra flying
                 if (share is not null) c += 120 * (1 - share.GetValueOrDefault(r.Runway) / Math.Max(1e-6, share.Values.Max()));
                 if (r.Runway != cur.Runway) c += 45 + 60 * f.RwySwitches;     // changing costs, more each time
                 return c;
@@ -4748,6 +4757,7 @@ public sealed partial class TrafficWorld
         f.ThrS = f.Path.PointS[thrIndex];
         var at = f.Path.PointS[rjIdx];
         f.VectorRejoinS = at;
+        f.DetourSec += addSec;
         f.SpeedLimits = oldLimits.Select(l => (at + l.off, l.Kt)).ToList();
         ShiftRestrictions(f, oldS, at);
         f.S = 0;
