@@ -723,7 +723,7 @@ Console.WriteLine("== Several runways from the ATIS, and STARs/SIDs chosen by wh
     // The runway planner: a rush from the north, one every 20 s 60–110 nm out, more than one runway takes. It plans them
     // together — where real traffic goes first, the overflow to the other — without anyone changing back and forth.
     // Run with the planner off first, the same rush, to compare.
-    (int landed, int total, double span, int on27, int on27R, int changes, int maxSw, int breakoffs, double avgDelay) Rush(bool planner)
+    (int landed, int total, double span, int on27, int on27R, int changes, int maxSw, int breakoffs, double avgDelay) Rush(bool planner, double farNm = 110)
     {
         foreach (var f in world.Flights.ToList()) world.Flights.Remove(f);
         world.Planner = planner;
@@ -733,12 +733,12 @@ Console.WriteLine("== Several runways from the ATIS, and STARs/SIDs chosen by wh
         var spawnAt = new Dictionary<string, double>();
         for (var k = 0; k < 16; k++)
         {
-            var f = world.SpawnArrival(110 - k * 3, false, Leg("KNOR", (planner ? 600 : 500) + k));
+            var f = world.SpawnArrival(farNm - k * 3, false, Leg("KNOR", (planner ? 600 : 500) + (farNm > 150 ? 100 : 0) + k));
             if (f is not null) { rush2.Add(f); spawnAt[f.Callsign] = world.Time; }
             for (var t = 0.0; t < 20; t += 0.5) world.Step(0.5);
         }
         var landed2 = new Dictionary<string, (double t, string rwy)>();
-        for (var t = 0.0; t < 2 * 3600 && landed2.Count < rush2.Count; t += 0.5)
+        for (var t = 0.0; t < 3 * 3600 && landed2.Count < rush2.Count; t += 0.5)
         {
             world.Step(0.5);
             foreach (var f in rush2) if (f.OnGround && !landed2.ContainsKey(f.Callsign)) landed2[f.Callsign] = (world.Time, f.Rwy!.Ident);
@@ -747,7 +747,7 @@ Console.WriteLine("== Several runways from the ATIS, and STARs/SIDs chosen by wh
         var avg = landed2.Count > 0 ? landed2.Average(kv => kv.Value.t - spawnAt[kv.Key]) / 60 : 0;
         var r = (landed2.Count, rush2.Count, span, landed2.Values.Count(x => x.rwy == "27"), landed2.Values.Count(x => x.rwy == "27R"),
             log2.Count(l => l.Contains("planned with the others")), rush2.Max(f => f.RwySwitches), log2.Count(l => l.Contains("breaking off")), avg);
-        Console.WriteLine($"  planner {(planner ? "on " : "off")}: {r.Item1} of {r.Item2} landed in {span:0} min, {avg:0.0} min each on average from appearing ({r.Item4} on 27, {r.Item5} on 27R); {r.Item6} planned changes, at most {r.Item7} per aircraft; break-offs {r.Item8}");
+        Console.WriteLine($"  {farNm:0} nm out, planner {(planner ? "on " : "off")}: {r.Item1} of {r.Item2} landed in {span:0} min, {avg:0.0} min each on average from appearing ({r.Item4} on 27, {r.Item5} on 27R); {r.Item6} planned changes, at most {r.Item7} per aircraft; break-offs {r.Item8}");
         foreach (var l in log2.Where(l => l.Contains("breaking off")).Take(4)) Console.WriteLine("    " + l);
         if (planner && Environment.GetEnvironmentVariable("LAIA_DIAG") is not null)
             foreach (var bl in log2.Where(l => l.Contains("breaking off") || l.Contains("going around (runway not clear")).Take(3))
@@ -760,8 +760,14 @@ Console.WriteLine("== Several runways from the ATIS, and STARs/SIDs chosen by wh
             }
         return r;
     }
+    // Close in (65–110 nm): 8–9 minutes of delay for the last ones, more than speed and delay vectors can take from there —
+    // a controller would hold. An overload check: it all lands, the planner no worse than without it.
     var off = Rush(false);
     var on = Rush(true);
+    // From 200+ nm, as the 400 nm hand-over and metering give in real use: the delay is planned far out, no break-offs.
+    var farOn = Rush(true, 230);
+    Check(farOn.landed == farOn.total, "the rush from 200+ nm all lands");
+    Check(farOn.breakoffs == 0, $"the rush from 200+ nm needs no break-offs ({farOn.breakoffs})");
     Check(on.landed == on.total, "the planner's rush all lands");
     Check(on.maxSw <= 2, "nobody changes runway more than twice");
     Check(on.on27 >= on.on27R, "at least half go where real traffic from their direction goes");
