@@ -733,7 +733,10 @@ Console.WriteLine("== Several runways from the ATIS, and STARs/SIDs chosen by wh
         var spawnAt = new Dictionary<string, double>();
         for (var k = 0; k < 16; k++)
         {
-            var f = world.SpawnArrival(farNm - k * 3, false, Leg("KNOR", (planner ? 600 : 500) + (farNm > 150 ? 100 : 0) + k));
+            // Beyond its STAR's start, as taken over from the whole sky: from the north at cruise.
+            var f = farNm > 150
+                ? world.SpawnArrival(0, false, Leg("KNOR", 700 + k), entry: (new V2(0, (farNm - k * 3) * Geo2.MPerNm), 35000, 37000))
+                : world.SpawnArrival(farNm - k * 3, false, Leg("KNOR", (planner ? 600 : 500) + k));
             if (f is not null) { rush2.Add(f); spawnAt[f.Callsign] = world.Time; }
             for (var t = 0.0; t < 20; t += 0.5) world.Step(0.5);
         }
