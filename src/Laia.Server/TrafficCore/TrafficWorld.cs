@@ -1654,7 +1654,9 @@ public sealed partial class TrafficWorld
             if (min > 0 && f.Kind == "arrival" && f.Rwy is { } rw && f.ThrS > 0)
             {
                 var dAt = (f.ThrS - c.S) / Geo2.MPerNm;
-                if (dAt is >= 0 and < 12) min = Math.Min(min, ProfileLow(rw, dAt) + 100);
+                // Only a floor well above it (CYYC ULBUD 6,500 against the glideslope's 4,890); one within 400 ft is the
+                // published altitude and is kept (20 Nov, KLAS ILS 01L: CODNO "at or above 5,300" flown at 5,133).
+                if (dAt is >= 0 and < 12) { var gp = ProfileLow(rw, dAt) + 100; if (min > gp + 300) min = gp; }
             }
             if (min > 0 && min > lo) { lo = min; loS = c.S; }
         }
@@ -3409,10 +3411,21 @@ public sealed partial class TrafficWorld
             // No real tracks off this STAR to this runway (user, 19 Nov, AAL2867 on SHAIN2 for 27C sent straight across
             // the field to the approach's first fix): from where the STAR ends, the way real arrivals to this runway
             // that passed there flew on — whichever STAR they came by.
-            if (realVec is null && starPts.Count > 0 && DirectionTrack(rwy, starPts[^1].P) is { } dtr)
+            // Real traffic often leaves a STAR long before its end (20 Nov, KLAS: every CRESO5 arrival to 01L flew the
+            // STAR round the east side and a built pattern back — SWA2522's loop — while real arrivals from there are
+            // turned straight in): from the STAR's end back towards its start, the first point real arrivals to this
+            // runway passed going its way, and the STAR is left there.
+            if (realVec is null && starPts.Count > 0)
             {
-                starPts.AddRange(dtr.Select(q => new AirPoint(q, "")));
-                realVec = (starPts.Count - 1, new List<V2>());
+                for (var k = starPts.Count - 1; k >= 0; k--)
+                {
+                    var dir = k > 0 ? (starPts[k].P - starPts[k - 1].P).Bearing : starPts.Count > 1 ? (starPts[1].P - starPts[0].P).Bearing : double.NaN;
+                    if (DirectionTrack(rwy, starPts[k].P, dir) is not { } dtr) continue;
+                    starPts.RemoveRange(k + 1, starPts.Count - k - 1);
+                    starPts.AddRange(dtr.Select(q => new AirPoint(q, "")));
+                    realVec = (starPts.Count - 1, new List<V2>());
+                    break;
+                }
             }
             if (star is not null && starPts.Count > 0) names.Add(star.Name);
             // The STAR's restrictions, kept before the approach join trims the STAR (the joining fix keeps its restriction).
@@ -3690,18 +3703,23 @@ public sealed partial class TrafficWorld
     /// middling length among them (three or more needed; no loops). Points about 1 nm apart. Null when there aren't
     /// enough.
     /// </summary>
-    private List<V2>? DirectionTrack(RunwayEnd rwy, V2 from)
+    private List<V2>? DirectionTrack(RunwayEnd rwy, V2 from, double dir = double.NaN)
     {
         if (Learned is not { Samples.Count: > 0 } prof) return null;
         var nm = Geo2.MPerNm;
+        // Each runway's real arrivals in this airport's frame, worked out once per learned profile.
+        if (!ReferenceEquals(_dirXyFor, prof)) { _dirXyFor = prof; _dirXy.Clear(); }
+        if (!_dirXy.TryGetValue(rwy.Ident, out var tracks))
+            _dirXy[rwy.Ident] = tracks = prof.Samples.Where(smp => smp.Kind == "arrival" && smp.Runway == rwy.Ident && smp.Points.Count >= 6)
+                .Select(smp => smp.Points.Where(q => q.Length >= 2).Select(q => Apt.Map.ToXY(q[0], q[1])).ToList()).ToList();
         var cands = new List<(double len, List<V2> rest)>();
-        foreach (var smp in prof.Samples)
+        foreach (var pts in tracks)
         {
-            if (smp.Kind != "arrival" || smp.Runway != rwy.Ident || smp.Points.Count < 6) continue;
-            var pts = smp.Points.Where(q => q.Length >= 2).Select(q => Apt.Map.ToXY(q[0], q[1])).ToList();
             int bi = -1; var bd = 5 * nm;
             for (var i = 0; i < pts.Count; i++) { var d = (pts[i] - from).Length; if (d < bd) { bd = d; bi = i; } }
             if (bi < 0) continue;
+            // Going the STAR's way there, not across it.
+            if (!double.IsNaN(dir) && bi + 1 < pts.Count && Math.Abs(Geo2.Diff((pts[bi + 1] - pts[bi]).Bearing, dir)) > 60) continue;
             var rest = new List<V2>();
             for (var j = bi + 1; j < pts.Count; j++)
             {
@@ -3723,6 +3741,9 @@ public sealed partial class TrafficWorld
         if (cands.Count < 3) return null;
         return cands.OrderBy(c => c.len).ElementAt(cands.Count / 2).rest;
     }
+
+    private object? _dirXyFor;
+    private readonly Dictionary<string, List<List<V2>>> _dirXy = new();
 
     /// <summary>One real track off the STAR as a path piece: where on the STAR it turned off, and its points 1 nm apart.</summary>
     private (int cut, List<V2> pts) Fanned((double leaveNm, V2 leave, List<V2> rest) tr, List<V2> star)
@@ -5077,7 +5098,10 @@ public sealed partial class TrafficWorld
         {
             if (r.Runway != runway) continue;
             var along = r.Along(u);
-            if (Math.Abs(r.Offset(u)) < 45 && along > -60 && along < r.LengthM + 60) return true;
+            // On the runway itself (its half width + 10 m, between its ends): a box 45 m either side and 60 m past each
+            // end also caught the user holding short at a runway's end (20 Nov, KLAS: no 01R departure for 7 minutes
+            // while the user waited near its end; SWA2617 lined up the moment the user moved).
+            if (Math.Abs(r.Offset(u)) < r.WidthM / 2 + 10 && along > -10 && along < r.LengthM + 10) return true;
         }
         return false;
     }
@@ -5383,7 +5407,9 @@ public sealed partial class TrafficWorld
             // never reaching the "another gate" step, while the user's aircraft sat in its way).
             if (Reroute(f, u, "your aircraft")) return;
         }
-        if (f.StuckFor > 300)
+        // Waiting behind the user isn't stuck: the user will move (20 Nov, KLAS: SWA2107 removed behind the user in the
+        // departure queue). The user can remove one from the map if it's really stuck.
+        if (f.StuckFor > 300 && !f.BlockedByUser)
         {
             Log($"{f.Callsign}: stuck for 5 minutes at ({f.Pos.X:0}, {f.Pos.Y:0}), blocked by {f.BlockedBy?.Callsign ?? (f.BlockedByUser ? "your aircraft" : "nothing")}; removed");
             f.Done = true;
@@ -5442,7 +5468,9 @@ public sealed partial class TrafficWorld
         // Room on the far side: nobody on its way between the runway and 60 m past where it's clear of it.
         if (f.Path is { } path && st.ExitS > st.S)
         {
-            var end = Math.Min(path.Length, st.ExitS + 60);
+            // Room for all of it past the runway, and the gap to the one ahead (20 Nov, KLAS: crossing 26R/8L behind the
+            // queue for 01R, aircraft stopped with their tails over the runway).
+            var end = Math.Min(path.Length, st.ExitS + f.P.LengthM + 60);
             foreach (var o in Flights)
             {
                 if (o == f || o.Done || !o.OnGround || o.Phase is "parked" or "boarding") continue;
