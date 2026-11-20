@@ -750,11 +750,11 @@ Console.WriteLine("== Several runways from the ATIS, and STARs/SIDs chosen by wh
         Console.WriteLine($"  planner {(planner ? "on " : "off")}: {r.Item1} of {r.Item2} landed in {span:0} min, {avg:0.0} min each on average from appearing ({r.Item4} on 27, {r.Item5} on 27R); {r.Item6} planned changes, at most {r.Item7} per aircraft; break-offs {r.Item8}");
         foreach (var l in log2.Where(l => l.Contains("breaking off")).Take(4)) Console.WriteLine("    " + l);
         if (planner && Environment.GetEnvironmentVariable("LAIA_DIAG") is not null)
-            foreach (var bl in log2.Where(l => l.Contains("breaking off")).Take(2))
+            foreach (var bl in log2.Where(l => l.Contains("breaking off") || l.Contains("going around (runway not clear")).Take(3))
             {
                 var parts = bl.Split(' ');
                 var cs = parts[1].TrimEnd(':');
-                var ldr = System.Text.RegularExpressions.Regex.Match(bl, @"behind (\w+)").Groups[1].Value;
+                var ldr = System.Text.RegularExpressions.Regex.Match(bl, @"(?:behind|not clear: )(\w+)").Groups[1].Value;
                 Console.WriteLine($"  DIAG history of {cs} and {ldr}:");
                 foreach (var l in log2.Where(l => l.Contains(cs + ":") || l.Contains(ldr + ":"))) Console.WriteLine("    D " + l);
             }

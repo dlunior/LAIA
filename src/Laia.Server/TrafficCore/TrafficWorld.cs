@@ -4355,6 +4355,18 @@ public sealed partial class TrafficWorld
     /// where it lands sooner than it can on its own runway (30 s or more) — vectored straight there instead of being
     /// vectored off or broken off. Re-sequenced on that runway behind the arrivals nearer to it.
     /// </summary>
+    /// <summary>The landing-time predictions worked out again at once, for a new runway or path. The sequence pass runs
+    /// straight after a runway change, and with the old runway's time it put the arrival in the wrong place on the new
+    /// runway's order (offline rush, 20 Nov: DAL602 moved to 27R went around behind DAL600).</summary>
+    private void RefreshEta(Flight f)
+    {
+        if (f.Path is null || f.Rwy is null) return;
+        var dth = (f.ThrS - f.S) / Geo2.MPerNm;
+        f.EtaAt = Time;
+        f.EtaSec = EtaToThreshold(f, dth);
+        f.EtaNominal = Time + (f.Slowed ? EtaToThreshold(f, dth, nominal: true) : f.EtaSec);
+    }
+
     private bool OtherRunway(Flight f, double shortSec, string why)
     {
         if (f.Rwy is not { } cur || f.Path is null || f.Test || f == UserArr || ArrRwys.Count < 2 || Time - f.RwySwitchAt < 300) return false;
@@ -4392,6 +4404,7 @@ public sealed partial class TrafficWorld
         if (f.Phase == "final") f.SetPhase("approach", Time);
         f.Frozen = false; f.Rejoin = true; f.SlowDv = 0; f.EtaAt = -99;
         f.RwySwitchAt = Time; f.LastVector = Time; f.LastTrombone = Time;
+        RefreshEta(f);
         f.Mgr = "vectored";
         _rwySwitches++;
         var far = bestPts.FirstOrDefault(q => (q - p).Length > 2 * nm, bestPts[^1]);
@@ -4560,6 +4573,7 @@ public sealed partial class TrafficWorld
                 f.Rwy = best;
                 BuildArrivalPath(f, null, f.Pos);
                 f.S = 0; f.Frozen = false; f.SlowDv = 0; f.RwySwitchAt = Time; f.EtaAt = -99; f.RwySwitches++;
+                RefreshEta(f);
                 _rwySwitches++;
                 Log($"{f.Callsign}: runway {best.Ident} instead of {cur.Ident} (planned with the others: {curC - bestC:0} s better there" +
                     (share is not null ? $"; real arrivals from its direction: {string.Join(", ", opts.Select(o => $"{o.Ident} {100 * share.GetValueOrDefault(o.Runway) / Math.Max(1e-6, share.Values.Sum()):0}%"))}" : "") + ")");
@@ -4621,6 +4635,7 @@ public sealed partial class TrafficWorld
         f.Rwy = pick;
         BuildArrivalPath(f, null, f.Pos);
         f.S = 0; f.Frozen = false; f.SlowDv = 0; f.RwySwitchAt = Time; f.EtaAt = -99; f.RwySwitches++;
+        RefreshEta(f);
         _rwySwitches++;
         Log($"{f.Callsign}: runway {pick.Ident} instead of {cur.Ident} for less delay ({best:0} s instead of {was:0} s)");
     }
