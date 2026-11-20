@@ -632,6 +632,7 @@ public sealed partial class TrafficWorld
         // far out with speed (cruise and descent slower), so it reaches the approach already spaced instead of holding.
         // The user takes part with a generous planned slot (M8): LAIA's arrivals space around it.
         try { UpdateUserArrival(); } catch { UserArr = null; }
+        if (Time - _lastPlan >= 30) { _lastPlan = Time; try { PlanRunways(); } catch (Exception ex) { Log("Runway planning failed: " + ex.Message); } }
         var sequenced = Flights.Where(f => f.Kind == "arrival" && !f.OnGround && !f.Done && !double.IsNaN(f.EtaSec) && f.Rwy is not null && f.Phase != "go-around").ToList();
         if (UserArr is { } ua) sequenced.Add(ua);
         foreach (var g in sequenced.GroupBy(f => f.Rwy!.Runway))
@@ -721,14 +722,14 @@ public sealed partial class TrafficWorld
                 _timeline[g.Key].Add((slot, f));
                 if (f == UserArr) { prev = f; prevSlot = slot; continue; }
                 f.Delay = slot - f.EtaNominal;
-                if (!f.Frozen && f.Delay >= 60 && !f.Test)
+                if (!f.Frozen && f.Delay >= 60 && !f.Test && !(Planner && ArrRwys.Count >= 2))
                 {
                     var was0 = f.Rwy;
                     try { BalanceRunway(f); } catch { }
                     if (f.Rwy != was0) { f.RwyCheckAt = Time; continue; }   // placed on its new runway next pass
                 }
                 f.Frozen = true; f.FrozenSlot = slot;
-                if (Time - f.RwyCheckAt >= 30) { f.RwyCheckAt = Time; try { BalanceRunway(f); } catch { } }
+                if (Time - f.RwyCheckAt >= 30 && !(Planner && ArrRwys.Count >= 2)) { f.RwyCheckAt = Time; try { BalanceRunway(f); } catch { } }
                 if (Time - f.SlowAt >= 5) { f.SlowAt = Time; try { AssignSequenceSpeed(f); } catch (Exception ex) { Log($"{f.Callsign}: speed planning failed: {ex.Message}"); } }
                 f.Slowed = f.SlowDv > 0;
                 prev = f; prevSlot = slot;
@@ -4479,6 +4480,97 @@ public sealed partial class TrafficWorld
     /// minutes or more of delay on its runway moves to another landing runway its STAR serves when that one has a slot
     /// at least 90 s sooner — as the arrival manager balances parallel runways — at most once every 10 minutes.
     /// </summary>
+    private double _lastPlan = -999;
+    public bool Planner { get; set; } = true;
+
+    /// <summary>
+    /// The runway planner (user, 19 Nov: "how can we make our tool more of a constant traffic manager — seems to be more
+    /// of a traffic planner and hoping for the best"; "ADSB data … should weigh into LAIA's calculations"). Every 30 s
+    /// it plans every arrival still 40 nm or more out together, not one at a time: in order of their unhindered landing
+    /// times, each is given the landing runway (of those its STAR serves) where it costs least — its delay there plus
+    /// the extra flying to get there, plus a price for going against how real traffic from its direction uses the
+    /// runways (learned), plus a price for changing its runway (more for each change; three at most) — and its slot is
+    /// booked there before the next is planned. Arrivals closer in, and those whose runway is fixed, are booked first
+    /// where they are. A change is only made when it saves 45 s or more and the last was over two minutes ago.
+    /// </summary>
+    private void PlanRunways()
+    {
+        if (!Planner || ArrRwys.Count < 2) return;
+        var nm = Geo2.MPerNm;
+        var arrs = Flights.Where(f => f.Kind == "arrival" && !f.OnGround && !f.Done && f.Rwy is not null && f.Path is not null
+            && f.Phase != "go-around" && !double.IsNaN(f.EtaNominal)).ToList();
+        if (arrs.Count == 0) return;
+        bool Movable(Flight f) => f != UserArr && !f.Test && f.Phase == "arriving" && (f.ThrS - f.S) / nm >= 40 && f.RwySwitches < 3;
+        // The plan's timelines, per runway: the fixed ones booked first.
+        var book = ArrRwys.ToDictionary(r => r.Runway, _ => new List<(double slot, Flight f)>());
+        double Earliest(int r, double eta, Flight f)
+        {
+            if (!book.TryGetValue(r, out var tl)) return eta;
+            var list = tl.OrderBy(x => x.slot).ToList();
+            var t = eta;
+            for (var i = 0; i <= list.Count; i++)
+            {
+                if (i > 0) t = Math.Max(t, list[i - 1].slot + ThresholdGapNeeded(list[i - 1].f, f, forDepartures: false) + 15);
+                if (i == list.Count || t + ThresholdGapNeeded(f, list[i].f, forDepartures: false) + 15 <= list[i].slot) return t;
+            }
+            return t;
+        }
+        void Book(Flight f, int r, double eta) => book[r].Add((Earliest(r, eta, f), f));
+        foreach (var f in arrs.Where(x => !Movable(x)).OrderBy(x => x.EtaNominal))
+            if (book.ContainsKey(f.Rwy!.Runway)) Book(f, f.Rwy.Runway, f.EtaNominal);
+        if (UserArr is { Rwy: { } urw } u && book.ContainsKey(urw.Runway) && !double.IsNaN(u.EtaNominal)) Book(u, urw.Runway, u.EtaNominal);
+        foreach (var f in arrs.Where(Movable).OrderBy(x => x.EtaNominal))
+        {
+            var cur = f.Rwy!;
+            var star = f.StarPick?.p;
+            var opts = ArrRwys.Where(r => r.LengthM >= f.P.MinRunwayM && (star is null || ServesStar(star, r)) && !RarelyLanded(r)).ToList();
+            if (!opts.Contains(cur)) opts.Add(cur);
+            var share = RealShare(opts, f);
+            double Cost(RunwayEnd r, out double eta, out double slot)
+            {
+                eta = f.EtaNominal + (r.Runway == cur.Runway ? 0 : ((f.Pos - r.Threshold).Length - (f.Pos - cur.Threshold).Length) / (220 * Kt));
+                slot = Earliest(r.Runway, eta, f);
+                var c = slot - f.EtaNominal;                                   // delay plus the extra flying
+                if (share is not null) c += 120 * (1 - share.GetValueOrDefault(r.Runway) / Math.Max(1e-6, share.Values.Max()));
+                if (r.Runway != cur.Runway) c += 45 + 60 * f.RwySwitches;     // changing costs, more each time
+                return c;
+            }
+            RunwayEnd best = cur; var bestC = Cost(cur, out var bestEta, out _);
+            foreach (var r in opts)
+            {
+                if (r.Runway == cur.Runway) continue;
+                var c = Cost(r, out var e, out _);
+                if (c < bestC) { bestC = c; best = r; bestEta = e; }
+            }
+            if (best.Runway != cur.Runway && Time - f.RwySwitchAt >= 120)
+            {
+                var curC = Cost(cur, out _, out _);
+                f.Rwy = best;
+                BuildArrivalPath(f, null, f.Pos);
+                f.S = 0; f.Frozen = false; f.SlowDv = 0; f.RwySwitchAt = Time; f.EtaAt = -99; f.RwySwitches++;
+                _rwySwitches++;
+                Log($"{f.Callsign}: runway {best.Ident} instead of {cur.Ident} (planned with the others: {curC - bestC:0} s better there" +
+                    (share is not null ? $"; real arrivals from its direction: {string.Join(", ", opts.Select(o => $"{o.Ident} {100 * share.GetValueOrDefault(o.Runway) / Math.Max(1e-6, share.Values.Sum()):0}%"))}" : "") + ")");
+                Book(f, best.Runway, bestEta);
+            }
+            else Book(f, cur.Runway, f.EtaNominal);
+        }
+    }
+
+    /// <summary>How real arrivals from about this flight's direction shared these runways (learned counts), or null when
+    /// fewer than 8 landed on them.</summary>
+    private Dictionary<int, double>? RealShare(List<RunwayEnd> rws, Flight f)
+    {
+        if (Learned is not { } lp) return null;
+        var star = f.StarPick;
+        double? brg = star is { } st0 && EntryFix(st0.p, st0.t) is { } ef ? Apt.Map.ToXY(ef.Lat, ef.Lon).Bearing : BearingTo(f.Other);
+        if (brg is not { } fb) return null;
+        var bin = (int)Math.Floor(Geo2.Norm(fb) / 30) % 12;
+        var w = rws.ToDictionary(r => r.Runway, r => lp.Arrivals.TryGetValue(r.Ident, out var ra) && ra.FromBearing is { Length: 12 } fbs
+            ? fbs[bin] + 0.5 * fbs[(bin + 11) % 12] + 0.5 * fbs[(bin + 1) % 12] : 0);
+        return w.Values.Sum() >= 8 ? w : null;
+    }
+
     /// <summary>A landing runway in use that real traffic hardly lands on (under 5% of the real arrivals to the runways in use).</summary>
     private bool RarelyLanded(RunwayEnd r)
     {

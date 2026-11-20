@@ -719,6 +719,33 @@ Console.WriteLine("== Several runways from the ATIS, and STARs/SIDs chosen by wh
     var on27 = north2.Count(f => f.Rwy!.Ident == "27");
     Console.WriteLine($"  from the north, by real use (27: 90%): {string.Join(" ", north2.Select(f => f.Rwy!.Ident))}");
     Check(on27 >= 7 && on27 <= 10, $"arrivals shared between the runways as real traffic from their direction used them ({on27} of 10 on 27)");
+
+    // The runway planner: a rush from the north, one a minute 60–110 nm out, more than one runway takes. It plans them
+    // together — most where real traffic goes, the overflow to the other — without anyone changing back and forth.
+    foreach (var f in world.Flights.ToList()) world.Flights.Remove(f);
+    var log2 = new List<string>();
+    world.Log = l => log2.Add($"{world.Time:0} {l}");
+    var rush2 = new List<Flight>();
+    for (var k = 0; k < 16; k++)
+    {
+        var f = world.SpawnArrival(110 - k * 3, false, Leg("KNOR", 500 + k));
+        if (f is not null) rush2.Add(f);
+        for (var t = 0.0; t < 20; t += 0.5) world.Step(0.5);
+    }
+    var landed2 = new Dictionary<string, (double t, string rwy)>();
+    for (var t = 0.0; t < 2 * 3600 && landed2.Count < rush2.Count; t += 0.5)
+    {
+        world.Step(0.5);
+        foreach (var f in rush2) if (f.OnGround && !landed2.ContainsKey(f.Callsign)) landed2[f.Callsign] = (world.Time, f.Rwy!.Ident);
+    }
+    var planned = log2.Count(l => l.Contains("planned with the others"));
+    var maxSw = rush2.Max(f => f.RwySwitches);
+    var span = landed2.Count > 1 ? (landed2.Values.Max(x => x.t) - landed2.Values.Min(x => x.t)) / 60 : 0;
+    Console.WriteLine($"  planner: {landed2.Count} of {rush2.Count} landed in {span:0} min ({landed2.Values.Count(x => x.rwy == "27")} on 27, {landed2.Values.Count(x => x.rwy == "27R")} on 27R); {planned} planned changes, at most {maxSw} per aircraft; break-offs {log2.Count(l => l.Contains("breaking off"))}");
+    foreach (var l in log2.Where(l => l.Contains("planned with the others")).Take(3)) Console.WriteLine("    " + l);
+    Check(landed2.Count == rush2.Count, "the planner's rush all lands");
+    Check(maxSw <= 2, "nobody changes runway more than twice");
+    Check(landed2.Values.Count(x => x.rwy == "27") > landed2.Values.Count(x => x.rwy == "27R"), "most go where real traffic from their direction goes");
 }
 
 Console.WriteLine("== Vectors to final: downwind, base, a 20–30° intercept 8–10 nm out (no hairpins, no needless long finals)");
