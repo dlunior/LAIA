@@ -1788,6 +1788,38 @@ Console.WriteLine("== M6: learning an airport from real tracks (synthetic adsb.l
         Console.WriteLine($"  seen only well above the runway: {ha} of 12 arrivals and {hd} of 10 departures learned");
         Check(ha == 12 && hd == 10, "arrivals lost and departures first seen well above the runway, lined up with it, are learned too");
     }
+    {
+        // Close parallels (KATL, 20 Nov: 26L/26R 1,000 ft apart, 26R's real arrivals all learned as 26L's): a parallel
+        // 09L/27R 305 m north of 09/27 (listed after it), 12 arrivals to 27R, seen down to the runway, lost below 900 ft,
+        // and lost at 1,800 ft; and 10 take-offs off 27R first seen at 2,000 ft.
+        var dataP = TestAirport.Build(false);
+        var (pla2, plo2) = map.ToLatLon(new V2(0, 305));
+        dataP.Runways.Add(new AirportRunway { Lat = pla2, Lon = plo2, ElevationM = 10, Heading = 90, LengthM = 3000, WidthM = 45, PrimaryNumber = 9, PrimaryDesignator = 1, SecondaryNumber = 27, SecondaryDesignator = 2 });
+        var aptP = new AirportModel(dataP);
+        var r27R = aptP.Ends.First(e => e.Ident == "27R");
+        Console.WriteLine($"  close parallels listed: {string.Join(", ", aptP.Ends.Select(e => e.Ident))}");
+        V2 AtR(double along, double off) => r27R.Threshold + r27R.Dir * (along * nm) + left * (off * nm);
+        var onR = new List<IReadOnlyList<TrackPoint>>();
+        for (var i = 0; i < 12; i++)
+        {
+            var join = 9.4 + rng.NextDouble() * 1.2; var dw = 3.8 + rng.NextDouble() * 0.4; var bas = join + 4;
+            var e = (bas - join) * Math.Tan(30 * Math.PI / 180);
+            var t = Fly(new() { (AtR(3, dw), 4000), (AtR(-bas, dw), 3000), (AtR(-bas, e), 2800), (AtR(-join, 0), 2600), (AtR(0, 0), 60), (AtR(0.6, 0), null), (AtR(1.2, 0), null) }, i * 900);
+            var cutAt = i % 3 == 0 ? -1 : i % 3 == 1 ? 900 : 1800;
+            onR.Add(cutAt < 0 ? t : t.Where(q => q.AltFt is { } a0 && a0 > aptP.ElevationFt + cutAt).ToList());
+        }
+        for (var i = 0; i < 10; i++)
+        {
+            var endA = r27R.LengthM / nm; var p3 = AtR(endA + 3, 0);
+            var t = Fly(new() { (AtR(0.1, 0), null), (AtR(endA * 0.6, 0), null), (AtR(endA * 0.75, 0), 300), (p3, 2500), (p3 + V2.FromBearing(15 + rng.NextDouble() * 10, 25 * nm), 12000) }, 20000 + i * 900);
+            onR.Add(i % 2 == 0 ? t : t.Where(q => q.AltFt is { } a0 && a0 > aptP.ElevationFt + 2000).ToList());
+        }
+        var pp = TrackLearner.Learn("TEST", aptP.Map, aptP.ElevationFt, aptP.Ends, onR, "test", "2026-11-20");
+        int A(string rw) => pp.Samples.Count(x => x.Kind == "arrival" && x.Runway == rw);
+        int D(string rw) => pp.Samples.Count(x => x.Kind == "departure" && x.Runway == rw);
+        Console.WriteLine($"  close parallels 305 m apart: arrivals 27R {A("27R")}, 27 {A("27")}; departures 27R {D("27R")}, 27 {D("27")}");
+        Check(A("27R") == 12 && A("27") == 0 && D("27R") == 10 && D("27") == 0, "close parallels: each real track is learned on the runway it was really on");
+    }
     var a27 = prof.Arrivals.GetValueOrDefault("27");
     Check(a27 is not null && a27.Count == 12 && Math.Abs(a27.JoinP50 - 10) < 1 && Math.Abs(a27.InterceptDeg - 30) < 8 && Math.Abs(a27.DownwindNm - 4) < 0.7 && Math.Abs(a27.BaseNm - 14) < 1.5,
         "arrivals: joins at ~10 nm, 30° intercept, downwind 4 nm out, base at ~14 nm");

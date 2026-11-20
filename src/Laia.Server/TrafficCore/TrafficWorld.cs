@@ -1258,7 +1258,9 @@ public sealed partial class TrafficWorld
                 if (dist > HandoverNm) continue;
                 // Still climbing out of its own field: later, as at the main airport (16 Nov, MDW: SWA1696 taken over
                 // 119 nm out at 30 ft, just off the ground, and flown there at 30 ft until it went around 12 nm out).
-                if (dist > 25 && np.Phase == "climbing" && np.AltFt < Math.Min(10000, np.CruiseFt) - 200) continue;
+                // Far out (150 nm+), until it's at its cruise level (20 Nov, KATL: SWA3224 taken over 342 nm out at 9,840 ft
+                // still climbing, flew the rest level at 9,840 and crossed STRDR "at or above 24,000" 14,000 ft low).
+                if (dist > 25 && np.Phase == "climbing" && np.AltFt < (dist > 150 ? np.CruiseFt : Math.Min(10000, np.CruiseFt)) - 200) continue;
                 _done.Add(Key(l, 'A'));
                 if (dist > 12 && SpawnFromNetwork(l, np) is not null) { active++; Movements++; }
             }
@@ -1433,7 +1435,9 @@ public sealed partial class TrafficWorld
                 if (dist > HandoverNm) continue;                             // still in the whole sky
                 // A short flight from a field inside the hand-over ring is still climbing out there: wait until it
                 // has reached 10,000 ft (or its cruise level, if lower) — ATC here doesn't own its take-off.
-                if (dist > 25 && np.Phase == "climbing" && np.AltFt < Math.Min(10000, np.CruiseFt) - 200) continue;
+                // Far out (150 nm+), until it's at its cruise level (20 Nov, KATL: SWA3224 taken over 342 nm out at 9,840 ft
+                // still climbing, flew the rest level at 9,840 and crossed STRDR "at or above 24,000" 14,000 ft low).
+                if (dist > 25 && np.Phase == "climbing" && np.AltFt < (dist > 150 ? np.CruiseFt : Math.Min(10000, np.CruiseFt)) - 200) continue;
                 if (dist > 25)
                 {
                     if (_retryAt.TryGetValue(Key(l, 'A'), out var ra) && Time < ra) continue;
@@ -4567,7 +4571,9 @@ public sealed partial class TrafficWorld
                 var c = Cost(r, out var e, out _);
                 if (c < bestC) { bestC = c; best = r; bestEta = e; }
             }
-            if (best.Runway != cur.Runway && Time - f.RwySwitchAt >= 120)
+            // Two minutes before a first change, ten before another (20 Nov, KATL: DAL2453 27L → 26L → 27L in five minutes
+            // for 7–14 s each time).
+            if (best.Runway != cur.Runway && Time - f.RwySwitchAt >= (f.RwySwitches == 0 ? 120 : 600))
             {
                 var curC = Cost(cur, out _, out _);
                 f.Rwy = best;
@@ -6248,7 +6254,9 @@ public sealed partial class TrafficWorld
                     f.UserCeiling = ProbeUserLevel(f);
                 }
                 if (!double.IsNaN(f.UserCeiling)) want = Math.Min(want, f.UserCeiling);
-                if (!double.IsNaN(f.SepCeiling)) want = Math.Min(want, f.SepCeiling);
+                // Never below a published floor still ahead (user: "STAR altitude restrictions trump"; 20 Nov, KATL: DAL1285
+                // sent down early to 11,000 ft under another KATL arrival en route, then crossed CHPPR "at 13,000" low).
+                if (!double.IsNaN(f.SepCeiling)) want = Math.Min(want, double.IsNaN(floorAhead) ? f.SepCeiling : Math.Max(f.SepCeiling, floorAhead));
                 f.DbgWant = want; f.DbgFloor = floorAhead; f.DbgPlan = plan;
                 // Follow the slope of the wanted altitude itself (the descent path bent by the restrictions), not
                 // always the 3° path: level where a restriction holds it ("at 7,000" at BANYA), 300 ft/nm towards an
