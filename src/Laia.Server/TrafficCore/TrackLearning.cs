@@ -78,7 +78,9 @@ public sealed class AirportProfile
     {
         public string Kind { get; set; } = "";
         public string Runway { get; set; } = "";
-        public List<double[]> Points { get; set; } = new();   // lat, lon, alt
+        public List<double[]> Points { get; set; } = new();   // lat, lon, alt, seconds to the landing / since the take-off
+        /// <summary>When it landed or took off (Unix seconds): real landing order, rates and gaps.</summary>
+        public double T { get; set; }
     }
 
     public string Describe()
@@ -307,9 +309,12 @@ public static class TrackLearner
             {
                 if (tr[q].T - lastT < 15 && q != to) continue;
                 lastT = tr[q].T;
-                pts.Add(new[] { Math.Round(tr[q].Lat, 5), Math.Round(tr[q].Lon, 5), Math.Round(tr[q].AltFt ?? elevFt) });
+                // Fourth: seconds to the landing (arrivals) or since the take-off (departures) — real timing and speeds.
+                var secs = kind == "arrival" ? tr[Math.Min(to, tr.Count - 1)].T - tr[q].T : tr[q].T - tr[Math.Max(0, from)].T;
+                pts.Add(new[] { Math.Round(tr[q].Lat, 5), Math.Round(tr[q].Lon, 5), Math.Round(tr[q].AltFt ?? elevFt), Math.Round(secs) });
             }
-            samples.Add(new AirportProfile.SampleTrack { Kind = kind, Runway = rw, Points = pts });
+            samples.Add(new AirportProfile.SampleTrack { Kind = kind, Runway = rw, Points = pts,
+                T = kind == "arrival" ? tr[Math.Min(to, tr.Count - 1)].T : tr[Math.Max(0, from)].T });
         }
     }
 
