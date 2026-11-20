@@ -412,6 +412,19 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     private double _shadowStartWeek, _shadowStartedAt;
     private const double ShadowSecs = 3600;
     public bool SelfTestRunning => _shadow is not null;
+    /// <summary>Removes one of LAIA's aircraft (by its map id or callsign) at the user's request.</summary>
+    public (bool ok, string message) RemoveAircraft(string id)
+    {
+        lock (_gate)
+        {
+            foreach (var w in Worlds())
+                foreach (var f in w.Flights)
+                    if (!f.Done && (OutId(f) == id || f.Id == id || string.Equals(f.Callsign, id, StringComparison.OrdinalIgnoreCase)))
+                        return w.RemoveByUser(f) is { } cs ? (true, $"{cs} removed.") : (false, "That one can't be removed.");
+        }
+        return (false, "Not found (it may already be gone).");
+    }
+
     public void RestartSelfTest() { lock (_gate) { _shadowDoneFor = null; _shadow = null; } }
 
     private void SelfTestStep()

@@ -184,6 +184,11 @@ app.MapPost("/api/traffic/test/{kind}", (string kind, TrafficEngine t) =>
     var (ok, message) = t.StartTest(kind);
     return Results.Json(new { ok, message }, jsonOpts);
 });
+app.MapPost("/api/traffic/remove/{id}", (string id, TrafficEngine t) =>
+{
+    var (ok, message) = t.RemoveAircraft(id);
+    return Results.Json(new { ok, message }, jsonOpts);
+});
 app.MapPost("/api/traffic/clear", (TrafficEngine t) => { t.Clear(); return Results.Json(new { ok = true, message = "Traffic removed." }, jsonOpts); });
 
 app.MapPost("/api/simbrief/reload", async (SimBriefService sb) => { await sb.RefreshAsync(); return Results.Json(new { status = sb.Status }, jsonOpts); });
