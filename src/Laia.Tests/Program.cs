@@ -743,6 +743,7 @@ Console.WriteLine("== Several runways from the ATIS, and STARs/SIDs chosen by wh
     var span = landed2.Count > 1 ? (landed2.Values.Max(x => x.t) - landed2.Values.Min(x => x.t)) / 60 : 0;
     Console.WriteLine($"  planner: {landed2.Count} of {rush2.Count} landed in {span:0} min ({landed2.Values.Count(x => x.rwy == "27")} on 27, {landed2.Values.Count(x => x.rwy == "27R")} on 27R); {planned} planned changes, at most {maxSw} per aircraft; break-offs {log2.Count(l => l.Contains("breaking off"))}");
     foreach (var l in log2.Where(l => l.Contains("planned with the others")).Take(3)) Console.WriteLine("    " + l);
+    foreach (var l in log2.Where(l => l.Contains("breaking off") || l.Contains("vectors for spacing") || l.Contains("going around")).Take(12)) Console.WriteLine("    " + l);
     Check(landed2.Count == rush2.Count, "the planner's rush all lands");
     Check(maxSw <= 2, "nobody changes runway more than twice");
     Check(landed2.Values.Count(x => x.rwy == "27") > landed2.Values.Count(x => x.rwy == "27R"), "most go where real traffic from their direction goes");
