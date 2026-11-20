@@ -293,6 +293,31 @@ public sealed partial class TrafficWorld
         if (logNow) Log($"{me.Callsign} (you): new sequence — number {me.Seq} for {me.Rwy.Ident}, between {ahead?.Callsign ?? "nobody"} and {behind?.Callsign ?? "nobody"}");
     }
 
+    /// <summary>
+    /// The user's place in the departure queue (user, 20 Nov, KLAS: "I don't see where I am in the queue for takeoff"):
+    /// the runway of LAIA's departures queuing near the user (else the nearest departure runway in use within 3 km), and
+    /// how many are ahead — lined up, holding short, or taxiing and nearer its start than the user.
+    /// </summary>
+    private void DepartureQueue(V2 u, List<Notice> list)
+    {
+        if (UserArr is { Done: false }) return;
+        var deps = Flights.Where(o => o.Kind == "departure" && !o.Done && o.OnGround && o.Rwy is not null
+            && o.Phase is "taxi" or "holding short" or "lining up" or "lined up").ToList();
+        if (deps.Count == 0) return;
+        RunwayEnd? rwy = deps.Where(o => (o.Pos - u).Length < 250).OrderBy(o => (o.Pos - u).Length).FirstOrDefault()?.Rwy;
+        rwy ??= deps.Select(o => o.Rwy!).Distinct().Where(r => (r.Threshold - u).Length < 3000).OrderBy(r => (r.Threshold - u).Length).FirstOrDefault();
+        if (rwy is null) return;
+        // On the runway already (lined up): nothing to number.
+        if (Math.Abs(rwy.Offset(u)) < rwy.WidthM / 2 + 10 && rwy.Along(u) > -10 && rwy.Along(u) < rwy.LengthM) return;
+        var mine = (rwy.Threshold - u).Length;
+        var ahead = deps.Where(o => o.Rwy!.Runway == rwy.Runway &&
+                (o.Phase is "holding short" or "lining up" or "lined up" || (o.Pos - rwy.Threshold).Length < mine - 20))
+            .OrderBy(o => o.Phase is "lined up" or "lining up" ? 0 : o.Phase == "holding short" ? 1 : 2).ThenBy(o => (o.Pos - rwy.Threshold).Length).ToList();
+        var last = ahead.LastOrDefault();
+        list.Add(new Notice("depq", $"Number {ahead.Count + 1} for departure, runway {rwy.Ident}" +
+            (last is null ? " — nobody ahead" : $", behind {last.Callsign} ({last.Type})"), false));
+    }
+
     /// <summary>The notices that matter now (rebuilt every step, shown while true).</summary>
     private void UpdateNotices()
     {
@@ -354,6 +379,7 @@ public sealed partial class TrafficWorld
             GiveWay(u, list);
         }
         else PushNearby(u, list);
+        DepartureQueue(u, list);
         // Traffic waiting for the user.
         foreach (var o in Flights.Where(o => !o.Done && o.OnGround && o.BlockedByUser && o.BlockedFor > 5))
             list.Add(new Notice("wait-" + o.Id, $"{o.Callsign} ({o.Type}) is {(o.Phase == "boarding" || o.Phase == "pushback" ? "waiting to push back" : "holding")} for you", false));
