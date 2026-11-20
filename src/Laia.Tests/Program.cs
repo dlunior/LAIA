@@ -707,6 +707,18 @@ Console.WriteLine("== Several runways from the ATIS, and STARs/SIDs chosen by wh
     var outs = Enumerable.Range(0, 3).Select(i => world.StartDeparture(null, 20, Out(300 + i))).Where(f => f is not null).ToList();
     Console.WriteLine($"  departures from the south ramp: {string.Join(", ", outs.Select(f => f!.Callsign + " " + f.Rwy!.Ident))}");
     Check(outs.Count > 0 && outs.All(f => f!.Rwy!.Ident == "27"), "a ramp outside the runways departs from the runway on its own side");
+    // Real traffic decides (user, 19 Nov: "ADSB can tell us which arrivals land on which runways"): here the learned
+    // tracks say arrivals from the north land on 27 nine times in ten, though 27R is on their side.
+    var learned = new AirportProfile { Icao = "TEST", Version = AirportProfile.CurrentVersion };
+    var n27 = new int[12]; n27[0] = 45; var n27R = new int[12]; n27R[0] = 5;
+    learned.Arrivals["27"] = new AirportProfile.RunwayArrivals { Count = 45, FromBearing = n27 };
+    learned.Arrivals["27R"] = new AirportProfile.RunwayArrivals { Count = 5, FromBearing = n27R };
+    foreach (var f in world.Flights.ToList()) world.Flights.Remove(f);
+    world.Learned = learned;
+    var north2 = Enumerable.Range(0, 10).Select(i => world.SpawnArrival(30 + i * 6, false, Leg("KNOR", 400 + i))!).ToList();
+    var on27 = north2.Count(f => f.Rwy!.Ident == "27");
+    Console.WriteLine($"  from the north, by real use (27: 90%): {string.Join(" ", north2.Select(f => f.Rwy!.Ident))}");
+    Check(on27 >= 7 && on27 <= 10, $"arrivals shared between the runways as real traffic from their direction used them ({on27} of 10 on 27)");
 }
 
 Console.WriteLine("== Vectors to final: downwind, base, a 20–30° intercept 8–10 nm out (no hairpins, no needless long finals)");

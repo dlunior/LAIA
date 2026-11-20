@@ -25,7 +25,7 @@ public sealed class AirportProfile
     public List<TaxiTrack> Taxi { get; set; } = new();
     /// <summary>What the profile holds: 2 = with taxi tracks; 3 = airline passenger jets only; 4 = three days. Older ones are learned again.</summary>
     public int Version { get; set; }
-    public const int CurrentVersion = 9;   // 9: landings and take-offs seen only well above the runway (KGPI)
+    public const int CurrentVersion = 10;  // 10: arrivals counted by the direction they came from; 9: seen only well above the runway (KGPI)
     // 8: thin flows;   // 7: more days when one flow wasn't seen (KATL);   // 5: landings seen only down to a few hundred feet count (KMCI); 6: arrival samples kept (KMCI)
 
     public sealed class TaxiTrack
@@ -50,6 +50,12 @@ public sealed class AirportProfile
         public int RightDownwinds { get; set; }
         /// <summary>Median altitude (ft) at 10, 20 and 30 nm from the airport.</summary>
         public double[] AltAt { get; set; } = new double[3];
+        /// <summary>
+        /// How many of them came from each direction (12 bins of 30°: the bearing from the airport to where the track
+        /// starts, ~45 nm out) — which runway arrivals from each side really land on (user, 19 Nov: "ADSB can tell us which
+        /// arrivals land on which runways and they should weigh into LAIA's calculations").
+        /// </summary>
+        public int[] FromBearing { get; set; } = new int[12];
     }
 
     public sealed class RunwayDepartures
@@ -106,6 +112,7 @@ public static class TrackLearner
         string source = "", string day = "")
     {
         var arr = new Dictionary<string, List<(double join, double icpt, double dw, double bas, bool left, double[] alt)>>();
+        var fromBin = new Dictionary<string, int[]>();
         var dep = new Dictionary<string, List<List<V2>>>();
         var firstTurn = new Dictionary<string, List<double>>();
         var samples = new List<AirportProfile.SampleTrack>();
@@ -163,6 +170,12 @@ public static class TrackLearner
                     // 15 Nov: 3 lines on the map; it also starved the real-vectors-off-the-STAR rule).
                     var from = Back(tr, i, 1500);
                     Sample("arrival", r.Ident, tr, from < 0 ? 0 : from, i);
+                    var start = xy[from < 0 ? 0 : from];
+                    if (start.Length > 15 * Nm)
+                    {
+                        if (!fromBin.TryGetValue(r.Ident, out var fb)) fromBin[r.Ident] = fb = new int[12];
+                        fb[(int)Math.Floor(Geo2.Norm(start.Bearing) / 30) % 12]++;
+                    }
                 }
                 Taxi("arrival", r.Ident, tr, xy, i, +1);
                 // Skip past this landing (taxi, park).
@@ -230,6 +243,7 @@ public static class TrackLearner
                 BaseNm = Median(vec.Select(x => x.bas).Where(x => !double.IsNaN(x))),
                 LeftDownwinds = vec.Count(x => x.left), RightDownwinds = vec.Count(x => !x.left),
                 AltAt = Enumerable.Range(0, 3).Select(k => Median(l.Select(x => x.alt[k]).Where(v => !double.IsNaN(v)))).ToArray(),
+                FromBearing = fromBin.TryGetValue(rw, out var fbin) ? fbin : new int[12],
             };
         }
         foreach (var (rw, paths) in dep)

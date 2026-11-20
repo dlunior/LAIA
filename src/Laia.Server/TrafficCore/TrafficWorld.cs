@@ -2998,6 +2998,24 @@ public sealed partial class TrafficWorld
                 if (used.Count > 0) serving = used;
             }
         }
+        // Which of these runways real arrivals from this direction land on (the learned tracks, counted by the
+        // direction they came from): shared out in those proportions — a runway gets the next arrival when its queue is
+        // shortest for its real share — when 8 or more real arrivals from about this direction landed on them.
+        var fromBrg = star is { } st0 && EntryFix(st0.p, st0.t) is { } ef ? (double?)Apt.Map.ToXY(ef.Lat, ef.Lon).Bearing : BearingTo(origin);
+        if (serving.Count > 1 && fromBrg is { } fb && Learned is { } lp2)
+        {
+            var bin = (int)Math.Floor(Geo2.Norm(fb) / 30) % 12;
+            double W(int i) => lp2.Arrivals.TryGetValue(list[i].Ident, out var ra) && ra.FromBearing is { Length: 12 } fbs
+                ? fbs[bin] + 0.5 * fbs[(bin + 11) % 12] + 0.5 * fbs[(bin + 1) % 12] : 0;
+            var w = serving.ToDictionary(i => i, W);
+            var tw = w.Values.Sum();
+            if (tw >= 8)
+            {
+                var cand = serving.Where(i => w[i] >= tw * 0.05).ToList();
+                var pickR = cand.OrderByDescending(i => w[i] / tw / (0.5 + Queue(list[i]))).ThenByDescending(i => w[i]).First();
+                return (list[pickR], star);
+            }
+        }
         var side = star is { } st ? SideOf(axis, EntryFix(st.p, st.t)) : BearingTo(origin) is { } b ? V2.Cross(axis, V2.FromBearing(b)) : 0;
         // The STAR's side is a firm preference (user: SNFLD/MUNGI to the east runway, PRICY/GRNCH to the west "9 out of
         // 10 times"), even for a STAR that comes in only a little off the runway axis (SNFLD from the north-north-east
