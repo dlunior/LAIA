@@ -242,11 +242,13 @@ public sealed class AdsbHistory(ILogger<AdsbHistory> log, SettingsStore settings
                     var dl = used.Select(d => d.Day).OrderBy(x => x, StringComparer.Ordinal).ToList();
                     return dl.Count == 1 ? dl[0] : $"{dl[0]}–{dl[^1]} ({dl.Count} days)";
                 }
-                foreach (var d in days.Take(3)) await Add(d);
+                // Two weeks, not three days (user, 19 Nov: "that ADSB data is powerful and we are underutilizing it"):
+                // enough landings from every direction for which runway each really uses, and its real timing.
+                foreach (var d in days.Take(14)) await Add(d);
                 var prof = TrackLearner.Learn(a.Icao, a.Map, a.ElevationFt, a.Ends, tracks, "LAIA Collector", DaysText());
                 if (MissingFlow(prof, a.Ends) is { } miss)
                 {
-                    var extra = days.Skip(3).Where(d => TrackStore.Facing(d.Landings, miss.heading) >= 10)
+                    var extra = days.Skip(14).Where(d => TrackStore.Facing(d.Landings, miss.heading) >= 10)
                         .OrderByDescending(d => TrackStore.Facing(d.Landings, miss.heading)).Take(4).ToList();
                     log.LogInformation("{icao}: {miss}; {n} stored day(s) have landings that way", a.Icao, miss.text, extra.Count);
                     if (extra.Count > 0)
