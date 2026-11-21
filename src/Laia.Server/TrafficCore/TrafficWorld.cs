@@ -79,6 +79,7 @@ public sealed class Flight
     public double VectorRejoinS = double.NegativeInfinity;
     public int DelayVectors, RwySwitches;
     public string? HoldWhy; public bool HoldWhyLogged;
+    public double RunwayStopFor;
     /// <summary>Departures: its number in its runway's departure order (0 when not in it: at the gate, boarding).</summary>
     public int DepSeq;
     /// <summary>Seconds its current delay vectors add (cleared when its route is built again); the planner counts
@@ -543,14 +544,20 @@ public sealed partial class TrafficWorld
         List<RunwayEnd> Map(IEnumerable<string> ids) => ids.Select(id => usable.FirstOrDefault(e => e.Ident == id)).Where(e => e is not null).Select(e => e!).Distinct().ToList();
         var la = Level == TrafficLevel.Peak ? new List<RunwayEnd>() : Map(LiveLanding);
         var ld = Level == TrafficLevel.Peak ? new List<RunwayEnd>() : Map(LiveDeparting);
-        bool Ok(RunwayEnd e) => Wind.Kt < 4 || (Wind.Headwind(e.Heading) >= -10 && Crosswind(e.Heading) <= 25);
+        // Tailwind up to 5 kt (7 for one already in use, so the wind wavering at the limit doesn't turn the airport round
+        // and back: 21 Nov, KATL Peak flipped west → east → west at 060–070° 10–12 kt with a 10 kt limit, each flip
+        // followed by break-offs and a ground jam).
+        bool Ok(RunwayEnd e) => Wind.Kt < 4 || (Wind.Headwind(e.Heading) >= (ArrRwys.Contains(e) || DepRwys.Contains(e) ? -7 : -5) && Crosswind(e.Heading) <= 25);
         List<RunwayEnd> Top(IEnumerable<(string id, int n)> counts)
         {
             var c = counts.Select(x => (e: usable.FirstOrDefault(u => u.Ident == x.id), x.n)).Where(x => x.e is not null && Ok(x.e!) && x.n >= 3)
                 .OrderByDescending(x => x.n).ThenByDescending(x => Wind.Headwind(x.e!.Heading)).ToList();
             if (c.Count == 0) return new();
             var top = c[0];
-            return c.Where(x => x.e == top.e || (x.n * 4 >= top.n && Math.Abs(Geo2.Diff(x.e!.Heading, top.e!.Heading)) < 30)).Select(x => x.e!).ToList();
+            // Peak replays the busiest hours: a runway with a tenth of the main one's traffic that way joins (KATL 10/28,
+            // about 20% of 08L's and 13% of 26R's — the third arrival runway of the rushes); otherwise a quarter.
+            var share = Level == TrafficLevel.Peak ? 10 : 4;
+            return c.Where(x => x.e == top.e || (x.n * share >= top.n && Math.Abs(Geo2.Diff(x.e!.Heading, top.e!.Heading)) < 30)).Select(x => x.e!).ToList();
         }
         if (la.Count > 0 || ld.Count > 0)
         {
@@ -600,9 +607,12 @@ public sealed partial class TrafficWorld
 
     // ------------------------------------------------------------------ main step
 
+    private double _userMovedAt = -1e9;
+
     public void Step(double dt)
     {
         Time += dt;
+        if (UserPos is not null && (!UserOnGround || UserGs > 3)) _userMovedAt = Time;
         if (!HoldRunways && (ArrRwy is null || Time - _lastRunwayCheck > 120)) { SelectRunways(); _lastRunwayCheck = Time; }
         UpdateTaxiFlow();
         foreach (var f in Flights)
@@ -5484,6 +5494,20 @@ public sealed partial class TrafficWorld
     /// </summary>
     private void Unstick(Flight f, double dt)
     {
+        // Never stopped on a runway while taxiing (a crossing, a turn-off): after 45 s it moves on past everything on
+        // the ground in its way, and the log says so.
+        if (f.OnGround && f.OnRunway >= 0 && f.Gs < 0.5 && f.Phase is "taxi in" or "taxi")
+        {
+            f.RunwayStopFor += dt;
+            if (f.RunwayStopFor > 45 && Time > f.IgnoreUntil)
+            {
+                f.IgnoreAll = Flights.Where(o => o != f && o.OnGround && !o.Done).ToHashSet();
+                f.IgnoreUntil = Time + 60;
+                Log($"{f.Callsign}: WARNING stopped on runway {Apt.Ends.FirstOrDefault(e => e.Runway == f.OnRunway)?.Ident} for {f.RunwayStopFor:0} s{(f.BlockedBy is { } bb ? $" behind {bb.Callsign}" : "")}; moving on off it");
+                f.RunwayStopFor = 0;
+            }
+        }
+        else f.RunwayStopFor = 0;
         var atHold = f.Stops.Any(st => !st.Cleared && Math.Abs(st.S - f.S) < 3);
         if (f.Gs > 0.5 || atHold || InQueue(f)) { f.StuckFor = 0; return; }
         f.StuckFor += dt;
@@ -5499,7 +5523,9 @@ public sealed partial class TrafficWorld
         }
         // Waiting behind the user isn't stuck: the user will move (20 Nov, KLAS: SWA2107 removed behind the user in the
         // departure queue). The user can remove one from the map if it's really stuck.
-        if (f.StuckFor > 300 && !f.BlockedByUser)
+        // ... while the user is moving: a user parked at a gate for the night is a fixed obstacle (21 Nov, KATL: DAL2978
+        // waited an hour behind the parked user, and six behind it were removed).
+        if (f.StuckFor > 300 && !(f.BlockedByUser && Time - _userMovedAt < 180))
         {
             Log($"{f.Callsign}: stuck for 5 minutes at ({f.Pos.X:0}, {f.Pos.Y:0}), blocked by {f.BlockedBy?.Callsign ?? (f.BlockedByUser ? "your aircraft" : "nothing")}; removed");
             f.Done = true;
@@ -5690,7 +5716,10 @@ public sealed partial class TrafficWorld
         var ring = Ring(f);
         if (ring is not null)
         {
-            var oldest = ring.OrderBy(x => x.Id, StringComparer.Ordinal).First();
+            // One on a runway always goes first (21 Nov, KATL: DAL330 crossing 08R after landing and DAL2952 waiting to
+            // depart from it each waited for the other; DAL2952, the older, "went first" but couldn't line up with DAL330
+            // on the runway — 08R had no departures for nearly three hours).
+            var oldest = ring.FirstOrDefault(x => x.OnRunway >= 0) ?? ring.OrderBy(x => x.Id, StringComparer.Ordinal).First();
             if (f != oldest && f.BlockedFor > 8 && Time - f.RerouteTime > 60)
             {
                 f.RerouteTime = Time;
