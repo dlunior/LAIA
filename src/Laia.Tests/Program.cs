@@ -1925,7 +1925,7 @@ Console.WriteLine("== M6: learning an airport from real tracks (synthetic adsb.l
 
 Console.WriteLine("== No ATIS: real traffic picks the runways before the wind (live first, then the learned day)");
 {
-    var world = new TrafficWorld(new AirportModel(TestAirport.Build(false)), new TestSource(), seed: 2) { Automatic = false, Wind = new Wind(100, 6) };
+    var world = new TrafficWorld(new AirportModel(TestAirport.Build(false)), new TestSource(), seed: 2) { Automatic = false, Wind = new Wind(100, 5) };
     var log = new List<string>(); world.Log = s2 => log.Add(s2);
     world.SelectRunways(true);
     var byWind = world.ArrRwy!.Ident;
@@ -1939,7 +1939,7 @@ Console.WriteLine("== No ATIS: real traffic picks the runways before the wind (l
     world.LiveLanding = new() { "09" }; world.LiveDeparting = new() { "09" };
     world.SelectRunways(true);
     var byLive = world.ArrRwy!.Ident;
-    Console.WriteLine($"  wind 100/6: by wind {byWind}; learned day (27 most used) {byLearned}; live traffic on 09 {byLive}");
+    Console.WriteLine($"  wind 100/5: by wind {byWind}; learned day (27 most used) {byLearned}; live traffic on 09 {byLive}");
     foreach (var x in log.Where(x => x.StartsWith("Runways in use")).TakeLast(2)) Console.WriteLine("  " + x);
     Check(byWind == "09" && byLearned == "27" && byLive == "09" && world.DepRwy!.Ident == "09", "the learned day beats a light wind; live traffic beats both");
 }
