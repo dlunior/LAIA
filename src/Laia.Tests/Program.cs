@@ -938,6 +938,71 @@ Console.WriteLine("== Vectors off the STAR where real traffic is turned off it (
     Check(hN.Route.Contains("NORTH1") && hN.Route.Contains("real traffic") && hDw < 1.5 * nm, "from the end of a STAR no real track flew, the way real arrivals passing there flew on");
 }
 
+Console.WriteLine("== Real tracks chosen for the need: an empty sky gets the short way real controllers give when quiet (21 Nov, AMZ3838)");
+{
+    var nm = Geo2.MPerNm;
+    var data = TestAirport.Build(false);
+    data.Arrivals.Clear();
+    var map = new LocalMap(data.Lat, data.Lon);
+    Laia.Common.Airports.ProcedureLeg Fx(string name, double xNm, double yNm, int type)
+    {
+        var (la, lo) = map.ToLatLon(new V2(xNm * nm, yNm * nm));
+        return new() { Type = type, Fix = name, Lat = la, Lon = lo };
+    }
+    data.Arrivals.Add(new() { Name = "NEAST1", Legs = { Fx("NEAAA", 20, 30, 15), Fx("NEBBB", 12, 12, 18), Fx("NECCC", 14, 6, 18) } });
+    double[] P(double x, double y) { var (la, lo) = map.ToLatLon(new V2(x * nm, y * nm)); return new[] { la, lo, 6000 }; }
+    var prof = new AirportProfile { Icao = "TEST", Source = "test", Day = "test" };
+    // Six short ways in, flown at quiet times (2 h apart): off at NEBBB, straight down to a short base, final 10 nm out.
+    // Six long ones, flown in a rush (2 min apart): off at NEBBB onto a downwind 5 nm north, base 20 nm east.
+    for (var k = 0; k < 12; k++)
+    {
+        var quiet = k < 6; var v = (k % 6) * 0.1;
+        var pts = new List<double[]>();
+        for (var t = 0.0; t <= 1; t += 0.05) pts.Add(P(20 - 8 * t, 30 - 18 * t));
+        if (quiet)
+        {
+            for (var y = 11.0; y >= 4; y -= 1) pts.Add(P(12 + v, y));
+            pts.Add(P(11, 1.5)); pts.Add(P(10, 0.2));
+            for (var x = 9.0; x >= 1.5; x -= 1) pts.Add(P(x, 0));
+        }
+        else
+        {
+            for (var t = 0.1; t <= 1; t += 0.1) pts.Add(P(12 + 8 * t, 12 - (7 + v) * t));
+            for (var y = 4.0; y >= 1; y -= 1) pts.Add(P(20, y));
+            for (var x = 19.0; x >= 1.5; x -= 1) pts.Add(P(x, 0));
+        }
+        prof.Samples.Add(new AirportProfile.SampleTrack { Kind = "arrival", Runway = "27", Points = pts, T = quiet ? 1_000_000 + k * 7200 : 2_000_000 + k * 120 });
+    }
+    var world = new TrafficWorld(new AirportModel(data), new TestSource(), seed: 43) { Automatic = false, Wind = new Wind(270, 5), Learned = prof };
+    world.SelectRunways(true);
+    var f = world.SpawnArrival(40, true)!;
+    double Near(V2 at) { var d = double.MaxValue; for (var s0 = 0.0; s0 < f.Path!.Length; s0 += 200) d = Math.Min(d, (f.Path.At(s0).p - at).Length); return d / nm; }
+    Console.WriteLine($"  alone: {f.Route}; {Near(new V2(12 * nm, 4 * nm)):0.0} nm from the quiet short base, {Near(new V2(20 * nm, 5 * nm)):0.0} nm from the rush downwind");
+    Check(f.Route.Contains("real traffic") && Near(new V2(12 * nm, 4 * nm)) < 1.5 && Near(new V2(20 * nm, 5 * nm)) > 4, "alone, it takes the short way real traffic was given when quiet");
+    // Smoothing: no turn sharper than an airliner flies on it.
+    var maxRate = 0.0; double? pb = null;
+    for (var s0 = 0.0; s0 + 200 < f.Path!.Length; s0 += 200)
+    {
+        var b = (f.Path.At(s0 + 200).p - f.Path.At(s0).p).Bearing;
+        if (pb is { } p0) maxRate = Math.Max(maxRate, Math.Abs(Geo2.Diff(b, p0)));
+        pb = b;
+    }
+    Console.WriteLine($"  sharpest change of direction along its path: {maxRate:0}° per 200 m");
+    Check(maxRate < 20, "its real-traffic path turns smoothly");
+    // One right behind it with time to lose takes a longer real way in (before vectors).
+    var logR = new List<string>(); world.Log = l => logR.Add(l);
+    var g2 = world.SpawnArrival(37, true)!;
+    for (var t = 0.0; t < 240; t += 0.5) world.Step(0.5);
+    Console.WriteLine($"  two together: {string.Join(" | ", logR.Where(l => l.Contains("real track") || l.Contains("for the sequence")).Take(3).Select(l => l.Length > 140 ? l[..140] : l))}");
+    var second = f.Seq > g2.Seq ? f : g2;
+    Check(logR.Any(l => l.StartsWith(second.Callsign + ":") && l.Contains("longer real track")) && second.FanIdx > 0, $"the one behind ({second.Callsign}), with time to lose, is put on a longer real way in");
+    // Simplify and TotalTurn (used for the departures' loop check).
+    var zig = new List<V2>(); for (var i = 0; i < 20; i++) zig.Add(new V2(i * nm, (i % 2) * 0.1 * nm));
+    Check(TrafficWorld.Simplify(zig, 0.25 * nm).Count == 2, "a wiggling line within a quarter mile simplifies to a straight leg");
+    var loop = new List<V2>(); for (var a = 0; a <= 380; a += 20) loop.Add(V2.FromBearing(a, 3 * nm) + new V2(0, 0));
+    Check(TrafficWorld.TotalTurn(loop, 25 * nm) > 300, "a loop is measured as one");
+}
+
 Console.WriteLine("== Airport rules read from the FAA's AAUP text (any airport, no airport-specific code)");
 {
     // The text of Orlando's RNAV Departure AAUP (AL-571), as a PDF text extractor gives it.

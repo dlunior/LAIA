@@ -455,7 +455,9 @@ public sealed partial class TrafficWorld
         if (RealConfig(usable) is { } rc)
         {
             var differs = !ArrRwys.SequenceEqual(rc.arr) || !DepRwys.SequenceEqual(rc.dep);
-            if (differs && ArrRwys.Count > 0 && rc.why.Contains("live traffic"))
+            // Back from live traffic to the learned days counts too (21 Nov, CYUL: learned 24L/24R → live 24R → learned
+            // 24L/24R eight minutes later, while the user sat at the gate).
+            if (differs && ArrRwys.Count > 0 && (rc.why.Contains("live traffic") || _rwyFromLive))
             {
                 // Live traffic flickers between configurations (CYYC, 13 Nov: 17R → 17R+17L → 17L → 17L+17R in 4 minutes,
                 // as the last few arrivals happened to use one or the other). A change from it must be seen for 10
@@ -465,7 +467,7 @@ public sealed partial class TrafficWorld
                 if (!force && (Time - _livePendingSince < 600 || Time - _lastRunwayChange < 1200)) return;
             }
             if (differs && !force && UserRunwayHeld(rc.arr)) return;
-            if (differs) { _lastRunwayChange = Time; _livePendingSig = ""; }
+            if (differs) { _lastRunwayChange = Time; _livePendingSig = ""; _rwyFromLive = rc.why.Contains("live traffic"); }
             if (!ArrRwys.SequenceEqual(rc.arr) || !DepRwys.SequenceEqual(rc.dep))
                 Log($"Runways in use at {Apt.Icao}: landing {string.Join(", ", rc.arr.Select(e => e.Ident))}, departing {string.Join(", ", rc.dep.Select(e => e.Ident))} ({rc.why}; wind {Wind.FromDeg:000} at {Wind.Kt:0} kt)");
             ArrRwys = rc.arr; DepRwys = rc.dep; ArrRwy = rc.arr[0]; DepRwy = rc.dep[0];
@@ -534,6 +536,8 @@ public sealed partial class TrafficWorld
     /// use the same runways); otherwise the learned day's most used runways among those not out of limits in today's
     /// wind (tailwind up to 10 kt, crosswind 25), with parallels used at least a quarter as much. Null when neither.
     /// </summary>
+    private bool _rwyFromLive;
+
     private (List<RunwayEnd> arr, List<RunwayEnd> dep, string why)? RealConfig(List<RunwayEnd> usable)
     {
         List<RunwayEnd> Map(IEnumerable<string> ids) => ids.Select(id => usable.FirstOrDefault(e => e.Ident == id)).Where(e => e is not null).Select(e => e!).Distinct().ToList();
@@ -1261,7 +1265,9 @@ public sealed partial class TrafficWorld
                 // 119 nm out at 30 ft, just off the ground, and flown there at 30 ft until it went around 12 nm out).
                 // Far out (150 nm+), until it's at its cruise level (20 Nov, KATL: SWA3224 taken over 342 nm out at 9,840 ft
                 // still climbing, flew the rest level at 9,840 and crossed STRDR "at or above 24,000" 14,000 ft low).
-                if (dist > 25 && np.Phase == "climbing" && np.AltFt < (dist > 150 ? np.CruiseFt : Math.Min(10000, np.CruiseFt)) - 200) continue;
+                // Beyond 100 nm not while it's still climbing at all (21 Nov, KORD: AMZ3838 taken over exactly 150 nm out at
+                // 29,420 ft climbing — the "beyond 150" rule never applied to short flights, picked up right at 150).
+                if (dist > 25 && np.Phase == "climbing" && (dist > 100 || np.AltFt < Math.Min(10000, np.CruiseFt) - 200)) continue;
                 _done.Add(Key(l, 'A'));
                 if (dist > 12 && SpawnFromNetwork(l, np) is not null) { active++; Movements++; }
             }
@@ -1438,7 +1444,9 @@ public sealed partial class TrafficWorld
                 // has reached 10,000 ft (or its cruise level, if lower) — ATC here doesn't own its take-off.
                 // Far out (150 nm+), until it's at its cruise level (20 Nov, KATL: SWA3224 taken over 342 nm out at 9,840 ft
                 // still climbing, flew the rest level at 9,840 and crossed STRDR "at or above 24,000" 14,000 ft low).
-                if (dist > 25 && np.Phase == "climbing" && np.AltFt < (dist > 150 ? np.CruiseFt : Math.Min(10000, np.CruiseFt)) - 200) continue;
+                // Beyond 100 nm not while it's still climbing at all (21 Nov, KORD: AMZ3838 taken over exactly 150 nm out at
+                // 29,420 ft climbing — the "beyond 150" rule never applied to short flights, picked up right at 150).
+                if (dist > 25 && np.Phase == "climbing" && (dist > 100 || np.AltFt < Math.Min(10000, np.CruiseFt) - 200)) continue;
                 if (dist > 25)
                 {
                     if (_retryAt.TryGetValue(Key(l, 'A'), out var ra) && Time < ra) continue;
@@ -2514,20 +2522,30 @@ public sealed partial class TrafficWorld
         }
         // Radar-vector departures as the airport's controllers really give them (M6): the typical path off this
         // runway towards the flight's direction, learned from real tracks, from where the SID (if any) leaves off.
-        if (vectors && LearnedDeparture(rwy, BearingTo(f.Other) ?? rwy.Heading) is { Count: > 2 } lp)
+        if (vectors && LearnedDeparture(rwy, BearingTo(f.Other) ?? rwy.Heading) is { Count: > 2 } lp0)
         {
+            // Smoothed: the learned path is a median position every nm, and a thin or mixed direction bin wiggles.
+            var lp = Simplify(lp0, 0.3 * Geo2.MPerNm);
             var from = pts[^1].P;
             var k = 0; var best = double.MaxValue;
             for (var i = 0; i < lp.Count; i++) { var d = (lp[i] - from).Length; if (d < best && lp[i].Length > from.Length - 500) { best = d; k = i; } }
+            var keep = pts.Count;
             foreach (var q in lp.Skip(k + 1)) if (q.Length > from.Length) pts.Add(new AirPoint(q, ""));
-            if (f.DepRoute.Length == 0) f.DepRoute = "vectors";
+            // Never a loop (21 Nov, KORD: KAL233 off 27C for Seattle "turns 365° in its first 25 nm"): a learned path
+            // that turns through more than 200° is dropped for the plain turn towards the destination below.
+            if (TotalTurn(pts.Select(p => p.P).ToList(), 25 * Geo2.MPerNm) > 200) pts.RemoveRange(keep, pts.Count - keep);
+            else if (f.DepRoute.Length == 0) f.DepRoute = "vectors";
         }
         if (pts.Count <= 2)
         {
-            var straight = rwy.FarEnd + rwy.Dir * (5 * Geo2.MPerNm);
+            var straight = rwy.FarEnd + rwy.Dir * (4 * Geo2.MPerNm);
             pts.Add(new AirPoint(straight, ""));
-            var turn = Geo2.Norm(rwy.Heading + (Rng.NextDouble() < 0.5 ? -1 : 1) * (30 + Rng.NextDouble() * 60));
+            // Towards the destination (at most 120° each way off the runway heading), else a turn out of 30–90°.
+            var turn = BearingTo(f.Other) is { } bt
+                ? Geo2.Norm(rwy.Heading + Math.Clamp(Geo2.Diff(bt, rwy.Heading), -120, 120))
+                : Geo2.Norm(rwy.Heading + (Rng.NextDouble() < 0.5 ? -1 : 1) * (30 + Rng.NextDouble() * 60));
             pts.Add(new AirPoint(straight + V2.FromBearing(turn, 25 * Geo2.MPerNm), ""));
+            if (f.DepRoute.Length == 0) f.DepRoute = "vectors";
         }
         f.DepPlan = pts;
         // The course about 4 nm after the runway end (for diverging-departure spacing).
@@ -3367,7 +3385,7 @@ public sealed partial class TrafficWorld
             f.Fan = null;
             if (fan is { Count: >= 3 })
             {
-                if (f.FanKey != fanKey) { f.FanKey = fanKey; f.FanIdx = fan.Count / 2; }
+                if (f.FanKey != fanKey) { f.FanKey = fanKey; f.FanIdx = _fanQuiet; }
                 f.FanIdx = Math.Clamp(f.FanIdx, 0, fan.Count - 1);
                 var cutT = fan[f.FanIdx].cut - trimmed;
                 if (cutT >= 0 && cutT < starPts.Count)
@@ -3622,6 +3640,7 @@ public sealed partial class TrafficWorld
             }
             if (rest.Count < 2 || Math.Abs(rwy.Offset(rest[^1])) >= 0.3 * nm) continue;
             found.Add((pts[lastOn].Length / nm, pts[lastOn], rest));
+            _fanBusy[rest] = Busy(prof, smp.T);
         }
         // Only the ordinary ways in (user, 19 Nov: WYNDE3 arrivals put on downwinds "no ADS-B track even comes close to
         // doing"; the fan ran from 41 to 113 nm): no track that loops (a hold, a 360, a go-around: turning through more
@@ -3644,13 +3663,45 @@ public sealed partial class TrafficWorld
         if (found.Count < 3) return null;
         var lens = found.Select(x => Len(x.rest)).OrderBy(x => x).ToList();
         var med = lens[lens.Count / 2];
-        found = found.Where(x => Len(x.rest) is var lx && lx >= med * 0.6 && lx <= med * 1.35).ToList();
+        // Much longer than usual is a hold or a loop; short is kept down to a third of the usual — at a busy airport most
+        // real tracks are rush-hour ones, and the quiet-time shortcuts are what an empty sky should get (the repeat check
+        // below takes out one-offs).
+        found = found.Where(x => Len(x.rest) is var lx && lx >= med * 0.35 && lx <= med * 1.35).ToList();
+        // Patterns real controllers used again and again, not one aircraft's one-off (user, 21 Nov: "not just any route
+        // it sees willy nilly"): with six or more, each needs another that left the STAR within 3 nm of it and was
+        // within 10% of its length.
+        if (found.Count >= 6)
+        {
+            var all = found;
+            found = found.Where(x => all.Any(o => !ReferenceEquals(o.rest, x.rest) && (o.leave - x.leave).Length < 3 * nm
+                && Math.Abs(Len(o.rest) - Len(x.rest)) < 0.1 * Len(x.rest))).ToList();
+        }
         if (found.Count < 3) return null;
         _fanFound = found.OrderBy(x => x.leaveNm).ToList();
         var typical = _fanFound[_fanFound.Count / 2];
         return Fanned(typical, star);
     }
     private List<(double leaveNm, V2 leave, List<V2> rest)>? _fanFound;
+    private readonly Dictionary<List<V2>, int> _fanBusy = new(ReferenceEqualityComparer.Instance);
+    private object? _busyFor; private double[] _busyT = Array.Empty<double>();
+
+    /// <summary>How busy it was when a real arrival landed: the real arrivals (any runway) within 15 minutes of it.</summary>
+    private int Busy(AirportProfile prof, double t)
+    {
+        if (!ReferenceEquals(_busyFor, prof))
+        {
+            _busyFor = prof;
+            _busyT = prof.Samples.Where(x => x.Kind == "arrival" && x.T > 0).Select(x => x.T).OrderBy(x => x).ToArray();
+        }
+        if (t <= 0 || _busyT.Length == 0) return 0;
+        int Lower(double v) { int lo = 0, hi = _busyT.Length; while (lo < hi) { var m = (lo + hi) / 2; if (_busyT[m] < v) lo = m + 1; else hi = m; } return lo; }
+        return Math.Max(0, Lower(t + 900.001) - Lower(t - 900) - 1);
+    }
+
+    /// <summary>The fan track to start an arrival on when nothing yet asks for delay: the shortest of those flown when
+    /// real traffic was quiet (the lower half by how busy it was) — the way in controllers give when the sky is empty
+    /// (user, 21 Nov, AMZ3838 at 3 am on the typical daytime downwind). Longer tracks come from the sequence's need.</summary>
+    private int _fanQuiet;
 
     /// <summary>
     /// A point on a real track, with no higher than real traffic to this runway flies there as its ceiling (user, 19 Nov:
@@ -3740,7 +3791,7 @@ public sealed partial class TrafficWorld
             cands.Add((len, rest));
         }
         if (cands.Count < 3) return null;
-        return cands.OrderBy(c => c.len).ElementAt(cands.Count / 2).rest;
+        return Simplify(cands.OrderBy(c => c.len).ElementAt(cands.Count / 2).rest, 0.25 * nm);
     }
 
     private object? _dirXyFor;
@@ -3756,7 +3807,9 @@ public sealed partial class TrafficWorld
         var thin = new List<V2>();
         foreach (var q in tr.rest) if (thin.Count == 0 || (q - thin[^1]).Length >= 1 * nm) thin.Add(q);
         if ((tr.rest[^1] - thin[^1]).Length > 1) thin.Add(tr.rest[^1]);
-        return (cut, thin);
+        // Clean legs (user, 21 Nov, AMZ3838's winding base-to-final): one real aircraft's small heading changes and the
+        // radar noise taken out — the shape stays (downwind, base, intercept), turns are flown at the aircraft's radius.
+        return (cut, Simplify(thin, 0.25 * nm));
     }
 
     /// <summary>
@@ -3769,7 +3822,7 @@ public sealed partial class TrafficWorld
         if (RealVectors(rwy, starPts) is null || _fanFound is not { Count: >= 3 } found) return null;
         var star = starPts.Select(p => p.P).ToList();
         var nm = Geo2.MPerNm;
-        var res = new List<(int cut, List<V2> pts, double lenNm)>();
+        var res = new List<(int cut, List<V2> pts, double lenNm, int busy)>();
         var n = Math.Min(15, found.Count);
         for (var i = 0; i < n; i++)
         {
@@ -3780,9 +3833,12 @@ public sealed partial class TrafficWorld
             var prev = star[Math.Min(cut, star.Count - 1)];
             foreach (var q in pts) { len += (q - prev).Length; prev = q; }
             len += -rwy.Along(prev);
-            res.Add((cut, pts, len / nm));
+            res.Add((cut, pts, len / nm, _fanBusy.TryGetValue(tr.rest, out var bz) ? bz : 0));
         }
-        return res.OrderBy(x => x.lenNm).ToList();
+        res = res.OrderBy(x => x.lenNm).ToList();
+        var medB = res.Select(x => x.busy).OrderBy(x => x).ElementAt(res.Count / 2);
+        _fanQuiet = Math.Max(0, res.FindIndex(x => x.busy <= medB));
+        return res.Select(x => (x.cut, x.pts, x.lenNm)).ToList();
     }
 
     /// <summary>The final approach from where a real-vectors path is established on it: the runway's approach points
@@ -4106,6 +4162,39 @@ public sealed partial class TrafficWorld
         var summary = checkedN == 0 ? "not enough real tracks for the runways in use"
             : $"{checkedN} SIDs/STARs checked; {differ} SID{(differ == 1 ? "" : "s")} more than 0.5 nm from the real tracks" + (worst.Length > 0 ? $" (worst: {worst})" : "");
         return (summary, lines);
+    }
+
+    /// <summary>A line simplified (Ramer–Douglas–Peucker): points within tol of the straight line between their
+    /// neighbours dropped, the ends kept. Takes the wiggles out of real tracks so they fly as clean legs.</summary>
+    public static List<V2> Simplify(List<V2> pts, double tol)
+    {
+        if (pts.Count < 3) return new List<V2>(pts);
+        var keep = new bool[pts.Count]; keep[0] = keep[^1] = true;
+        var stack = new Stack<(int a, int b)>(); stack.Push((0, pts.Count - 1));
+        while (stack.Count > 0)
+        {
+            var (a, b) = stack.Pop();
+            int idx = -1; double md = tol;
+            for (var i = a + 1; i < b; i++) { var d = DistToSegment(pts[i], pts[a], pts[b]); if (d > md) { md = d; idx = i; } }
+            if (idx < 0) continue;
+            keep[idx] = true; stack.Push((a, idx)); stack.Push((idx, b));
+        }
+        return pts.Where((_, i) => keep[i]).ToList();
+    }
+
+    /// <summary>How far a line turns in all (degrees) over its first lenM metres.</summary>
+    public static double TotalTurn(List<V2> pts, double lenM)
+    {
+        double t = 0, run = 0; double? prev = null;
+        for (var i = 1; i < pts.Count && run < lenM; i++)
+        {
+            var seg = pts[i] - pts[i - 1];
+            run += seg.Length;
+            if (seg.Length < 300) continue;
+            if (prev is { } pb) t += Math.Abs(Geo2.Diff(seg.Bearing, pb));
+            prev = seg.Bearing;
+        }
+        return t;
     }
 
     private static double DistToSegment(V2 p, V2 a, V2 b)
