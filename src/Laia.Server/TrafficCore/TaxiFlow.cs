@@ -24,6 +24,8 @@ public sealed class TaxiFlow
     private readonly HashSet<(int, int)> _inner = new(), _outer = new();
     private readonly HashSet<(int, int)> _against = new();
     private readonly HashSet<(int, int)> _depOnly = new(), _arrOnly = new();   // real tracks: only that kind uses it
+    private readonly Dictionary<(int, int), int> _use = new();   // real aircraft over each stretch's edges (both ways)
+    private double _useMed = double.MaxValue;
     public int RealStretches { get; private set; }
     /// <summary>The full flow (rehearsed and directions decided), not just the quick parallel preference.</summary>
     public bool Full { get; private set; }
@@ -45,6 +47,13 @@ public sealed class TaxiFlow
         double c = 0;
         if (inbound ? _outer.Contains((u, v)) || _depOnly.Contains((u, v)) : _inner.Contains((u, v)) || _arrOnly.Contains((u, v))) c += len * 0.5;
         if (_against.Contains((u, v))) c += len * 1.5;
+        // Where real aircraft taxi (user, 21 Nov): a stretch real traffic uses a lot costs less, one it never uses
+        // (with plenty of real tracks learned) more.
+        if (RealTracks >= 200)
+        {
+            if (_use.TryGetValue((u, v), out var n)) { if (n >= _useMed) c -= len * 0.3; }
+            else c += len * 0.3;
+        }
         return c;
     }
 
@@ -201,6 +210,7 @@ public sealed class TaxiFlow
             if (isReal)
             {
                 f.RealStretches++;
+                for (var i = 0; i + 1 < nodes.Count; i++) { f._use[(nodes[i], nodes[i + 1])] = (int)(o.f + o.b); f._use[(nodes[i + 1], nodes[i])] = (int)(o.f + o.b); }
                 if (Math.Max(o.f, o.b) / (o.f + o.b) >= 0.75) forward = o.f >= o.b;
                 deps = Use(o.dep, o.arr);
                 // What really uses it overrides the inner/outer guess.
@@ -241,6 +251,8 @@ public sealed class TaxiFlow
             f.OneWay++;
             oneWay.Add((name, len, (pts[^1] - pts[0]).Bearing, deps, isReal ? Math.Max(o.f, o.b) : 0, isReal ? Math.Min(o.f, o.b) : 0, isReal));
         }
+
+        if (f._use.Count > 0) f._useMed = f._use.Values.OrderBy(x => x).ElementAt(f._use.Count / 2);
 
         // ---- the log line: one entry per taxiway and direction
         string Compass(double b) => new[] { "northbound", "northeastbound", "eastbound", "southeastbound", "southbound", "southwestbound", "westbound", "northwestbound" }[(int)Math.Round(Geo2.Norm(b) / 45) % 8];

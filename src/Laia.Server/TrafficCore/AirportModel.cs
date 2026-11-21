@@ -270,7 +270,10 @@ public sealed class AirportModel
                 // one parallel instead of hopping across to the other one and back (user, MCO) — the shortest route
                 // that a controller would give ("taxi via A, B"), not the geometric shortest.
                 if (came.TryGetValue(u, out var inName) && inName.Length > 0 && e.Name.Length > 0 && !e.Name.Equals(inName, StringComparison.OrdinalIgnoreCase)) cost += 200;
-                if (NodeRunway[v] >= 0 && avoidRunways is not null && avoidRunways.Contains(NodeRunway[v])) cost += 400; // crossing an active runway
+                // Crossing a runway in use costs about the wait a crossing takes at a busy airport (a minute or two), so an
+                // end-around taxiway can win (user, 21 Nov: "no one is using the V and W loops at ATL"; DAL330's 08R
+                // crossing jammed the runway for hours).
+                if (NodeRunway[v] >= 0 && avoidRunways is not null && avoidRunways.Contains(NodeRunway[v]) && NodeRunway[u] != NodeRunway[v]) cost += 900;
                 if (extra is not null) cost += extra(u, v, e.Len);
                 var nd = dist[u] + cost;
                 if (dist.TryGetValue(v, out var old) && old <= nd) continue;

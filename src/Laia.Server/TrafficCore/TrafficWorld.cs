@@ -3036,7 +3036,7 @@ public sealed partial class TrafficWorld
         // arrivals to the listed runways, with 30 or more learned, it isn't given arrivals while another one is in use.
         if (serving.Count > 1 && Learned is { Samples.Count: > 0 } lp)
         {
-            var real = serving.ToDictionary(i => i, i => lp.Samples.Count(sm => sm.Kind == "arrival" && sm.Runway == list[i].Ident));
+            var real = serving.ToDictionary(i => i, i => lp.Arrivals.TryGetValue(list[i].Ident, out var ra) ? ra.Count : 0);
             var tot = real.Values.Sum();
             if (tot >= 30)
             {
@@ -3048,14 +3048,12 @@ public sealed partial class TrafficWorld
         // direction they came from): shared out in those proportions — a runway gets the next arrival when its queue is
         // shortest for its real share — when 8 or more real arrivals from about this direction landed on them.
         var fromBrg = star is { } st0 && EntryFix(st0.p, st0.t) is { } ef ? (double?)Apt.Map.ToXY(ef.Lat, ef.Lon).Bearing : BearingTo(origin);
-        if (serving.Count > 1 && fromBrg is { } fb && Learned is { } lp2)
+        // By the STAR it flies first (real arrivals on that STAR), else by direction.
+        if (serving.Count > 1 && RealWeights(serving.Select(i => list[i]).ToList(), star?.p.Name, fromBrg) is { } rwW)
         {
-            var bin = (int)Math.Floor(Geo2.Norm(fb) / 30) % 12;
-            double W(int i) => lp2.Arrivals.TryGetValue(list[i].Ident, out var ra) && ra.FromBearing is { Length: 12 } fbs
-                ? fbs[bin] + 0.5 * fbs[(bin + 11) % 12] + 0.5 * fbs[(bin + 1) % 12] : 0;
-            var w = serving.ToDictionary(i => i, W);
+            var w = serving.ToDictionary(i => i, i => rwW.GetValueOrDefault(list[i]));
             var tw = w.Values.Sum();
-            if (tw >= 8)
+            if (tw > 0)
             {
                 var cand = serving.Where(i => w[i] >= tw * 0.05).ToList();
                 var pickR = cand.OrderByDescending(i => w[i] / tw / (0.5 + Queue(list[i]))).ThenByDescending(i => w[i]).First();
@@ -4672,9 +4670,13 @@ public sealed partial class TrafficWorld
         foreach (var f in arrs.Where(x => !Movable(x)).OrderBy(x => x.EtaNominal))
             if (book.ContainsKey(f.Rwy!.Runway)) Book(f, f.Rwy.Runway, f.EtaNominal);
         if (UserArr is { Rwy: { } urw } u && book.ContainsKey(urw.Runway) && !double.IsNaN(u.EtaNominal)) Book(u, urw.Runway, u.EtaNominal);
+        // An arrival's first plan is its runway, not a change (21 Nov, KATL Peak: 52 "changes" for 54 landings — nearly
+        // every one the planner's first look at an arrival just taken over far out).
+        var firstPlan = arrs.Where(x => !x.Planned).ToHashSet();
         foreach (var f in arrs) f.Planned = true;
         foreach (var f in arrs.Where(Movable).OrderBy(x => x.EtaNominal - x.DetourSec))
         {
+            var isFirst = firstPlan.Contains(f);
             var cur = f.Rwy!;
             var nominal = f.EtaNominal - f.DetourSec;   // without the delay vectors it's on (a new runway drops them)
             var star = f.StarPick?.p;
@@ -4687,7 +4689,7 @@ public sealed partial class TrafficWorld
                 slot = Earliest(r.Runway, Math.Max(eta, nominal), f);
                 var c = slot - nominal;                                        // delay (detours included) plus the extra flying
                 if (share is not null) c += 120 * (1 - share.GetValueOrDefault(r.Runway) / Math.Max(1e-6, share.Values.Max()));
-                if (r.Runway != cur.Runway) c += 45 + 60 * f.RwySwitches;     // changing costs, more each time
+                if (r.Runway != cur.Runway && !isFirst) c += 45 + 60 * f.RwySwitches;     // changing costs, more each time
                 return c;
             }
             RunwayEnd best = cur; var bestC = Cost(cur, out var bestEta, out _);
@@ -4699,41 +4701,111 @@ public sealed partial class TrafficWorld
             }
             // Two minutes before a first change, ten before another (20 Nov, KATL: DAL2453 27L → 26L → 27L in five minutes
             // for 7–14 s each time).
-            if (best.Runway != cur.Runway && Time - f.RwySwitchAt >= (f.RwySwitches == 0 ? 120 : 600))
+            if (best.Runway != cur.Runway && (isFirst || Time - f.RwySwitchAt >= (f.RwySwitches == 0 ? 120 : 600)))
             {
                 var curC = Cost(cur, out _, out _);
                 f.Rwy = best;
                 BuildArrivalPath(f, null, f.Pos);
-                f.S = 0; f.Frozen = false; f.SlowDv = 0; f.RwySwitchAt = Time; f.EtaAt = -99; f.RwySwitches++;
+                f.S = 0; f.Frozen = false; f.SlowDv = 0; f.EtaAt = -99;
+                if (!isFirst) { f.RwySwitchAt = Time; f.RwySwitches++; _rwySwitches++; }
                 RefreshEta(f);
-                _rwySwitches++;
-                Log($"{f.Callsign}: runway {best.Ident} instead of {cur.Ident} (planned with the others: {curC - bestC:0} s better there" +
-                    (share is not null ? $"; real arrivals from its direction: {string.Join(", ", opts.Select(o => $"{o.Ident} {100 * share.GetValueOrDefault(o.Runway) / Math.Max(1e-6, share.Values.Sum()):0}%"))}" : "") + ")");
+                Log($"{f.Callsign}: runway {best.Ident} instead of {cur.Ident} ({(isFirst ? "first plan" : "planned with the others")}: {curC - bestC:0} s better there" +
+                    (share is not null ? $"; real arrivals on its STAR or from its direction: {string.Join(", ", opts.Select(o => $"{o.Ident} {100 * share.GetValueOrDefault(o.Runway) / Math.Max(1e-6, share.Values.Sum()):0}%"))}" : "") + ")");
                 Book(f, best.Runway, bestEta);
             }
             else Book(f, cur.Runway, f.EtaNominal);
         }
     }
 
-    /// <summary>How real arrivals from about this flight's direction shared these runways (learned counts), or null when
-    /// fewer than 8 landed on them.</summary>
+    /// <summary>How real arrivals shared these runways: those that flew this flight's STAR (counted from the real tracks
+    /// on it), else those from about its direction; null when fewer than 8 landed on them.</summary>
     private Dictionary<int, double>? RealShare(List<RunwayEnd> rws, Flight f)
     {
-        if (Learned is not { } lp) return null;
         var star = f.StarPick;
         double? brg = star is { } st0 && EntryFix(st0.p, st0.t) is { } ef ? Apt.Map.ToXY(ef.Lat, ef.Lon).Bearing : BearingTo(f.Other);
-        if (brg is not { } fb) return null;
+        return RealWeights(rws, star?.p.Name, brg)?.ToDictionary(kv => kv.Key.Runway, kv => kv.Value);
+    }
+
+    /// <summary>
+    /// Real arrivals' runways by STAR (user, 21 Nov: "I would bet a lot of STARs go into certain runways than others";
+    /// KATL's 14 days: OZZZI2/CHPPR1/ONDRE1 from the north ~80% to 26R/08L, GNDLF3 ~98% to 10/09R, JJEDI4 ~93% to
+    /// 27L/28). Each real arrival track is put on the STAR it followed (5 or more of its first points within 2 nm of
+    /// the STAR's legs, the STAR it followed longest), weighted by its runway's full count over the samples kept (the
+    /// samples are capped per runway). With fewer than 8 on the given runways from that STAR, by direction as before.
+    /// </summary>
+    private Dictionary<RunwayEnd, double>? RealWeights(IReadOnlyList<RunwayEnd> rws, string? star, double? fromBearing)
+    {
+        if (Learned is not { } lp || rws.Count == 0) return null;
+        if (star is not null && StarRunways(lp).TryGetValue(star, out var byRw))
+        {
+            var raw = rws.Sum(r => byRw.raw.GetValueOrDefault(r.Ident));
+            if (raw >= 8) return rws.ToDictionary(r => r, r => byRw.w.GetValueOrDefault(r.Ident));
+        }
+        if (fromBearing is not { } fb) return null;
         var bin = (int)Math.Floor(Geo2.Norm(fb) / 30) % 12;
-        var w = rws.ToDictionary(r => r.Runway, r => lp.Arrivals.TryGetValue(r.Ident, out var ra) && ra.FromBearing is { Length: 12 } fbs
+        var w = rws.ToDictionary(r => r, r => lp.Arrivals.TryGetValue(r.Ident, out var ra) && ra.FromBearing is { Length: 12 } fbs
             ? fbs[bin] + 0.5 * fbs[(bin + 11) % 12] + 0.5 * fbs[(bin + 1) % 12] : 0);
         return w.Values.Sum() >= 8 ? w : null;
+    }
+
+    private object? _starRwFor;
+    private Dictionary<string, (Dictionary<string, double> w, Dictionary<string, int> raw)> _starRw = new();
+
+    private Dictionary<string, (Dictionary<string, double> w, Dictionary<string, int> raw)> StarRunways(AirportProfile lp)
+    {
+        if (ReferenceEquals(_starRwFor, lp)) return _starRw;
+        _starRwFor = lp;
+        var res = new Dictionary<string, (Dictionary<string, double> w, Dictionary<string, int> raw)>();
+        var nm = Geo2.MPerNm;
+        // Each STAR's legs (every transition) as segments in this airport's frame.
+        var stars = new List<(string name, List<(V2 a, V2 b)> segs)>();
+        foreach (var p in Apt.Data.Arrivals)
+        {
+            var segs = new List<(V2, V2)>();
+            void Add(IEnumerable<Laia.Common.Airports.ProcedureLeg> legs)
+            {
+                var pts = legs.Where(l => l.Lat != 0 || l.Lon != 0).Select(l => Apt.Map.ToXY(l.Lat, l.Lon)).ToList();
+                for (var i = 1; i < pts.Count; i++) if ((pts[i] - pts[i - 1]).Length > 1) segs.Add((pts[i - 1], pts[i]));
+            }
+            foreach (var t in p.EnrouteTransitions) Add(t.Legs);
+            Add(p.Legs);
+            foreach (var t in p.RunwayTransitions) Add(t.Legs);
+            if (segs.Count > 0) stars.Add((p.Name, segs));
+        }
+        if (stars.Count == 0) { _starRw = res; return res; }
+        var kept = lp.Samples.Where(x => x.Kind == "arrival").GroupBy(x => x.Runway).ToDictionary(g => g.Key, g => g.Count());
+        foreach (var smp in lp.Samples)
+        {
+            if (smp.Kind != "arrival" || smp.Points.Count < 6) continue;
+            var pts = smp.Points.Take(40).Where(q => q.Length >= 2).Select(q => Apt.Map.ToXY(q[0], q[1])).ToList();
+            string? best = null; var bestN = 4;
+            foreach (var (name, segs) in stars)
+            {
+                var n = 0;
+                foreach (var q in pts) { foreach (var (a, b) in segs) if (DistToSegment(q, a, b) < 2 * nm) { n++; break; } }
+                if (n > bestN) { bestN = n; best = name; }
+            }
+            if (best is null) continue;
+            var weight = lp.Arrivals.TryGetValue(smp.Runway, out var ra) && kept.TryGetValue(smp.Runway, out var k) && k > 0 ? Math.Max(1.0, (double)ra.Count / k) : 1.0;
+            if (!res.TryGetValue(best, out var e)) res[best] = e = (new(), new());
+            e.w[smp.Runway] = e.w.GetValueOrDefault(smp.Runway) + weight;
+            e.raw[smp.Runway] = e.raw.GetValueOrDefault(smp.Runway) + 1;
+        }
+        _starRw = res;
+        Log("Real arrivals' runways by STAR (adsb.lol): " + string.Join("; ", res.OrderBy(kv => kv.Key).Select(kv =>
+        {
+            var tot = kv.Value.w.Values.Sum();
+            return $"{kv.Key} {string.Join(" ", kv.Value.w.OrderByDescending(x => x.Value).Where(x => x.Value / tot >= 0.05).Select(x => $"{x.Key} {100 * x.Value / tot:0}%"))}";
+        })));
+        return res;
     }
 
     /// <summary>A landing runway in use that real traffic hardly lands on (under 5% of the real arrivals to the runways in use).</summary>
     private bool RarelyLanded(RunwayEnd r)
     {
         if (Learned is not { Samples.Count: > 0 } lp || ArrRwys.Count < 2) return false;
-        int N(RunwayEnd e) => lp.Samples.Count(sm => sm.Kind == "arrival" && sm.Runway == e.Ident);
+        // The full counts, not the samples (kept up to 500 a runway, so a busy runway's share was understated).
+        int N(RunwayEnd e) => lp.Arrivals.TryGetValue(e.Ident, out var ra) ? ra.Count : 0;
         var tot = ArrRwys.Sum(N);
         return tot >= 30 && N(r) < tot * 0.05;
     }
@@ -5240,7 +5312,12 @@ public sealed partial class TrafficWorld
             // Exits on the terminal side (where the gate is) first, then the first one the aircraft can make
             // with normal braking (about 2 m/s²): a high-speed exit is taken at about 45 kt, a 90° one at about 20 kt.
             var side = gate is null ? 0 : Math.Sign(rwy.Offset(gate.P));
-            double Needed(double dot) { var vx = dot > 0.5 ? ExitSpeedFast : ExitSpeedSquare; return tdAlong + Math.Max(250, (v0 * v0 - vx * vx) / (2 * 2.4)); }
+            // Not every landing brakes the same (user, 21 Nov, KATL: "a lot exiting the runway at the same spot … a bit
+            // too frequent"): most at about 2.4 m/s², about one in six gently (the next exit or so), one in thirty a
+            // long roll; heavies a little gentler.
+            var u0 = Rng.NextDouble();
+            var decel = 2.4 * (u0 < 0.80 ? 0.9 + 0.2 * Rng.NextDouble() : u0 < 0.97 ? 0.65 + 0.15 * Rng.NextDouble() : 0.5 + 0.1 * Rng.NextDouble()) * (f.P.Heavy ? 0.9 : 1.0);
+            double Needed(double dot) { var vx = dot > 0.5 ? ExitSpeedFast : ExitSpeedSquare; return tdAlong + Math.Max(250, (v0 * v0 - vx * vx) / (2 * decel)); }
             var links = Apt.RunwayLinks(rwy.Runway)
                 .Select(l => (l.on, l.off, along: rwy.Along(Apt.Nodes[l.on]), dir: (Apt.Nodes[l.off] - Apt.Nodes[l.on]).Unit))
                 .Where(l => V2.Dot(l.dir, rwy.Dir) > -0.2 && l.along < rwy.LengthM + 30) // never turn back
