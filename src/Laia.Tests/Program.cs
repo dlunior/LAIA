@@ -1009,8 +1009,8 @@ Console.WriteLine("== KATL's ATIS info I (21 Nov): three landing runways, and ho
     var (dep, arr, closed) = AtisParse.Runways(txt);
     Console.WriteLine($"  landing {string.Join(", ", arr)}; departing {string.Join(", ", dep)}; closed {string.Join(", ", closed)}");
     Check(arr.SequenceEqual(new[] { "08L", "09R", "10" }) && closed.Count == 0, "KATL info I: landing 08L, 09R, 10 (the inner markers out of service aren't runways)");
-    var age = Laia.Server.AtisReader.AgeMinutes(txt, new DateTime(2026, 11, 21, 20, 13, 0, DateTimeKind.Utc));
-    var age2 = Laia.Server.AtisReader.AgeMinutes("ATL ARR INFO Z 2350Z. ...", new DateTime(2026, 11, 22, 0, 5, 0, DateTimeKind.Utc));
+    var age = AtisParse.AgeMinutes(txt, new DateTime(2026, 11, 21, 20, 13, 0, DateTimeKind.Utc));
+    var age2 = AtisParse.AgeMinutes("ATL ARR INFO Z 2350Z. ...", new DateTime(2026, 11, 22, 0, 5, 0, DateTimeKind.Utc));
     Console.WriteLine($"  issued 1952Z, read at 2013Z: {age} min old; 2350Z read at 0005Z: {age2} min");
     Check(age == 21 && age2 == 15, "a broadcast's age from its issue time, across midnight too");
 }

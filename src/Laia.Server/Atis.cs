@@ -57,17 +57,6 @@ public sealed class AtisReader(ILogger log)
         return parts;
     }
 
-    /// <summary>How many minutes ago a broadcast was issued, from its time ("INFO I 1952Z"); 9999 when it doesn't say.</summary>
-    public static int AgeMinutes(string text, DateTime? nowUtc = null)
-    {
-        var m = System.Text.RegularExpressions.Regex.Match(text.ToUpperInvariant(), @"\b([0-2]\d)([0-5]\d)Z\b");
-        if (!m.Success) return 9999;
-        var now = nowUtc ?? DateTime.UtcNow;
-        var mins = int.Parse(m.Groups[1].Value) * 60 + int.Parse(m.Groups[2].Value);
-        var diff = (now.Hour * 60 + now.Minute - mins + 1440) % 1440;
-        return diff;
-    }
-
     private async Task FetchAsync(string icao)
     {
         var info = new AtisInfo();
@@ -90,7 +79,7 @@ public sealed class AtisReader(ILogger log)
                     if (!resp.IsSuccessStatusCode) { note += $"{host} {(int)resp.StatusCode}; "; continue; }
                     var parts = Parts(await resp.Content.ReadAsStringAsync());
                     if (parts.Count == 0) { note += $"{host} has none; "; continue; }
-                    got.Add((host, parts, parts.Min(pt => AgeMinutes(pt.text))));
+                    got.Add((host, parts, parts.Min(pt => AtisParse.AgeMinutes(pt.text))));
                 }
                 catch (Exception ex) { note += $"{host}: {ex.Message}; "; }
             }

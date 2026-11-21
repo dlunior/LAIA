@@ -42,6 +42,17 @@ public static class AtisParse
     private static readonly Regex OneRwy = new(@"^[0-3]?\d[LRC]?$", RegexOptions.Compiled);
     private static readonly Regex Approach = new(@"(?<![A-Z])(ILS|LOC|RNAV|RNP|GPS|VOR|LDA)(?:\s+OR\s+LOC(?:/DME)?)?\s*(?:\((?:GPS|RNP)\)\s*)?(?:([XYZ])\s+)?(?:(?:RWYS?|RY|RUNWAYS?),?\s*)?([0-3]?\d[LRC]?)(?![\dA-Z/]|\.\d)", RegexOptions.Compiled);
 
+    /// <summary>How many minutes ago a broadcast was issued, from its time ("INFO I 1952Z"); 9999 when it doesn't say.</summary>
+    public static int AgeMinutes(string text, DateTime? nowUtc = null)
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(text.ToUpperInvariant(), @"\b([0-2]\d)([0-5]\d)Z\b");
+        if (!m.Success) return 9999;
+        var now = nowUtc ?? DateTime.UtcNow;
+        var mins = int.Parse(m.Groups[1].Value) * 60 + int.Parse(m.Groups[2].Value);
+        var diff = (now.Hour * 60 + now.Minute - mins + 1440) % 1440;
+        return diff;
+    }
+
     /// <summary>Upper case, digit-by-digit runways collapsed, and cut before the NOTAMs.</summary>
     public static string Clean(string? text)
     {
