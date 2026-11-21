@@ -1003,6 +1003,18 @@ Console.WriteLine("== Real tracks chosen for the need: an empty sky gets the sho
     Check(TrafficWorld.TotalTurn(loop, 25 * nm) > 300, "a loop is measured as one");
 }
 
+Console.WriteLine("== KATL's ATIS info I (21 Nov): three landing runways, and how old a broadcast is");
+{
+    var txt = "ATL ARR INFO I 1952Z. 07014G20KT 8SM -RA FEW065 BKN095 OVC150 14/11 A3005 (THREE ZERO ZERO FIVE). SIMULTANEOUS APCHS IN USE ILS 8L, ILS 9R, ILS 10. NOTAMS... RWY 9L PAPI OTS. IM RWY 8L OTS, IM RWY 9R OTS, IM RWY 10 OTS, DME PORTION OF ILS RWY 9L OTS. BIRD ACTIVITY VC OF ARPT. CRANE MIDFIELD BETWEEN RWY 9R AND RWY 10 AT 80 FT. CRANE OVER E CONCOURSE 80 FT. OPERATE TRANSPONDER WITH MODE C ON ALL RAMPS, TWYS AND RWYS. ...ADVS YOU HAVE INFO I.";
+    var (dep, arr, closed) = AtisParse.Runways(txt);
+    Console.WriteLine($"  landing {string.Join(", ", arr)}; departing {string.Join(", ", dep)}; closed {string.Join(", ", closed)}");
+    Check(arr.SequenceEqual(new[] { "08L", "09R", "10" }) && closed.Count == 0, "KATL info I: landing 08L, 09R, 10 (the inner markers out of service aren't runways)");
+    var age = AtisParse.AgeMinutes(txt, new DateTime(2026, 11, 21, 20, 13, 0, DateTimeKind.Utc));
+    var age2 = AtisParse.AgeMinutes("ATL ARR INFO Z 2350Z. ...", new DateTime(2026, 11, 22, 0, 5, 0, DateTimeKind.Utc));
+    Console.WriteLine($"  issued 1952Z, read at 2013Z: {age} min old; 2350Z read at 0005Z: {age2} min");
+    Check(age == 21 && age2 == 15, "a broadcast's age from its issue time, across midnight too");
+}
+
 Console.WriteLine("== Airport rules read from the FAA's AAUP text (any airport, no airport-specific code)");
 {
     // The text of Orlando's RNAV Departure AAUP (AL-571), as a PDF text extractor gives it.
