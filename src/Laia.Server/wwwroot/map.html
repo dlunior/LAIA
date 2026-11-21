@@ -103,6 +103,7 @@ const skyRenderer = L.canvas({ padding: .3 });
 const skyLayer = L.layerGroup().addTo(map);
 const skyMarkers = new Map();   // id -> circle marker (the rest of the sky: many, so drawn on a canvas)
 let sky = [], skyAt = 0;
+let lastListHtml = "";
 let userMarker = null, selected = null, data = null, centred = false, lastRwyKey = "", pathTimer = 0;
 
 function planeIcon(color, hdg, size) {
@@ -125,23 +126,41 @@ function labelHtml(f) {
   return `${f.cs}<br><span class="l2">${l2}</span>`;
 }
 
+// Each aircraft's icon and label are only rebuilt when they change, and only for aircraft in view (user, 21 Nov: the
+// map lagged zoomed in at KATL at Peak — every second every aircraft's icon and label were thrown away and rebuilt).
+// A heading change just turns the existing icon.
 function updateAircraft(list) {
   const seen = new Set();
   const showLabels = $("tLabels").checked;
+  const view = map.getBounds().pad(0.2);
   for (const f of list) {
     if (f.kind === "parked" && f.phase === "parked") continue;   // parked aircraft only clutter the map
     seen.add(f.id);
     let m = markers.get(f.id);
-    const icon = planeIcon(f.id === selected ? "#ffffff" : colorFor(f), f.hdg, f.ground ? 18 : 22);
+    const col = f.id === selected ? "#ffffff" : colorFor(f), size = f.ground ? 18 : 22;
+    const inView = view.contains([f.lat, f.lon]);
     if (!m) {
-      m = L.marker([f.lat, f.lon], { icon, keyboard: false }).addTo(layers.ac);
+      if (!inView) continue;
+      m = L.marker([f.lat, f.lon], { icon: planeIcon(col, f.hdg, size), keyboard: false }).addTo(layers.ac);
       m.on("click", () => select(f.id));
+      m._laia = { col, size, hdg: f.hdg, label: "" };
       markers.set(f.id, m);
-    } else { m.setLatLng([f.lat, f.lon]); m.setIcon(icon); }
+    } else {
+      if (!inView) { layers.ac.removeLayer(m); markers.delete(f.id); continue; }
+      m.setLatLng([f.lat, f.lon]);
+      const st = m._laia;
+      if (st.col !== col || st.size !== size) { m.setIcon(planeIcon(col, f.hdg, size)); st.col = col; st.size = size; st.hdg = f.hdg; if (m.getTooltip()) { m.unbindTooltip(); st.label = ""; } }
+      else if (Math.abs(st.hdg - f.hdg) >= 2) {
+        const svg = m.getElement()?.querySelector("svg");
+        if (svg) svg.style.transform = `rotate(${f.hdg}deg)`;
+        st.hdg = f.hdg;
+      }
+    }
     if (showLabels) {
-      if (!m.getTooltip()) m.bindTooltip(labelHtml(f), { permanent: true, direction: "right", offset: [10, 0], className: "ac-label" });
-      else m.setTooltipContent(labelHtml(f));
-    } else if (m.getTooltip()) m.unbindTooltip();
+      const lh = labelHtml(f);
+      if (!m.getTooltip()) { m.bindTooltip(lh, { permanent: true, direction: "right", offset: [10, 0], className: "ac-label" }); m._laia.label = lh; }
+      else if (m._laia.label !== lh) { m.setTooltipContent(lh); m._laia.label = lh; }
+    } else if (m.getTooltip()) { m.unbindTooltip(); m._laia.label = ""; }
   }
   for (const [id, m] of markers) if (!seen.has(id)) { layers.ac.removeLayer(m); markers.delete(id); }
 }
@@ -288,11 +307,14 @@ async function updateFlow() {
     }
     for (const st of d.stretches) {
       const col = st.use === "departures" ? "#2dd4bf" : st.use === "arrivals" ? "#a78bfa" : "#e5e7eb";
+      // Arrows as small chevrons on the canvas (were a page element each: hundreds at a big airport).
       const arrow = (a, b) => {
-        const dy = (b[0] - a[0]) * 111320, dx = (b[1] - a[1]) * 111320 * Math.cos(a[0] * Math.PI / 180);
-        const brg = Math.atan2(dx, dy) * 180 / Math.PI;
-        const icon = L.divIcon({ className: "", iconSize: [14, 14], iconAnchor: [7, 7], html: `<div style="transform:rotate(${brg}deg);color:${col};font-size:13px;line-height:14px;text-align:center">▲</div>` });
-        L.marker([(a[0] + b[0]) / 2, (a[1] + b[1]) / 2], { icon, interactive: false, keyboard: false }).addTo(layers.flow);
+        const k = 111320, cl = Math.cos(a[0] * Math.PI / 180);
+        const dy = (b[0] - a[0]) * k, dx = (b[1] - a[1]) * k * cl, len = Math.hypot(dx, dy) || 1;
+        const ux = dx / len, uy = dy / len, m0 = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2], sz = 18;
+        const pt = (fx, fy) => [m0[0] + fy / k, m0[1] + fx / (k * cl)];
+        const tip = pt(ux * sz, uy * sz), l1 = pt(-uy * sz * 0.7 - ux * sz * 0.4, ux * sz * 0.7 - uy * sz * 0.4), r1 = pt(uy * sz * 0.7 - ux * sz * 0.4, -ux * sz * 0.7 - uy * sz * 0.4);
+        L.polyline([l1, tip, r1], { renderer: flowCanvas, color: col, weight: 2.5, opacity: .9, interactive: false }).addTo(layers.flow);
       };
       let run = 150, placed = false;   // the first arrow 150 m in, then every 300 m; at least one per stretch
       for (let i = 0; i + 1 < st.points.length; i++) {
@@ -419,13 +441,17 @@ function renderSeq() {
 }
 
 function renderList() {
+  if (!$("panel").classList.contains("open") && window.innerWidth <= 640) return;   // hidden: nothing to rebuild
   const fl = (data?.flights || []).filter(f => !(f.kind === "parked" && f.phase === "parked"))
     .sort((a, b) => (b.drawn - a.drawn) || (a.kind > b.kind ? 1 : -1) || a.cs.localeCompare(b.cs));
   $("count").textContent = `(${fl.length} moving, ${(data?.flights || []).length - fl.length} parked)`;
-  $("list").innerHTML = fl.map(f => `<div class="row${f.id === selected ? " on" : ""}" data-id="${f.id}">
+  const html = fl.map(f => `<div class="row${f.id === selected ? " on" : ""}" data-id="${f.id}">
       <i class="sw" style="background:${colorFor(f)}"></i><span class="cs">${f.cs}</span>
       <span class="ph">${f.type} · ${phaseText(f)}${f.runway ? " · " + f.runway : ""}${f.eta != null ? ` · #${f.seq} in ${Math.round(f.eta / 60)}m` : ""}${f.depSeq ? ` · #${f.depSeq} for departure` : ""}${f.etd != null ? ` · off in ${Math.round(f.etd / 60)}m` : ""}</span>
       <span class="num">${f.ground ? f.gs + " kt" : Math.round(f.alt / 100).toString().padStart(3, "0")}</span></div>`).join("");
+  if (html === lastListHtml) return;   // unchanged: the page isn't rebuilt
+  lastListHtml = html;
+  $("list").innerHTML = html;
   for (const row of $("list").querySelectorAll(".row")) row.onclick = () => { select(row.dataset.id); const f = data.flights.find(x => x.id === row.dataset.id); if (f) map.panTo([f.lat, f.lon]); };
 }
 
@@ -471,6 +497,7 @@ $("tLabels").onchange = render;
 $("tSky").onchange = () => { skyAt = 0; if (!$("tSky").checked) sky = []; render(); };
 $("tAllPaths").onchange = () => { allPathsAt = 0; drawAllPaths(); };
 $("tRealSat").onchange = () => { realAt = 0; realKey = ""; updateReal(); };
+map.on("moveend", () => { if (data) updateAircraft(data.flights); });
 map.on("click", () => { if (selected) { selected = null; $("sel").hidden = true; layers.sel.clearLayers(); render(); } });
 poll();
 </script>
