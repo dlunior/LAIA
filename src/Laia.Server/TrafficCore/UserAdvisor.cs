@@ -105,7 +105,32 @@ public sealed partial class TrafficWorld
             if (UserStarFrom is { Length: > 0 } fr && star.EnrouteTransitions.FirstOrDefault(t => t.Name.Equals(fr, StringComparison.OrdinalIgnoreCase)) is { } tr) legs.AddRange(tr.Legs);
             legs.AddRange(star.Legs);
             if (star.RunwayTransitions.FirstOrDefault(t => t.Name == r.Ident) is { } rt) legs.AddRange(rt.Legs);
-            var sp = Apt.LegsToPoints(legs, u, Math.Max(UserAltFt, 3000), out _).Select(p => p.P).ToList();
+            var spA = Apt.LegsToPoints(legs, u, Math.Max(UserAltFt, 3000), out _);
+            var sp = spA.Select(p => p.P).ToList();
+            // Where real traffic leaves this STAR, and the way it flies on from there (21 Nov, KORD: the user on WYNDE3
+            // counted along its legs past PAPPI that real arrivals never fly — "vectors after PAPPI", real tracks off it
+            // at WYNDE — put number 2 behind AMZ3838 150 nm out while the user was 40 nm out).
+            if (RealWayForUser(r, sn, spA) is { } rw)
+            {
+                var (cut, way) = rw;
+                var tail = new List<V2>();
+                var k0r = Enumerable.Range(0, Math.Min(cut + 1, sp.Count)).FirstOrDefault(Ahead, -1);
+                if (k0r >= 0) { tail.AddRange(sp.Skip(k0r).Take(cut - k0r + 1)); tail.AddRange(way); }
+                else
+                {
+                    // Already past where real traffic turns off: from the nearest point of the real way on.
+                    var j = 0; var bd = double.MaxValue;
+                    for (var q = 0; q < way.Count; q++) { var d = (way[q] - u).Length; if (d < bd) { bd = d; j = q; } }
+                    tail.AddRange(way.Skip(j + 1));
+                }
+                if (tail.Count > 0)
+                {
+                    pts.AddRange(tail);
+                    double l2 = 0;
+                    for (var i = 1; i < pts.Count; i++) l2 += (pts[i] - pts[i - 1]).Length;
+                    return (l2 + (pts[^1] - r.Threshold).Length) / nm;
+                }
+            }
             // From the first fix still ahead of the user (not behind them on the way in, nor one to turn back to).
             bool Ahead(int k)
             {
@@ -132,6 +157,30 @@ public sealed partial class TrafficWorld
         for (var i = 1; i < pts.Count; i++) len += (pts[i] - pts[i - 1]).Length;
         len += (pts[^1] - r.Threshold).Length;
         return len / nm;
+    }
+
+    private readonly Dictionary<string, (double at, (int cut, List<V2> way)? res)> _userWay = new();
+
+    /// <summary>The real way in off the user's STAR for this runway (cached 10 minutes): the quiet fan track (as an
+    /// arrival with nothing to lose gets), else from the first point back from the STAR's end that real arrivals passed.</summary>
+    private (int cut, List<V2> way)? RealWayForUser(RunwayEnd r, string star, List<AirPoint> spA)
+    {
+        var key = r.Ident + "|" + star;
+        if (_userWay.TryGetValue(key, out var c) && Time - c.at < 600) return c.res;
+        (int cut, List<V2> way)? res = null;
+        if (spA.Count >= 2 && RealFan(r, spA) is { Count: >= 3 } fan)
+        {
+            var t = fan[Math.Clamp(_fanQuiet, 0, fan.Count - 1)];
+            res = (t.cut, t.pts);
+        }
+        else
+            for (var k = spA.Count - 1; k >= 0 && res is null; k--)
+            {
+                var dir = k == spA.Count - 1 ? double.NaN : k > 0 ? (spA[k].P - spA[k - 1].P).Bearing : (spA[1].P - spA[0].P).Bearing;
+                if (DirectionTrack(r, spA[k].P, dir) is { } dt) res = (k, dt);
+            }
+        _userWay[key] = (Time, res);
+        return res;
     }
 
     /// <summary>
@@ -232,7 +281,7 @@ public sealed partial class TrafficWorld
         {
             var (t0, e0) = _etaSamples[0];
             var rate = ((Time + raw) - e0) / (Time - t0);   // 0 when on the estimate; −0.2 when 20 % quicker
-            var k = Math.Clamp(1 / Math.Max(0.5, 1 - rate), 0.75, 1.25);
+            var k = Math.Clamp(1 / Math.Max(0.5, 1 - rate), 0.6, 1.4);
             _etaScale += (k - _etaScale) * Math.Min(1, 0.05);
         }
         f.EtaSec = nm > 10 ? UserEtaSec(10) + (raw - UserEtaSec(10)) * _etaScale : raw;
@@ -273,7 +322,9 @@ public sealed partial class TrafficWorld
         // times" — it was mostly 5, 4, 3, 2, 1 as the ones ahead landed): only a different runway, or someone put in
         // ahead of or behind the user while the one before is still coming in.
         var parts = _seqSig.Split('|');
-        var changed = _userReplanned;
+        // Only a change of runway or neighbours (21 Nov: "number 1 for 28C, between nobody and nobody" ten times in 15
+        // minutes as the user's estimate drifted from the slot with no one around).
+        var changed = false;
         if (_seqSig.Length > 0 && Time - _seqSince > 10)
         {
             bool StillThere(string id) => id.Length > 0 && ordered.Any(o => o.Id == id);
