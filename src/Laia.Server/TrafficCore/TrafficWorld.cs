@@ -80,6 +80,7 @@ public sealed class Flight
     public int DelayVectors, RwySwitches;
     public string? HoldWhy; public bool HoldWhyLogged;
     public double RunwayStopFor;
+    public bool ReplanFree;
     /// <summary>Departures: its number in its runway's departure order (0 when not in it: at the gate, boarding).</summary>
     public int DepSeq;
     /// <summary>Seconds its current delay vectors add (cleared when its route is built again); the planner counts
@@ -4663,7 +4664,7 @@ public sealed partial class TrafficWorld
         // Not one already on a delay vector: the detour was given for its runway's plan, and a new runway throws it away
         // (offline rush, 20 Nov: DAL608 vectored 209 s for 27, moved to 27R 20 s later, the detour gone — the delay came
         // back close in as vectors, a break-off and a go-around).
-        bool Movable(Flight f) => f != UserArr && !f.Test && f.Phase == "arriving" && (f.ThrS - f.S) / nm >= 40 && f.RwySwitches < 3 && f.DetourSec <= 0;
+        bool Movable(Flight f) => f != UserArr && !f.Test && f.Phase == "arriving" && (f.ThrS - f.S) / nm >= (f.ReplanFree ? 25 : 40) && f.RwySwitches < 3 && (f.DetourSec <= 0 || f.ReplanFree);
         // The plan's timelines, per runway: the fixed ones booked first.
         var book = ArrRwys.ToDictionary(r => r.Runway, _ => new List<(double slot, Flight f)>());
         double Earliest(int r, double eta, Flight f)
@@ -4688,7 +4689,8 @@ public sealed partial class TrafficWorld
         foreach (var f in arrs) f.Planned = true;
         foreach (var f in arrs.Where(Movable).OrderBy(x => x.EtaNominal - x.DetourSec))
         {
-            var isFirst = firstPlan.Contains(f);
+            var isFirst = firstPlan.Contains(f) || f.ReplanFree;
+            f.ReplanFree = false;
             var cur = f.Rwy!;
             var nominal = f.EtaNominal - f.DetourSec;   // without the delay vectors it's on (a new runway drops them)
             var star = f.StarPick?.p;
@@ -5133,10 +5135,15 @@ public sealed partial class TrafficWorld
     /// </summary>
     private void FlowChanged()
     {
-        int arr = 0, dep = 0;
+        int arr = 0, dep = 0, replan = 0;
         foreach (var f in Flights.ToList())
         {
             if (f.Done || f.Rwy is null) continue;
+            // Still on a runway in use, 25 nm or more out: planned again with the others on the new set — a runway just
+            // opened takes its share (21 Nov, KATL: 09R and 10 opened at 15:23 behind a 30-deep queue for 08L, but those
+            // on delay vectors kept 08L — 29 landed on 08L afterwards against 6 and 4). Its first plan again: free.
+            if (f.Kind == "arrival" && !f.OnGround && f.Phase == "arriving" && ArrRwys.Contains(f.Rwy) && (f.ThrS - f.S) / Geo2.MPerNm > 25 && f != UserArr && !f.Test)
+            { f.ReplanFree = true; f.Planned = false; replan++; }
             if (f.Kind == "arrival" && !f.OnGround && f.Phase == "arriving" && !ArrRwys.Contains(f.Rwy) && (f.ThrS - f.S) / Geo2.MPerNm > 25 && f.Path is not null)
             {
                 var plan = PlanArrival(f.Other, f.Type);
@@ -5169,7 +5176,7 @@ public sealed partial class TrafficWorld
                 }
             }
         }
-        Log($"Runway change at {Apt.Icao}: landing {string.Join(", ", ArrRwys.Select(e => e.Ident))}, departing {string.Join(", ", DepRwys.Select(e => e.Ident))} — {arr} arrival{(arr == 1 ? "" : "s")} and {dep} departure{(dep == 1 ? "" : "s")} given the new runways; arrivals within 25 nm finish on their runway");
+        Log($"Runway change at {Apt.Icao}: landing {string.Join(", ", ArrRwys.Select(e => e.Ident))}, departing {string.Join(", ", DepRwys.Select(e => e.Ident))} — {arr} arrival{(arr == 1 ? "" : "s")} and {dep} departure{(dep == 1 ? "" : "s")} given the new runways{(replan > 0 && ArrRwys.Count > 1 ? $", {replan} planned again across the runways now in use" : "")}; arrivals within 25 nm finish on their runway");
     }
 
     /// <summary>For the control page: what the arrival manager has done and how well the landings were spaced.</summary>
@@ -6468,6 +6475,11 @@ public sealed partial class TrafficWorld
                     f.LastTrombone = Time;
                     var wantGap = ThresholdGapNeeded(leader, f, forDepartures: false) + 10;
                     var add = wantGap - gapSec;
+                    // Never catching up on a leader that isn't on its plan — broken off, rejoining, on vectors or just
+                    // gone around: its predicted time is far too late (21 Nov, KATL: SWA727 took a shorter real track to
+                    // close "405 s behind DAL3127" while DAL3127 was on its second break-off loop; DAL3127 landed first
+                    // and SWA727 was broken off 215 s short behind the next one).
+                    if (add < 0 && (leader.Mgr is "vectored around" or "vectored" || leader.Rejoin || leader.WentAround || leader.DetourSec > 0)) add = 0;
                     f.TromboneLeft = Trombone(f, add > 10 || add < -25 ? add : 0, $"{gapSec:0} s behind {leader.Callsign} at the runway, {wantGap:0} wanted");
                     if (double.IsNaN(f.TromboneLeft) && f.Fan is not null)
                         f.TromboneLeft = FanPick(f, add > 10 || add < -25 ? add : 0, $"{gapSec:0} s behind {leader.Callsign} at the runway, {wantGap:0} wanted");
@@ -6553,6 +6565,11 @@ public sealed partial class TrafficWorld
                 // through it (Midway STKNY/HALIE at 5,550, JNSNN at 23,470, O'Hare KRENA at 10,340; 19 Nov).
                 if (!double.IsNaN(floorAhead) && f.AltFt > floorAhead && f.AltFt - floorAhead < 1500)
                     vsTarget = Math.Max(vsTarget, -Math.Max(150, (f.AltFt - floorAhead) * 4));
+                // And levelling at what it wants when that's level (an "at" fix with no floor left in view): the same
+                // capture (21 Nov, Midway STKNY "at 6,000" at 5,827 ft and JILLZ "at 10,000" at 9,844 ft, both "aiming
+                // for 6,002 / 10,001" — sinking 150–170 ft through the level, just outside the allowance).
+                if (glideVs > -100 && f.AltFt > want && f.AltFt - want < 1500)
+                    vsTarget = Math.Max(vsTarget, -Math.Max(150, (f.AltFt - want) * 4));
                 // Kept above the main airport's traffic (a satellite's arrival crossing the big airport's flows): level
                 // at the floor until clear.
                 if (!double.IsNaN(f.DescentFloor) && f.AltFt > f.DescentFloor - 100) vsTarget = Math.Max(vsTarget, Math.Min(0, (f.DescentFloor - f.AltFt) * 2));

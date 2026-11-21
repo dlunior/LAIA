@@ -28,6 +28,7 @@ public sealed partial class TrafficWorld
     public string UserType { get; set; } = "";
     /// <summary>Where the user's flight plan goes (SimBrief), if known.</summary>
     public string? UserDestination { get; set; }
+    public string? UserOrigin { get; set; }
     /// <summary>The user's filed STAR (SimBrief) and the fix their route joins it at.</summary>
     public string? UserStar { get; set; }
     public string? UserStarFrom { get; set; }
@@ -67,7 +68,9 @@ public sealed partial class TrafficWorld
     private double UserTrackNm(RunwayEnd r, V2 u)
     {
         var along = r.Along(u); var off = Math.Abs(r.Offset(u));
-        if (along < 0 && along > -15 * Geo2.MPerNm && off < 1.0 * Geo2.MPerNm && Math.Abs(Geo2.Diff(UserTrack, r.Heading)) < 30)
+        // On the final at any distance (21 Nov, KATL: the user established 20+ nm out on 08L's final was counted along
+        // CHPPR1 and a real track — "number 13, between DAL348 and SAS929", DAL348 64 nm behind).
+        if (along < 0 && along > -40 * Geo2.MPerNm && off < 1.0 * Geo2.MPerNm && Math.Abs(Geo2.Diff(UserTrack, r.Heading)) < 30)
             return -along / Geo2.MPerNm;
         var routed = UserRouteNm(r, u);
         if (!double.IsNaN(routed)) return routed;
@@ -107,6 +110,13 @@ public sealed partial class TrafficWorld
             if (star.RunwayTransitions.FirstOrDefault(t => t.Name == r.Ident) is { } rt) legs.AddRange(rt.Legs);
             var spA = Apt.LegsToPoints(legs, u, Math.Max(UserAltFt, 3000), out _);
             var sp = spA.Select(p => p.P).ToList();
+            // Off the STAR (more than 3 nm from any of its legs): it no longer says where the user goes — direct to the
+            // final instead (the caller's fallback).
+            {
+                var dmin = double.MaxValue;
+                for (var i = 1; i < sp.Count; i++) dmin = Math.Min(dmin, DistToSegment(u, sp[i - 1], sp[i]));
+                if (sp.Count >= 2 && dmin > 3 * nm) return double.NaN;
+            }
             // Where real traffic leaves this STAR, and the way it flies on from there (21 Nov, KORD: the user on WYNDE3
             // counted along its legs past PAPPI that real arrivals never fly — "vectors after PAPPI", real tracks off it
             // at WYNDE — put number 2 behind AMZ3838 150 nm out while the user was 40 nm out).
@@ -159,14 +169,22 @@ public sealed partial class TrafficWorld
         return len / nm;
     }
 
-    private readonly Dictionary<string, (double at, (int cut, List<V2> way)? res)> _userWay = new();
+    private readonly Dictionary<string, (double at, (V2 at, List<V2> way)? res)> _userWay = new();
 
     /// <summary>The real way in off the user's STAR for this runway (cached 10 minutes): the quiet fan track (as an
     /// arrival with nothing to lose gets), else from the first point back from the STAR's end that real arrivals passed.</summary>
     private (int cut, List<V2> way)? RealWayForUser(RunwayEnd r, string star, List<AirPoint> spA)
     {
         var key = r.Ident + "|" + star;
-        if (_userWay.TryGetValue(key, out var c) && Time - c.at < 600) return c.res;
+        // The turn-off kept as a point and found again in this STAR's points (their number changes with where the user is).
+        (int cut, List<V2> way)? Here((V2 at, List<V2> way)? x)
+        {
+            if (x is not { } v) return null;
+            var k = 0; var bd = double.MaxValue;
+            for (var i = 0; i < spA.Count; i++) { var d = (spA[i].P - v.at).Length; if (d < bd) { bd = d; k = i; } }
+            return bd < 500 ? (k, v.way) : null;
+        }
+        if (_userWay.TryGetValue(key, out var c) && Time - c.at < 600) return Here(c.res);
         (int cut, List<V2> way)? res = null;
         if (spA.Count >= 2 && RealFan(r, spA) is { Count: >= 3 } fan)
         {
@@ -179,7 +197,7 @@ public sealed partial class TrafficWorld
                 var dir = k == spA.Count - 1 ? double.NaN : k > 0 ? (spA[k].P - spA[k - 1].P).Bearing : (spA[1].P - spA[0].P).Bearing;
                 if (DirectionTrack(r, spA[k].P, dir) is { } dt) res = (k, dt);
             }
-        _userWay[key] = (Time, res);
+        _userWay[key] = (Time, res is { } rr ? (spA[rr.cut].P, rr.way) : null);
         return res;
     }
 
@@ -325,16 +343,25 @@ public sealed partial class TrafficWorld
         // Only a change of runway or neighbours (21 Nov: "number 1 for 28C, between nobody and nobody" ten times in 15
         // minutes as the user's estimate drifted from the slot with no one around).
         var changed = false;
+        var rwyChanged = false;
         if (_seqSig.Length > 0 && Time - _seqSince > 10)
         {
             bool StillThere(string id) => id.Length > 0 && ordered.Any(o => o.Id == id);
-            if (parts[0] != me.Rwy!.Ident) changed = true;
+            if (parts[0] != me.Rwy!.Ident) { changed = true; rwyChanged = true; }
             // Someone put in ahead (the one that was ahead is still coming in, or the user was number 1), or behind.
             if (parts[1] != (ahead?.Id ?? "") && (StillThere(parts[1]) || (parts[1].Length == 0 && ahead is not null))) changed = true;
             if (parts[2] != (behind?.Id ?? "") && StillThere(parts[2])) changed = true;
         }
         if (_seqSig.Length == 0) _seqSince = Time;
         _seqSig = $"{me.Rwy!.Ident}|{ahead?.Id}|{behind?.Id}";
+        // New neighbours are announced once they've held for 45 s (21 Nov, KATL: "new sequence" 15 times in 34 minutes as
+        // the user's estimate swung and the neighbours either side changed every minute or two); a new runway at once.
+        if (changed && !rwyChanged) { _pendSig = _seqSig; _pendSince = Time; changed = false; }
+        else if (_pendSig.Length > 0)
+        {
+            if (_pendSig != _seqSig) _pendSig = "";
+            else if (Time - _pendSince >= 45) { changed = true; _pendSig = ""; }
+        }
         _userReplanned = false;
         var logNow = changed && Time >= _seqNewUntil;
         if (changed) _seqNewUntil = Time + 30;
@@ -349,9 +376,18 @@ public sealed partial class TrafficWorld
     /// the runway of LAIA's departures queuing near the user (else the nearest departure runway in use within 3 km), and
     /// how many are ahead — lined up, holding short, or taxiing and nearer its start than the user.
     /// </summary>
+    private string _pendSig = ""; private double _pendSince;
+    private bool _userWasAirborne, _userLandedHere;
+
     private void DepartureQueue(V2 u, List<Notice> list)
     {
         if (UserArr is { Done: false }) return;
+        // Only where the user departs from (21 Nov, KATL: "Number 2 for departure, runway 08R" while taxiing in after
+        // landing): the plan's origin, or with no plan an airport the user hasn't just landed at.
+        if (!UserOnGround) _userWasAirborne = true;
+        else if (_userWasAirborne && u.Length < 6000) _userLandedHere = true;
+        if (_userLandedHere) return;
+        if (UserOrigin is { Length: > 0 } org && !org.Equals(Apt.Icao, StringComparison.OrdinalIgnoreCase)) return;
         var deps = Flights.Where(o => o.Kind == "departure" && !o.Done && o.OnGround && o.Rwy is not null
             && o.Phase is "taxi" or "holding short" or "lining up" or "lined up").ToList();
         if (deps.Count == 0) return;
@@ -425,7 +461,7 @@ public sealed partial class TrafficWorld
                 var busy = Flights.FirstOrDefault(o => !o.Done && o.Rwy?.Runway == r.Runway &&
                     ((o.Kind == "arrival" && !o.OnGround && (o.ThrS - o.S) / nm < 3) || (o.OnGround && o.Phase is "takeoff roll" or "landing roll" or "lined up")));
                 if (busy is not null)
-                    list.Add(new Notice("hs-" + r.Runway, $"Hold short of {r.Ident}{RunwayPair(r)}: {busy.Callsign} ({busy.Type}) {(busy.Kind == "arrival" && !busy.OnGround ? "landing" : busy.Phase == "lined up" ? "lined up to depart" : busy.Phase == "takeoff roll" ? "departing" : "on the runway")}", true));
+                    list.Add(new Notice("hs-" + r.Runway, $"Hold short of {r.Ident}{RunwayPair(r)}{(TaxiwayAt(u, UserTrack) is { } onTw ? $" on {onTw}" : "")}: {busy.Callsign} ({busy.Type}) {(busy.Kind == "arrival" && !busy.OnGround ? "landing" : busy.Phase == "lined up" ? "lined up to depart" : busy.Phase == "takeoff roll" ? "departing" : "on the runway")}", true));
             }
             GiveWay(u, list);
         }
@@ -480,11 +516,38 @@ public sealed partial class TrafficWorld
             double tA = sA / oms, tU = sU / ums;
             if (Math.Min(tA, tU) > 45 || Math.Abs(tA - tU) > 20) continue;
             var what = o.Phase == "pushback" ? "pushing back" : "crossing";
+            // Where, by name, as ground would say it (user, 21 Nov: "Hold short of B on E for AAL123 (B738)"): the
+            // taxiway the user is on, and the one the other aircraft crosses on where they'd meet.
+            var meet = o.Path.At(o.S + dir * sA);
+            var mine = TaxiwayAt(u, UserTrack);
+            var theirs = TaxiwayAt(meet.p, (o.Path.At(Math.Min(o.Path.Length, o.S + dir * sA + 10)).p - meet.p).Bearing);
             if (tA <= tU || (Math.Abs(tA - tU) < 15 && sA < sU))
-                list.Add(new Notice("gw-" + o.Id, $"Give way: {o.Callsign} ({o.Type}) {what} ahead from the {side}, about {sU:0} m, in {tA:0} s", true));
+                list.Add(new Notice("gw-" + o.Id, theirs is not null && theirs != mine && o.Phase != "pushback"
+                    ? $"Hold short of {theirs}{(mine is not null ? $" on {mine}" : "")} for {o.Callsign} ({o.Type}) crossing from the {side}, about {sU:0} m, in {tA:0} s"
+                    : $"Give way: {o.Callsign} ({o.Type}) {what} ahead from the {side}, about {sU:0} m, in {tA:0} s", true));
             else if (o.Phase != "pushback")
                 list.Add(new Notice("gw-" + o.Id, $"{o.Callsign} ({o.Type}) from the {side} gives way to you ({sU:0} m ahead)", false));
         }
+    }
+
+    /// <summary>The named taxiway at a point (nearest named taxi line within 40 m, preferring one going this way), or null.</summary>
+    private string? TaxiwayAt(V2 p, double brg)
+    {
+        string? best = null; var bd = 40.0;
+        for (var i = 0; i < Apt.TaxiPointCount; i++)
+        {
+            if ((Apt.Nodes[i] - p).Length > 400) continue;
+            foreach (var e in Apt.Adj[i])
+            {
+                if (e.Type != 1 || e.Name.Length == 0 || !AirportModel.IsTaxiway(e.Name) || e.B >= Apt.TaxiPointCount) continue;
+                var a = Apt.Nodes[e.A]; var b = Apt.Nodes[e.B];
+                var d = DistToSegment(p, a, b);
+                var along = Math.Abs(Geo2.Diff((b - a).Bearing, brg)); along = Math.Min(along, 180 - along);
+                d += along > 45 ? 15 : 0;
+                if (d < bd) { bd = d; best = e.Name; }
+            }
+        }
+        return best;
     }
 
     /// <summary>
@@ -499,7 +562,7 @@ public sealed partial class TrafficWorld
     {
         static bool Taxiway(Notice n) => n.Id.StartsWith("gw-") || n.Id.StartsWith("headon-") || n.Id.StartsWith("tw-") || n.Id.StartsWith("push-") || n.Id.StartsWith("hs-");
         var warns = list.Where(n => n.Warning && Taxiway(n)).ToList();
-        if (warns.Count > 0) { _clearUntil = 0; _lastWarn = warns.Select(n => n.Text.Split(' ').FirstOrDefault(w => w.Length > 3 && w.Any(char.IsDigit) && w.All(char.IsLetterOrDigit)) ?? "").Where(c => c.Length > 0).Distinct().ToList(); }
+        if (warns.Count > 0) { _clearUntil = 0; _lastWarn = warns.Select(n => n.Text.Split(' ').FirstOrDefault(w => System.Text.RegularExpressions.Regex.IsMatch(w, @"^[A-Z]{3}\d+[A-Z]?$")) ?? "").Where(c => c.Length > 0).Distinct().ToList(); }
         else if (_lastWarn is not null)
         {
             _clearUntil = Time + 12;
