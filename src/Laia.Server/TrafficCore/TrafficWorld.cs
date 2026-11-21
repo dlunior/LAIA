@@ -4163,7 +4163,7 @@ public sealed partial class TrafficWorld
 
     /// <summary>A line simplified (Ramer–Douglas–Peucker): points within tol of the straight line between their
     /// neighbours dropped, the ends kept. Takes the wiggles out of real tracks so they fly as clean legs.</summary>
-    internal static List<V2> Simplify(List<V2> pts, double tol)
+    public static List<V2> Simplify(List<V2> pts, double tol)
     {
         if (pts.Count < 3) return new List<V2>(pts);
         var keep = new bool[pts.Count]; keep[0] = keep[^1] = true;
@@ -4180,7 +4180,7 @@ public sealed partial class TrafficWorld
     }
 
     /// <summary>How far a line turns in all (degrees) over its first lenM metres.</summary>
-    internal static double TotalTurn(List<V2> pts, double lenM)
+    public static double TotalTurn(List<V2> pts, double lenM)
     {
         double t = 0, run = 0; double? prev = null;
         for (var i = 1; i < pts.Count && run < lenM; i++)
