@@ -994,7 +994,7 @@ Console.WriteLine("== Real tracks chosen for the need: an empty sky gets the sho
     var g2 = world.SpawnArrival(37, true)!;
     for (var t = 0.0; t < 240; t += 0.5) world.Step(0.5);
     var longer = logR.Where(l => l.StartsWith(g2.Callsign + ":") && (l.Contains("longer real track") || l.Contains("vectors"))).ToList();
-    Console.WriteLine($"  the one behind: {string.Join(" | ", longer.Take(3).Select(l => l.Length > 150 ? l[..150] : l))}");
+    Console.WriteLine($"  the one behind: {string.Join(" | ", longer.Take(3).Select(l => l.Length > 150 ? l[..150] : l))}; first: seq {f.Seq} eta {f.EtaSec:0} fan {f.FanIdx}/{f.Fan?.Count}; behind: seq {g2.Seq} eta {g2.EtaSec:0} delay {g2.Delay:0} fan {g2.FanIdx}/{g2.Fan?.Count} {(g2.ThrS - g2.S) / nm:0} nm to go; log {logR.Count}: {string.Join(" | ", logR.Take(4))}");
     Check(logR.Any(l => l.StartsWith(g2.Callsign + ":") && l.Contains("longer real track")), "the one behind, with time to lose, is put on a longer real way in");
     // Simplify and TotalTurn (used for the departures' loop check).
     var zig = new List<V2>(); for (var i = 0; i < 20; i++) zig.Add(new V2(i * nm, (i % 2) * 0.1 * nm));
