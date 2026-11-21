@@ -1894,6 +1894,16 @@ public sealed partial class TrafficWorld
             }
         }
         var onOwn = from >= 0;
+        // Along its own route to that junction (its taxiway's bends), not straight across the grass to it.
+        var lead = new List<V2>();
+        if (onOwn && f.TaxiRoute is { } own2)
+        {
+            var fi = own2.IndexOf(from);
+            var fwdL = V2.FromBearing(f.Heading);
+            var ci = -1;
+            for (var i = 0; i < fi; i++) { var v = Apt.Nodes[own2[i]] - f.Pos; if (V2.Dot(v, fwdL) > 5) { ci = i; break; } }
+            if (ci >= 0) for (var i = ci; i < fi; i++) lead.Add(Apt.Nodes[own2[i]]);
+        }
         if (from < 0)
             for (var i = 0; i < Apt.TaxiPointCount; i++)
             {
@@ -1905,9 +1915,11 @@ public sealed partial class TrafficWorld
         var route = Apt.Route(from, dest, ActiveRunways(), avoid, TaxiCost(f));
         if (route is null) return false;
         var pts = new List<V2> { f.Pos };
+        pts.AddRange(lead);
         var fwd = V2.FromBearing(f.Heading);
         var toFirst = Apt.Nodes[route[0]] - f.Pos;
-        if (V2.Dot(toFirst, fwd) < 0)
+        if (lead.Count > 0) { }
+        else if (V2.Dot(toFirst, fwd) < 0)
         { pts.Add(f.Pos + fwd * 20); pts.Add(f.Pos + fwd * 50 + fwd.Perp * 40); }   // turn around in a wide teardrop, never on the spot
         else if (toFirst.Length > 1 && V2.Dot(toFirst.Unit, fwd) < 0.85)
             pts.Add(f.Pos + fwd * 20);                  // roll ahead a little and turn in an arc, not on the spot
@@ -5591,7 +5603,10 @@ public sealed partial class TrafficWorld
         // After 2 minutes on the way in, another gate comes first (it used to wait for a minute without a reroute,
         // which the reroutes every minute never allowed: DAL2225 was removed at MCO instead of going elsewhere).
         if (f.StuckFor > 120 && f.Phase == "taxi in" && Time - f.GateTryTime > 60) { f.GateTryTime = Time; if (TryOtherGate(f)) { f.StuckFor = 0; return; } }
-        if (f.StuckFor > 20 && f.BlockedByUser && UserPos is { } u && Time - f.RerouteTime > 60)
+        // Round the user only when the user is parked (hasn't moved for 3 minutes): taxiing or waiting in line, the user
+        // keeps their place and LAIA's traffic waits behind (21 Nov, KORD: UAL2142 "took another way round" the user
+        // waiting in the departure queue — across the grass, and ahead of the user in the sequence).
+        if (f.StuckFor > 20 && f.BlockedByUser && Time - _userMovedAt > 180 && UserPos is { } u && Time - f.RerouteTime > 60)
         {
             f.RerouteTime = Time;
             // A new way doesn't reset the clock: only moving does (DAL1885 rerouted every minute for 10 minutes,
