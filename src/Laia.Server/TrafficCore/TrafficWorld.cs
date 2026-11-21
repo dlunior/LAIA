@@ -3663,7 +3663,10 @@ public sealed partial class TrafficWorld
         if (found.Count < 3) return null;
         var lens = found.Select(x => Len(x.rest)).OrderBy(x => x).ToList();
         var med = lens[lens.Count / 2];
-        found = found.Where(x => Len(x.rest) is var lx && lx >= med * 0.6 && lx <= med * 1.35).ToList();
+        // Much longer than usual is a hold or a loop; short is kept down to a third of the usual — at a busy airport most
+        // real tracks are rush-hour ones, and the quiet-time shortcuts are what an empty sky should get (the repeat check
+        // below takes out one-offs).
+        found = found.Where(x => Len(x.rest) is var lx && lx >= med * 0.35 && lx <= med * 1.35).ToList();
         // Patterns real controllers used again and again, not one aircraft's one-off (user, 21 Nov: "not just any route
         // it sees willy nilly"): with six or more, each needs another that left the STAR within 3 nm of it and was
         // within 10% of its length.
