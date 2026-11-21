@@ -57,6 +57,17 @@ public sealed class AtisReader(ILogger log)
         return parts;
     }
 
+    /// <summary>How many minutes ago a broadcast was issued, from its time ("INFO I 1952Z"); 9999 when it doesn't say.</summary>
+    public static int AgeMinutes(string text, DateTime? nowUtc = null)
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(text.ToUpperInvariant(), @"\b([0-2]\d)([0-5]\d)Z\b");
+        if (!m.Success) return 9999;
+        var now = nowUtc ?? DateTime.UtcNow;
+        var mins = int.Parse(m.Groups[1].Value) * 60 + int.Parse(m.Groups[2].Value);
+        var diff = (now.Hour * 60 + now.Minute - mins + 1440) % 1440;
+        return diff;
+    }
+
     private async Task FetchAsync(string icao)
     {
         var info = new AtisInfo();
@@ -66,21 +77,31 @@ public sealed class AtisReader(ILogger log)
         {
             string? from = null;
             var none = false;
+            // Both sources, and the newer broadcast wins (user, 21 Nov: KATL had been info I since 1952Z while atis.info
+            // still served info H twenty minutes later; the second source was only tried when the first failed).
+            var got = new List<(string host, List<(string type, string code, string text)> parts, int age)>();
             foreach (var url in new[] { $"https://atis.info/api/{icao}", $"https://datis.clowd.io/api/{icao}" })
             {
+                var host = new Uri(url).Host;
                 try
                 {
                     using var resp = await Http.GetAsync(url);
-                    if (resp.StatusCode == HttpStatusCode.NotFound) { none = true; from = new Uri(url).Host; break; }
-                    if (!resp.IsSuccessStatusCode) { note += $"{new Uri(url).Host} {(int)resp.StatusCode}; "; continue; }
+                    if (resp.StatusCode == HttpStatusCode.NotFound) { note += $"{host} has none; "; continue; }
+                    if (!resp.IsSuccessStatusCode) { note += $"{host} {(int)resp.StatusCode}; "; continue; }
                     var parts = Parts(await resp.Content.ReadAsStringAsync());
-                    from = new Uri(url).Host;
-                    if (parts.Count == 0) { none = true; break; }
-                    info = AtisParse.Combine(parts);
-                    break;
+                    if (parts.Count == 0) { note += $"{host} has none; "; continue; }
+                    got.Add((host, parts, parts.Min(pt => AgeMinutes(pt.text))));
                 }
-                catch (Exception ex) { note += $"{new Uri(url).Host}: {ex.Message}; "; }
+                catch (Exception ex) { note += $"{host}: {ex.Message}; "; }
             }
+            if (got.Count > 0)
+            {
+                var best = got.OrderBy(g => g.age).First();
+                from = best.host + (best.age < 9999 ? $", issued {best.age} min ago" : "")
+                    + string.Join("", got.Where(g => g != best).Select(g => $"; {g.host} older{(g.age < 9999 ? $" ({g.age} min)" : "")}"));
+                info = AtisParse.Combine(best.parts);
+            }
+            else if (note.Contains("has none") && !note.Contains(": ") && !System.Text.RegularExpressions.Regex.IsMatch(note, @"\b[45]\d\d;")) { none = true; from = "atis.info"; }
             if (none)
             {
                 until = DateTime.UtcNow.AddHours(12);
