@@ -989,6 +989,13 @@ Console.WriteLine("== Real tracks chosen for the need: an empty sky gets the sho
     }
     Console.WriteLine($"  sharpest change of direction along its path: {maxRate:0}° per 200 m");
     Check(maxRate < 20, "its real-traffic path turns smoothly");
+    // One right behind it with time to lose takes a longer real way in (before vectors).
+    var logR = new List<string>(); world.Log = l => logR.Add(l);
+    var g2 = world.SpawnArrival(37, true)!;
+    for (var t = 0.0; t < 240; t += 0.5) world.Step(0.5);
+    var longer = logR.Where(l => l.StartsWith(g2.Callsign + ":") && (l.Contains("longer real track") || l.Contains("vectors"))).ToList();
+    Console.WriteLine($"  the one behind: {string.Join(" | ", longer.Take(3).Select(l => l.Length > 150 ? l[..150] : l))}");
+    Check(logR.Any(l => l.StartsWith(g2.Callsign + ":") && l.Contains("longer real track")), "the one behind, with time to lose, is put on a longer real way in");
     // Simplify and TotalTurn (used for the departures' loop check).
     var zig = new List<V2>(); for (var i = 0; i < 20; i++) zig.Add(new V2(i * nm, (i % 2) * 0.1 * nm));
     Check(TrafficWorld.Simplify(zig, 0.25 * nm).Count == 2, "a wiggling line within a quarter mile simplifies to a straight leg");
