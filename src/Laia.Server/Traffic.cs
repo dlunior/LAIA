@@ -1141,7 +1141,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
             // ISM, TIX, LEE) that have airline traffic in the schedules; a 40 nm circle where the FAA data has none.
             var family = Family(main.Apt);
             _neighbourWant = NeighbourWant(main.Apt, family);
-            _neighbourHow = family.Count > 0 ? $"{nasrDb.ApproachFacility(main.Apt.Icao)} approach control" : "within 40 nm";
+            _neighbourHow = (family.Count > 0 ? $"{nasrDb.ApproachFacility(main.Apt.Icao)} approach control" : "within 40 nm") + "; airline fields within 30 nm first";
             // Say which fields were considered and why each is or isn't a neighbour (user, 13 Nov: "I don't see SFB").
             if (family.Count > 0)
             {
@@ -1196,10 +1196,17 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     private List<string> Family(AirportModel apt) => nasrDb.SameApproach(apt.Icao)
         .Where(i => worldAirports.Find(i) is { } p && Geo2.DistanceNm(apt.Data.Lat, apt.Data.Lon, p.lat, p.lon) < 120).ToList();
 
-    /// <summary>The neighbouring fields of an airport: the busiest airline fields of its approach control (or within 40 nm), up to six.</summary>
-    private List<string> NeighbourWant(AirportModel apt, List<string> family) =>
-        (family.Count > 0 ? network.BusyAmong(family, 14) : network.BusyAirportsNear(apt.Data.Lat, apt.Data.Lon, 40, 14, apt.Icao))
+    /// <summary>The neighbouring fields of an airport: the busiest airline fields of its approach control (or within 40 nm), up to six.
+    /// Airline fields within 30 nm always come first, whoever staffs them (user, 22 Nov: Newark's approach control
+    /// moved to Philadelphia's staffing but its airspace is still New York's — the FAA records give "PHL", so Newark
+    /// got Philadelphia, 70 nm away, and not LaGuardia (14 nm) or JFK (18 nm)); then the approach control's fields.</summary>
+    private List<string> NeighbourWant(AirportModel apt, List<string> family)
+    {
+        var close = network.BusyAirportsNear(apt.Data.Lat, apt.Data.Lon, 30, 14, apt.Icao);
+        var rest = family.Count > 0 ? network.BusyAmong(family, 14) : network.BusyAirportsNear(apt.Data.Lat, apt.Data.Lon, 40, 14, apt.Icao);
+        return close.Concat(rest).Distinct(StringComparer.OrdinalIgnoreCase)
             .Where(i => !i.Equals(apt.Icao, StringComparison.OrdinalIgnoreCase)).Take(6).ToList();
+    }
 
     private void UpdateWorld(AircraftState sim)
     {

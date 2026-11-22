@@ -79,7 +79,7 @@ public sealed class Flight
     public double VectorRejoinS = double.NegativeInfinity;
     public int DelayVectors, RwySwitches;
     public string? HoldWhy; public bool HoldWhyLogged;
-    public double RunwayStopFor;
+    public double RunwayStopFor, SpeedAt = -1e9;
     public bool ReplanFree;
     /// <summary>Departures: its number in its runway's departure order (0 when not in it: at the gate, boarding).</summary>
     public int DepSeq;
@@ -3222,7 +3222,11 @@ public sealed partial class TrafficWorld
             // schedule has them, some already on the STAR (SWA2236 29 nm out at 11,270 ft, 5 nm before "at 7,000" at
             // BUNIE) — they'd have been brought down to it already.
             f.AltFt = Math.Min(en.altFt, Restricted(f, en.altFt));
+            // And no higher than a 3:1 descent along the way it will fly, +1,000 ft (22 Nov: as an airport or neighbour
+            // starts, arrivals appear where the whole sky had them — UAL2036 74 nm out at 30,850 ft, SWA2463 52 nm out
+            // at 24,640 ft — the whole sky's own descent for an airport not yet run in detail).
             var dth0 = f.ThrS / Geo2.MPerNm;
+            f.AltFt = Math.Max(Math.Min(f.AltFt, rwy.ElevationFt + 1000 + 300 * dth0), Math.Min(en.altFt, rwy.ElevationFt + 3000));
             f.Ias = ArrivalSpeed(f, dth0);
             f.Gs = Wind.Tas(f.Ias, f.AltFt);
             f.SetPhase("arriving", Time);
@@ -4910,7 +4914,10 @@ public sealed partial class TrafficWorld
                 dv = c;
                 if (EtaToThreshold(f, dth) - base0 >= f.Delay) break;
             }
-            f.SlowDv = Math.Abs(dv - keep) < 10 && keep > 0 ? keep : dv;
+            // Few, steady speed instructions (7110.65 5-7-1: the minimum necessary, no alternating; 20 Nov, CYUL: ACA336
+            // and ACA376 got 12–14 each): a change of less than 10 kt is never given, and within 2½ minutes of the last
+            // one only a change of 20 kt or more.
+            f.SlowDv = keep > 0 && (Math.Abs(dv - keep) < 10 || (Time - f.SpeedAt < 150 && Math.Abs(dv - keep) < 20)) ? keep : dv;
             // More delay than speed (40 kt slower) and the trombone near the runway can take: delay vectors on the way
             // in, far out (beyond 40 nm), a few minutes at a time — never a hold.
             // Far out, the delay speed can't take is planned onto a longer real track (the way real controllers stretch
@@ -4938,6 +4945,9 @@ public sealed partial class TrafficWorld
                     if (Vector(f, Math.Min(left, 300), rejoinNm: Math.Clamp(dth - 30, 25, 45), why: $"{f.Delay:0} s delay for the sequence (number {f.Seq} for {f.Rwy.Ident}), {bySpeed:0} s of it by speed")) f.DelayVectors++;
             }
         }
+        // Not slowed again for a small delay just after being let go (a delay wavering around 5–10 s turned it off and on).
+        if (old == 0 && f.SlowDv > 0 && f.Delay < 30 && Time - f.SpeedAt < 300) f.SlowDv = 0;
+        if (f.SlowDv != old) f.SpeedAt = Time;
         if (f.SlowDv > 0 && (old == 0 || Math.Abs(f.SlowDv - old) >= 10))
         {
             _speedAssigns++;
@@ -5334,8 +5344,16 @@ public sealed partial class TrafficWorld
             // Not every landing brakes the same (user, 21 Nov, KATL: "a lot exiting the runway at the same spot … a bit
             // too frequent"): most at about 2.4 m/s², about one in six gently (the next exit or so), one in thirty a
             // long roll; heavies a little gentler.
+            // Only with room behind (21 Nov, KPHL: DAL2703 went around 90 s behind SWA2463 still on its long roll-out —
+            // the spacing assumes a normal one): the next arrival to this runway 2½ minutes or more out (3 for a long
+            // roll), as pilots expedite with traffic close behind.
             var u0 = Rng.NextDouble();
-            var decel = 2.4 * (u0 < 0.80 ? 0.9 + 0.2 * Rng.NextDouble() : u0 < 0.97 ? 0.65 + 0.15 * Rng.NextDouble() : 0.5 + 0.1 * Rng.NextDouble()) * (f.P.Heavy ? 0.9 : 1.0);
+            var nextIn = Flights.Where(o => o != f && o.Kind == "arrival" && !o.Done && !o.OnGround && o.Rwy?.Runway == rwy.Runway && !double.IsNaN(o.EtaSec))
+                .Select(o => o.EtaSec).DefaultIfEmpty(double.MaxValue).Min();
+            if (UserArr is { Done: false, OnGround: false } ua && ua.Rwy?.Runway == rwy.Runway && !double.IsNaN(ua.EtaSec)) nextIn = Math.Min(nextIn, ua.EtaSec);
+            if (u0 >= 0.97 && nextIn < 180) u0 = 0.9;
+            if (u0 >= 0.80 && nextIn < 150) u0 = 0.5;
+            var decel = 2.4 * (u0 < 0.80 ? 0.9 + 0.2 * Rng.NextDouble() : u0 < 0.97 ? 0.65 + 0.15 * Rng.NextDouble() : 0.5 + 0.1 * Rng.NextDouble()) * (u0 >= 0.80 && f.P.Heavy ? 0.9 : 1.0);
             double Needed(double dot) { var vx = dot > 0.5 ? ExitSpeedFast : ExitSpeedSquare; return tdAlong + Math.Max(250, (v0 * v0 - vx * vx) / (2 * decel)); }
             var links = Apt.RunwayLinks(rwy.Runway)
                 .Select(l => (l.on, l.off, along: rwy.Along(Apt.Nodes[l.on]), dir: (Apt.Nodes[l.off] - Apt.Nodes[l.on]).Unit))
