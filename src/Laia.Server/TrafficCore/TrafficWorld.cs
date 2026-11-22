@@ -129,7 +129,7 @@ public sealed class Flight
     public string DepReport = "";
     public double GateTryTime = -999;
     /// <summary>A departure's climb stopped below crossing traffic (NaN: none), and when that was last checked.</summary>
-    public double ClimbStop = double.NaN, ProbeAt = -99;
+    public double ClimbStop = double.NaN, ProbeAt = -99, ClimbHoldFt = double.NaN;
     public string? StoppedFor;
     /// <summary>The SID's top altitude (the chart's "maintain 7,000", NaN: none) and whether the climb above it was given.</summary>
     public double TopAltFt = double.NaN, ReleaseAt = -99, TopReachedAt = double.NaN;
@@ -467,7 +467,7 @@ public sealed partial class TrafficWorld
             // The main departure runway is one not also used for landing, when there is one.
             atisDeps = atisDeps.OrderBy(e => atisArrs.Any(a => a.Runway == e.Runway) ? 1 : 0).ThenByDescending(e => e.LengthM).ToList();
             if (!ArrRwys.SequenceEqual(atisArrs) || !DepRwys.SequenceEqual(atisDeps))
-                Log($"Runways in use at {Apt.Icao}: landing {string.Join(", ", atisArrs.Select(e => e.Ident))}, departing {string.Join(", ", atisDeps.Select(e => e.Ident))} (from the real ATIS{(_atis.CodeArr is { } c ? " info " + c : "")}; wind {Wind.FromDeg:000} at {Wind.Kt:0} kt)");
+                Log($"Runways in use at {Apt.Icao}: landing {string.Join(", ", atisArrs.Select(e => e.Ident))}, departing {string.Join(", ", atisDeps.Select(e => e.Ident))} (from the real ATIS{(!string.IsNullOrEmpty(_atis.CodeArr) ? " info " + _atis.CodeArr : "")}; wind {Wind.FromDeg:000} at {Wind.Kt:0} kt)");
             ArrRwys = atisArrs; DepRwys = atisDeps;
             ArrRwy = atisArrs[0];
             DepRwy = atisDeps[0];
@@ -552,7 +552,7 @@ public sealed partial class TrafficWorld
         var aD = ends(AtisDeparting);
         if (aD.Count == 0) aD = new() { aA[0] };
         aD = aD.OrderBy(e => aA.Any(a => a.Runway == e.Runway) ? 1 : 0).ThenByDescending(e => e.LengthM).ToList();
-        var why = $"from the real ATIS{(_atis.CodeArr is { } c ? " info " + c : "")}";
+        var why = $"from the real ATIS{(!string.IsNullOrEmpty(_atis.CodeArr) ? " info " + _atis.CodeArr : "")}";
         if (learned is { } l)
         {
             var addA = l.arr.Where(e => !aA.Contains(e) && Math.Abs(Geo2.Diff(e.Heading, aA[0].Heading)) < 60).ToList();
@@ -2456,6 +2456,7 @@ public sealed partial class TrafficWorld
         // Line up and wait behind a take-off roll, or behind a landing rolling out (safety logic, fair weather).
         var behind = Flights.Where(o => o != f && !o.Done && (o.Reserve == r || (o.OnRunway == r && !(o.Kind == "departure" && !o.OnGround)))).ToList();
         if (UserOnRunway(r)) { f.HoldWhy = "your aircraft on the runway"; return false; }
+        if (GoAroundAhead(f) is { } ga) { f.HoldWhy = $"{ga.Callsign} going around over the runway"; return false; }
         if (behind.FirstOrDefault(o => !MayLineUpBehind(o, f)) is { } bo) { f.HoldWhy = $"{bo.Callsign} on the runway"; return false; }
         // During a runway change, no departures the new way while arrivals still come in the old way (the opposite
         // direction) within 30 nm: the airport turns round once the last of them has landed.
@@ -2480,10 +2481,29 @@ public sealed partial class TrafficWorld
         return true;
     }
 
+    /// <summary>
+    /// A go-around still over or ahead of the departure runway, low (22 Nov, KJFK: DLH410 went around on 31L just as
+    /// CPA831 lined up there; they came within 1.0 nm): no line-up or take-off until it has climbed through 3,000 ft
+    /// above the field, or is more than 5 nm past the runway's end or 1.5 nm to either side of its line.
+    /// </summary>
+    private Flight? GoAroundAhead(Flight f)
+    {
+        var d = f.Rwy!;
+        foreach (var o in Flights)
+        {
+            if (o.Done || o.OnGround || o.Phase != "go-around" || o == f) continue;
+            if (o.AltFt - d.ElevationFt > 3000) continue;
+            var along = d.Along(o.Pos); var off = Math.Abs(d.Offset(o.Pos));
+            if (along > -2 * Geo2.MPerNm && along < d.LengthM + 5 * Geo2.MPerNm && off < 1.5 * Geo2.MPerNm) return o;
+        }
+        return null;
+    }
+
     private bool TakeoffAllowed(Flight f)
     {
         var r = f.Rwy!.Runway;
         if (RunwayBusy(r, f)) return false;
+        if (GoAroundAhead(f) is not null) return false;
         // Airborne and 6,000 ft down the runway before the next arrival crosses the threshold (3-10-3), a few seconds spare.
         if (ArrivalEta(r) < TimeToClearForArrival(f) + 5) return false;
         if (!CrossingRunwayClearForTakeoff(f)) return false;
@@ -4698,6 +4718,22 @@ public sealed partial class TrafficWorld
         f.WentAround = true;
         var p = f.Pos;
         var climbOut = p + rwy.Dir * (4 * Geo2.MPerNm);
+        // A departure rolling or just off this runway (or one crossing ahead): the go-around turns 25° away from where it
+        // goes, as the tower would ("turn left heading …"), instead of climbing out straight behind or into it.
+        var dep = Flights.Where(o => o != f && !o.Done && o.Kind == "departure" && o.Rwy is { } dr
+                && (dr.Runway == rwy.Runway || Crossing(rwy, dr) is not null)
+                && (o.Phase is "takeoff roll" or "lined up" || (!o.OnGround && o.AltFt - rwy.ElevationFt < 4000 && (o.Pos - p).Length < 8 * Geo2.MPerNm)))
+            .OrderBy(o => (o.Pos - p).Length).FirstOrDefault();
+        if (dep is not null)
+        {
+            // Which side of the go-around's line the departure is or will be (its route 3 nm on).
+            var dp = dep.Path is { } dpath ? dpath.At(Math.Min(dpath.Length, dep.S + 3 * Geo2.MPerNm)).p : dep.Pos;
+            var side = V2.Cross(rwy.Dir, dp - p);
+            var turn = Math.Abs(side) < 300 ? 25 : side > 0 ? 25 : -25;   // V2.Cross > 0: to the left; turn right then
+            var hdg = Geo2.Norm(rwy.Heading + turn);
+            climbOut = p + rwy.Dir * (0.5 * Geo2.MPerNm) + V2.FromBearing(hdg) * (3.5 * Geo2.MPerNm);
+            Log($"{f.Callsign}: go-around turns {(turn > 0 ? "right" : "left")} heading {hdg:000} away from {dep.Callsign} departing");
+        }
         BuildArrivalPath(f, climbOut);
         // Prepend the current position so the path starts where the aircraft is.
         var pts = new List<V2> { p };
@@ -6191,7 +6227,10 @@ public sealed partial class TrafficWorld
         double floor = double.NaN; string? who = null;
         foreach (var o in OthersAndUser())
         {
-            if (!o.Main || o.AltFt > f.AltFt + 500 || (o.Pos - f.Pos).Length > 20 * Geo2.MPerNm) continue;
+            // A neighbour's arrival over the main airport's traffic; and (22 Nov, KLGA/KJFK) the main airport's arrival
+            // over a neighbour's departure climbing below it — LaGuardia's arrivals kept descending onto JFK's departures
+            // whose climbs had been stopped (JBU625 at 4,829 ft, DAL2140 down through 5,204 ft 2.9 nm away).
+            if (!(o.Main || (!RunwayOnly && o.Kind == "departure")) || o.AltFt > f.AltFt + 500 || (o.Pos - f.Pos).Length > 20 * Geo2.MPerNm) continue;
             // An arrival behind the user in the same runway's sequence is spaced by distance, not kept above (KATL,
             // 15 Nov: DAL2266, behind the user for 08L, "descent stopped at 5,000 ft for DAL1196 (you) below" — it would
             // end up high on the approach).
@@ -6320,7 +6359,15 @@ public sealed partial class TrafficWorld
         var cap = f.AltLimits.Where(c => c.Max > 0 && c.S > f.S - 0.2 * Geo2.MPerNm).Select(c => c.Max).DefaultIfEmpty(double.MaxValue).Min();
         // Departure control: stop the climb below an arrival it would otherwise climb into (radar vectors or not).
         if (Time - f.ProbeAt >= 2) { f.ProbeAt = Time; f.ClimbStop = ProbeArrivals(f, f.P.ClimbFpm * 0.8); }
-        if (!double.IsNaN(f.ClimbStop)) cap = Math.Min(cap, Math.Max(f.ClimbStop, Math.Min(f.AltFt, cap)));
+        // A stop below where it already is holds the altitude it had when the stop came — not "where it is now" every
+        // 2 s, which crept up with the climb still easing off (22 Nov, KLGA: UAL2485 "climb stopped at" 3,852, 3,973,
+        // 4,053, 4,075 ft while UAL1499 and UAL1826 came down to 778 ft above it).
+        if (double.IsNaN(f.ClimbStop)) f.ClimbHoldFt = double.NaN;
+        else
+        {
+            if (f.ClimbStop < f.AltFt && double.IsNaN(f.ClimbHoldFt)) f.ClimbHoldFt = f.AltFt;
+            cap = Math.Min(cap, Math.Max(f.ClimbStop, double.IsNaN(f.ClimbHoldFt) ? Math.Min(f.AltFt, cap) : f.ClimbHoldFt));
+        }
         // The SID's top altitude (MCO: 7,000 ft, under the arrivals' "at or above 8,000"): level there; the climb is
         // given early once it's clear of the arrivals, and in any case 10 minutes after take-off.
         if (!f.ClimbReleased)
@@ -6435,15 +6482,18 @@ public sealed partial class TrafficWorld
         foreach (var o in OthersAndUser())
         {
             if (o.AltFt < d.AltFt - 1500 || (o.Pos - d.Pos).Length > 20 * Geo2.MPerNm || o.Phase is "flare" or "landing roll") continue;
+            // Another airport's traffic is only known where it is now and projected straight on — its turns aren't — so
+            // looked at further ahead (3 minutes) and wider (5 nm) than this airport's own (22 Nov, KLGA/KJFK: ten losses,
+            // 2.1–3.0 nm and 850–950 ft, most with the climb stopped only once the other was 3 nm away).
             double lowest = double.MaxValue; var conflict = false;
-            for (var t = 0.0; t <= 120; t += 10)
+            for (var t = 0.0; t <= 180; t += 10)
             {
                 var dp = d.Path.At(Math.Min(d.Path.Length, d.S + d.Gs * 0.5144 * t)).p;
                 var op = Ahead(o, t);
                 var oAlt = Math.Max(o.AltFt + (o.Phase == "user" ? o.Vs * Math.Min(t, 60) / 60 : (o.Kind == "arrival" ? Math.Min(0, o.Vs) : Math.Max(0, o.Vs)) * t / 60), 0);
                 var lat = (dp - op).Length;
-                if (lat < 5 * Geo2.MPerNm) lowest = Math.Min(lowest, Math.Min(o.AltFt, oAlt));
-                if (lat < 3.5 * Geo2.MPerNm && Math.Abs(d.AltFt + climbFpm * t / 60 - oAlt) < 1000 && d.AltFt < oAlt) conflict = true;
+                if (lat < 6 * Geo2.MPerNm) lowest = Math.Min(lowest, Math.Min(o.AltFt, oAlt));
+                if (lat < 5 * Geo2.MPerNm && Math.Abs(d.AltFt + climbFpm * t / 60 - oAlt) < 1000 && d.AltFt < oAlt) conflict = true;
             }
             if (conflict && lowest < double.MaxValue) Stop(Math.Floor((lowest - 1000) / 1000) * 1000, $"{o.Callsign} ({o.Airport})", o.AltFt, o.Pos);
         }
