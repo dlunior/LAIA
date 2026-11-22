@@ -6563,12 +6563,11 @@ public sealed partial class TrafficWorld
                     // gone around: its predicted time is far too late (21 Nov, KATL: SWA727 took a shorter real track to
                     // close "405 s behind DAL3127" while DAL3127 was on its second break-off loop; DAL3127 landed first
                     // and SWA727 was broken off 215 s short behind the next one).
-                    // On the landing schedule (its slot from the arrival manager) rather than only the leader's live
-                    // time: with the leader off its plan, the slot is what it aims for (not "nothing"), and a shortcut
-                    // never takes it more than a minute ahead of its slot, where the one ahead of its leader may be.
-                    var staAdd = f.Frozen && !double.IsNaN(f.FrozenSlot) && f.FrozenSlot > 0 ? f.FrozenSlot - (Time + EtaToThreshold(f, dth)) : double.NaN;
-                    var offPlan = leader.Mgr is "vectored around" or "vectored" || leader.Rejoin || leader.WentAround || leader.DetourSec > 0;
-                    if (add < 0 && offPlan) add = double.IsNaN(staAdd) ? 0 : Math.Clamp(staAdd, add, 0);
+                    // And on the landing schedule (its slot from the arrival manager), not only the leader's live time:
+                    // a shortcut never takes it more than a minute ahead of its slot, where the one ahead of its leader
+                    // may be.
+                    var staAdd = f.Frozen && f.FrozenSlot > 0 ? f.FrozenSlot - (Time + EtaToThreshold(f, dth)) : double.NaN;
+                    if (add < 0 && (leader.Mgr is "vectored around" or "vectored" || leader.Rejoin || leader.WentAround || leader.DetourSec > 0)) add = 0;
                     else if (add < 0 && !double.IsNaN(staAdd)) add = Math.Max(add, Math.Min(0, staAdd - 60));
                     f.TromboneLeft = Trombone(f, add > 10 || add < -25 ? add : 0, $"{gapSec:0} s behind {leader.Callsign} at the runway, {wantGap:0} wanted");
                     if (double.IsNaN(f.TromboneLeft) && f.Fan is not null)
