@@ -81,6 +81,9 @@ public sealed class Flight
     public string? HoldWhy; public bool HoldWhyLogged;
     public double RunwayStopFor, SpeedAt = -1e9;
     public int BreakOffs;
+    public bool JunctionHeld, GoFirstFailed;
+    public double GoFirstAt = -1, JhCheckAt = -1e9;
+    public (string name, Flight ahead)? JhLast;
     public string ExitNote = "";
     public bool ReplanFree;
     /// <summary>Departures: its number in its runway's departure order (0 when not in it: at the gate, boarding).</summary>
@@ -5776,7 +5779,8 @@ public sealed partial class TrafficWorld
         }
         else f.RunwayStopFor = 0;
         var atHold = f.Stops.Any(st => !st.Cleared && Math.Abs(st.S - f.S) < 3);
-        if (f.Gs > 0.5 || atHold || InQueue(f)) { f.StuckFor = 0; return; }
+        if (f.Gs > 0.5) { f.GoFirstAt = -1; f.GoFirstFailed = false; }
+        if (f.Gs > 0.5 || atHold || f.JunctionHeld || InQueue(f)) { f.StuckFor = 0; return; }
         f.StuckFor += dt;
         // After 2 minutes on the way in, another gate comes first (it used to wait for a minute without a reroute,
         // which the reroutes every minute never allowed: DAL2225 was removed at MCO instead of going elsewhere).
@@ -5844,6 +5848,68 @@ public sealed partial class TrafficWorld
             if (sp >= path.Length) break;
         }
         return false;
+    }
+
+    /// <summary>Getting off a runway: on it, or its tail still within the runway's protected area (about 80 m from the
+    /// centreline). Only that far: once its tail is past the hold line it is ordinary taxi traffic (user, 22 Nov: "Traffic
+    /// coming immediately off a runway should be given priority. But just immediately off a runway").</summary>
+    private bool Vacating(Flight x)
+    {
+        if (!x.OnGround || x.Phase is "parked" or "boarding" or "pushback") return false;
+        if (x.OnRunway >= 0 && x.Phase is "taxi" or "taxi in" or "landing roll") return true;
+        if (x.Phase != "taxi in" && x.Phase != "landing roll") return false;
+        var tail = x.Pos - V2.FromBearing(x.Heading) * (x.P.LengthM / 2);
+        return Apt.Ends.Any(e => e.Contains(tail, 60));
+    }
+
+    /// <summary>
+    /// Hold short of the next taxiway junction on its route when the aircraft ahead beyond it, stopped or crawling,
+    /// would leave it across the junction: the room past the junction (to that aircraft's tail) must take its whole
+    /// length plus 10 m. Not for one getting off a runway, or one already in the junction. Checked once a second.
+    /// </summary>
+    private (string name, Flight ahead)? JunctionHold(Flight f, double v)
+    {
+        if (f.Phase is not ("taxi" or "taxi in") || f.Reverse || f.Path is not { } path || f.TaxiRoute is not { Count: > 1 } route) return null;
+        if (Vacating(f)) return null;
+        if (Time - f.JhCheckAt < 1) return f.JhLast;
+        f.JhCheckAt = Time; f.JhLast = null;
+        var nose = f.S + f.P.LengthM / 2;
+        var lead = 30 + v * v / 2.0;
+        // The next junction ahead: a node on its route where three or more taxi lines meet, off the runways.
+        var ne = NextEdge(f);
+        var start = ne is { } e0 ? Math.Max(0, route.IndexOf(e0.v)) : 0;
+        for (var i = start; i < route.Count && i < start + 12; i++)
+        {
+            var n = route[i];
+            if (Apt.NodeRunway[n] >= 0) continue;
+            if (Apt.Adj[n].Count(x => x.B < Apt.TaxiPointCount && x.Type is 1 or 4) < 3) continue;
+            var jp = Apt.Nodes[n];
+            if ((jp - f.Pos).Length > nose - f.S + lead + 40) return null;
+            // Where it is along the path.
+            double sJ = double.NaN; var bd = 12.0;
+            for (var sp = f.S; sp <= Math.Min(path.Length, f.S + 200); sp += 4) { var d = (path.At(sp).p - jp).Length; if (d < bd) { bd = d; sJ = sp; } }
+            if (double.IsNaN(sJ)) return null;
+            var edgeIn = sJ - 15;
+            if (nose > edgeIn) continue;                 // already in it: through it
+            if (edgeIn - nose > lead) return null;       // not yet
+            // The nearest aircraft on its path beyond the junction.
+            Flight? ahead = null; double sAhead = double.MaxValue;
+            foreach (var o in Flights)
+            {
+                if (o == f || o.Done || !o.OnGround || o.Phase is "parked" or "boarding") continue;
+                if ((o.Pos - jp).Length > f.P.LengthM + o.P.LengthM + 60) continue;
+                for (var sp = sJ; sp <= Math.Min(path.Length, sJ + f.P.LengthM + o.P.LengthM + 40); sp += 4)
+                    if ((path.At(sp).p - o.Pos).Length < o.P.SpanM * 0.25 + 6) { if (sp < sAhead) { sAhead = sp; ahead = o; } break; }
+            }
+            if (ahead is null || ahead.Gs > 3) return null;
+            var room = sAhead - ahead.P.LengthM / 2 - (sJ + 15);
+            if (room >= f.P.LengthM + 10) return null;
+            var name = Apt.Adj[n].Where(x => x.Name.Length > 0 && !route.Contains(x.B)).Select(x => x.Name).FirstOrDefault()
+                       ?? Apt.Adj[n].Where(x => x.Name.Length > 0).Select(x => x.Name).FirstOrDefault() ?? "the junction";
+            f.JhLast = (name, ahead);
+            return f.JhLast;
+        }
+        return null;
     }
 
     private static double SegDist(V2 p, V2 a, V2 b)
@@ -5993,7 +6059,7 @@ public sealed partial class TrafficWorld
             // Paths crossing (intersections): look a few seconds ahead; whoever gets there second waits — except that an
             // aircraft on a runway (crossing it, or turning off it) always goes first, to clear it (KORD, 18 Nov: four
             // arrivals went around for aircraft that stopped on a runway they were crossing).
-            if (ahead > -10 && dist < 160 && !(f.OnRunway >= 0 && o.OnRunway < 0))
+            if (ahead > -10 && dist < 160 && !(Vacating(f) && !Vacating(o)))
             {
                 var odir = V2.FromBearing(o.Reverse ? Geo2.Norm(o.Heading + 180) : o.Heading);
                 var ov = o.Gs * Kt;
@@ -6005,7 +6071,7 @@ public sealed partial class TrafficWorld
                     if ((mine - theirs).Length >= minD) continue;
                     // The one closer to the meeting point goes first.
                     var meet = (mine + theirs) * 0.5;
-                    if ((o.Pos - meet).Length < (f.Pos - meet).Length || (o.OnRunway >= 0 && f.OnRunway < 0)) { by = o; }
+                    if ((o.Pos - meet).Length < (f.Pos - meet).Length || (Vacating(o) && !Vacating(f))) { by = o; }
                     break;
                 }
                 if (by is not null) break;
@@ -6013,6 +6079,16 @@ public sealed partial class TrafficWorld
         }
         if (by is null && UserOnGround && UserPos is { } u && UserInTheWay(f, u, v)) userBlock = true;
         f.BlockedByUser = userBlock;
+        // Don't block the intersection (user, 22 Nov: "have traffic hold short of a taxiway if traffic before it would
+        // make it block an intersection — a tactic real ATC use"): KLGA 07:23, three aircraft each stopped part-way
+        // through a junction another needed, a ring that never cleared.
+        if (by is null && !userBlock && JunctionHold(f, v) is { } jh)
+        {
+            if (!f.JunctionHeld) Log($"{f.Callsign}: holding short of {jh.name} — {jh.ahead.Callsign} ahead would leave it stopped across the junction");
+            f.JunctionHeld = true; f.BlockedBy = null; f.BlockedFor = 0;
+            return true;
+        }
+        f.JunctionHeld = false;
         if (by is null) { f.BlockedBy = null; f.BlockedFor = 0; return userBlock; }
         if (f.BlockedBy == by) f.BlockedFor += 0.25; else { f.BlockedBy = by; f.BlockedFor = 0; }
         // Standoff: aircraft all waiting for each other — two head-on on a taxilane, or three or four in a ring at an
@@ -6024,7 +6100,11 @@ public sealed partial class TrafficWorld
             // One on a runway always goes first (21 Nov, KATL: DAL330 crossing 08R after landing and DAL2952 waiting to
             // depart from it each waited for the other; DAL2952, the older, "went first" but couldn't line up with DAL330
             // on the runway — 08R had no departures for nearly three hours).
-            var oldest = ring.FirstOrDefault(x => x.OnRunway >= 0) ?? ring.OrderBy(x => x.Id, StringComparer.Ordinal).First();
+            // ... and one that was given the go but couldn't move for a minute hands it on to the next (KLGA, 22 Nov: DAL969
+            // "going first" every 20 s for six minutes without moving; ACA713 and AAL1608 were removed).
+            if (ring.All(x => x.GoFirstFailed)) foreach (var x in ring) x.GoFirstFailed = false;
+            var able = ring.Where(x => !x.GoFirstFailed).ToList();
+            var oldest = able.FirstOrDefault(Vacating) ?? able.FirstOrDefault(x => x.OnRunway >= 0) ?? able.OrderBy(x => x.Id, StringComparer.Ordinal).First();
             if (f != oldest && f.BlockedFor > 8 && Time - f.RerouteTime > 60)
             {
                 f.RerouteTime = Time;
@@ -6032,6 +6112,15 @@ public sealed partial class TrafficWorld
             }
             if (f == oldest && f.BlockedFor > 20)
             {
+                if (f.GoFirstAt < 0) f.GoFirstAt = Time;
+                else if (Time - f.GoFirstAt > 60)
+                {
+                    f.GoFirstFailed = true; f.GoFirstAt = -1;
+                    Log($"{f.Callsign}: can't go first in the standoff with {string.Join(", ", ring.Where(x => x != f).Select(x => x.Callsign))}; looking for another way, the next one goes");
+                    f.RerouteTime = Time;
+                    if (Reroute(f, by)) { f.BlockedBy = null; f.BlockedFor = 0; return false; }
+                    return true;
+                }
                 if (f.BlockedFor < 20.3) Log($"{f.Callsign}: standoff with {string.Join(", ", ring.Where(x => x != f).Select(x => x.Callsign))}; going first");
                 // Past every one of them, not just the one it saw first: in a ring of three it only ever passed one,
                 // then waited for the next (KORD, 19 Nov: UAL590 "going first" for 7 minutes between UAL2059 and
