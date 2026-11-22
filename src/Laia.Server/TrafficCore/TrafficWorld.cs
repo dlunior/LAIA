@@ -5323,6 +5323,33 @@ public sealed partial class TrafficWorld
         return best;
     }
 
+    private object? _rexFor;
+    private readonly Dictionary<string, Dictionary<int, int>> _rex = new();
+
+    /// <summary>Real turn-offs from a runway: each learned taxi-in's first position off it, put on the nearest of the
+    /// runway's exits (within 250 m of where the exit leaves it), counted per exit; null with fewer than 20.</summary>
+    private Dictionary<int, int>? RealExits(RunwayEnd rwy)
+    {
+        if (Learned is not { Taxi.Count: > 0 } lp) return null;
+        if (!ReferenceEquals(_rexFor, lp)) { _rexFor = lp; _rex.Clear(); }
+        var key = rwy.Ident;
+        if (!_rex.TryGetValue(key, out var res))
+        {
+            res = new Dictionary<int, int>();
+            var offs = Apt.RunwayLinks(rwy.Runway).Select(l => l.off).Distinct().ToList();
+            foreach (var t in lp.Taxi)
+            {
+                if (t.Kind != "arrival" || t.Runway != rwy.Ident || t.Points.Count == 0) continue;
+                var p0 = Apt.ToXY(t.Points[0][0], t.Points[0][1]);
+                var best = -1; var bd = 250.0;
+                foreach (var o in offs) { var d = (Apt.Nodes[o] - p0).Length; if (d < bd) { bd = d; best = o; } }
+                if (best >= 0) res[best] = res.GetValueOrDefault(best) + 1;
+            }
+            _rex[key] = res;
+        }
+        return res.Values.Sum() >= 20 ? res : null;
+    }
+
     private void StartRollout(Flight f)
     {
         var rwy = f.Rwy!;
@@ -5363,6 +5390,22 @@ public sealed partial class TrafficWorld
             var cands = links.Where(l => l.along >= Needed(V2.Dot(l.dir, rwy.Dir)))
                 .OrderBy(l => WrongSide(l) ? 1 : 0).ThenBy(l => l.along).ToList();
             if (cands.Count == 0) cands = links.OrderByDescending(l => l.along).ToList();
+            // Where real aircraft turned off this runway (the learned taxi-ins' first positions off it): among the exits
+            // it can make, one picked in proportion to real use (user, 21 Nov: "a lot exiting the runway at the same
+            // spot"); with traffic close behind, only the first two it can make (expedite).
+            else if (RealExits(rwy) is { } rex)
+            {
+                var right = cands.Where(l => !WrongSide(l)).ToList();
+                var pool = (nextIn < 150 ? (right.Count > 0 ? right : cands).OrderBy(l => l.along).Take(2) : right.Count > 0 ? right : cands).ToList();
+                var w = pool.Select(l => (double)rex.GetValueOrDefault(l.off)).ToList();
+                if (w.Sum() >= 10)
+                {
+                    var pick = Rng.NextDouble() * w.Sum(); var k = 0;
+                    while (k < w.Count - 1 && pick >= w[k]) { pick -= w[k]; k++; }
+                    var chosen = pool[k];
+                    cands.Remove(chosen); cands.Insert(0, chosen);
+                }
+            }
             List<int>? taxi = null;
             (int on, int off, double along, V2 dir)? exit = null;
             foreach (var c in cands.Take(5))
