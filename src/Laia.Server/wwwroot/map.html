@@ -163,6 +163,40 @@ function updateAircraft(list) {
     } else if (m.getTooltip()) { m.unbindTooltip(); m._laia.label = ""; }
   }
   for (const [id, m] of markers) if (!seen.has(id)) { layers.ac.removeLayer(m); markers.delete(id); }
+  if (showLabels) declutter(list);
+}
+
+// Labels never on top of each other (user: a queue for the runway at ORD, each label over the next): each is put to
+// the right of its aircraft, else below, above or to the left — whichever is free — and left out (the aircraft still
+// shows, its label on a click) when none is. The selected aircraft first, then the airborne ones, then the moving.
+function declutter(list) {
+  const byId = new Map(list.map(f => [f.id, f]));
+  const items = [];
+  for (const [id, m] of markers) {
+    const t = m.getTooltip(), el = t && t.getElement(), f = byId.get(id);
+    if (!el || !f) continue;
+    const p = map.latLngToContainerPoint(m.getLatLng());
+    const w = 7 * Math.max(String(f.cs || "").length, (f.ground ? `${f.type} · ${phaseText(f)}` : "000 · 000 kt").length * 0.85) + 4, h = 28;
+    const rank = id === selected ? 0 : !f.ground ? 1 : (f.gs || 0) > 3 ? 2 : 3;
+    items.push({ el, p, w, h, rank });
+  }
+  items.sort((a, b) => a.rank - b.rank);
+  const placed = [];
+  const hit = r => placed.some(q => r.x < q.x + q.w && q.x < r.x + r.w && r.y < q.y + q.h && q.y < r.y + r.h);
+  // Each aircraft's own icon is taken too, so a label never covers another aircraft.
+  for (const it of items) placed.push({ x: it.p.x - 8, y: it.p.y - 8, w: 16, h: 16 });
+  for (const it of items) {
+    const opts = [[0, 0], [0, 24], [0, -24], [-(it.w + 22), 0]];
+    let done = false;
+    for (const [dx, dy] of opts) {
+      const r = { x: it.p.x + 10 + dx, y: it.p.y - it.h / 2 + dy, w: it.w, h: it.h };
+      if (hit(r) && it.rank > 0) continue;
+      placed.push(r);
+      it.el.style.marginLeft = dx + "px"; it.el.style.marginTop = dy + "px"; it.el.style.visibility = "";
+      done = true; break;
+    }
+    if (!done) it.el.style.visibility = "hidden";
+  }
 }
 
 function updateUser(u) {
