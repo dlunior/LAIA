@@ -3375,6 +3375,19 @@ public sealed partial class TrafficWorld
             // or base, so the STAR is only flown until it's about 8 nm from the airport.
             var near0 = starPts.FindIndex(p => p.P.Length < 8 * Geo2.MPerNm);
             if (near0 >= 0) starPts.RemoveRange(near0, starPts.Count - near0);
+            // The chart's "Expect radar vectors to final approach course after PAPPI" (WYNDE3 landing west, user 21 Nov):
+            // without real tracks for this STAR and runway to follow, the STAR is flown to that fix and the vectors
+            // start there, not at the STAR's last fix.
+            if (star is not null && StarExpects is { } se2 && se2.TryGetValue(star.Name, out var vexp)
+                && vexp.Where(e => e.how == "vectors after" && ExpectApplies(e.when, rwy.Ident, rwy.Heading)).OrderBy(e => e.when.Length == 0).ToList() is [var vAfter, ..])
+            {
+                var vi = starPts.FindIndex(p => p.Fix.Equals(vAfter.fix, StringComparison.OrdinalIgnoreCase));
+                if (vi >= 0 && vi < starPts.Count - 1 && RealFan(rwy, starPts) is not { Count: >= 3 })
+                {
+                    starPts.RemoveRange(vi + 1, starPts.Count - vi - 1);
+                    if (_vecNoteLogged.Add($"{star.Name}|{rwy.Ident}")) Log($"{star.Name} for {rwy.Ident}: vectors to final after {vAfter.fix} (the chart), no real tracks to follow");
+                }
+            }
             var fullStar = starPts.ToList();
             var trimmed = 0;
             // Still on its filed route (airways) to the STAR: those points first, dropping the ones it has passed; the
@@ -5329,12 +5342,13 @@ public sealed partial class TrafficWorld
         return best;
     }
 
+    private readonly HashSet<string> _vecNoteLogged = new();
     private object? _rexFor;
     private readonly Dictionary<string, Dictionary<int, int>> _rex = new();
 
     /// <summary>Real turn-offs from a runway: each learned taxi-in's first position off it, put on the nearest of the
     /// runway's exits (within 250 m of where the exit leaves it), counted per exit; null with fewer than 20.</summary>
-    private Dictionary<int, int>? RealExits(RunwayEnd rwy)
+    public Dictionary<int, int>? RealExits(RunwayEnd rwy)
     {
         if (Learned is not { Taxi.Count: > 0 } lp) return null;
         if (!ReferenceEquals(_rexFor, lp)) { _rexFor = lp; _rex.Clear(); }
@@ -6314,7 +6328,7 @@ public sealed partial class TrafficWorld
     }
 
     /// <summary>The STAR charts' "expect" restrictions, by STAR: when is "" (always), "dir:S" (landing south) or "rwy:18".</summary>
-    public Dictionary<string, List<(string fix, double min, double max, double kt, string when)>>? StarExpects { get; set; }
+    public Dictionary<string, List<(string fix, double min, double max, double kt, string when, string how)>>? StarExpects { get; set; }
 
     /// <summary>The SID top altitudes from the FAA departure charts, by SID name (set by the server; null: none known).</summary>
     public Dictionary<string, int>? SidTops { get; set; }

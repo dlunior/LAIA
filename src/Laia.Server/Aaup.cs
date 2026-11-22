@@ -213,7 +213,7 @@ public sealed class AaupReader(ILogger log)
             var (cycle, _) = Cycle(DateTime.UtcNow);
             var dir = Path.Combine(Paths.DataDir, "aaup", cycle);
             Directory.CreateDirectory(dir);
-            var file = Path.Combine(dir, icao + ".starexpect3.txt");
+            var file = Path.Combine(dir, icao + ".starexpect4.txt");
             if (File.Exists(file))
             {
                 foreach (var l in await File.ReadAllLinesAsync(file))
@@ -238,7 +238,7 @@ public sealed class AaupReader(ILogger log)
                     var key = fixes.Keys.First(k => k.Equals(name, StringComparison.OrdinalIgnoreCase));
                     var bytes = await Http.GetByteArrayAsync($"https://aeronav.faa.gov/d-tpp/{cycle}/{pdf}");
                     using var doc = PdfDocument.Open(bytes);
-                    var found = StarCharts.ReadExpects(doc, fixes[key], aptName);
+                    var found = StarCharts.ReadExpects(doc, fixes[key], aptName, icao);
                     // What the chart says about "expect" (to check the reading): the words around each one.
                     foreach (var page in doc.GetPages())
                     {

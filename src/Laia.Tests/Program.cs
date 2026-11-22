@@ -2318,6 +2318,44 @@ Console.WriteLine("== Taxi flow: real taxi tracks decide a stretch over the layo
     Check(fl.Against(w, e) && !fl.Against(e, w), "B flows west as the real aircraft did (eastbound is against the flow)");
 }
 
+Console.WriteLine("== Runway exits: real turn-offs (learned taxi-ins) counted per exit");
+{
+    var data = TestAirport.Build(false, twoParallels: true);
+    var apt = new AirportModel(data);
+    var rwy = apt.Ends.First(e => e.Ident == "27");
+    var links = apt.RunwayLinks(rwy.Runway).Select(l => l.off).Distinct().OrderBy(o => rwy.Along(apt.Nodes[o])).ToList();
+    var prof = new AirportProfile { Icao = "TEST", Version = AirportProfile.CurrentVersion };
+    // 24 real arrivals turned off at the second exit, 6 at the last one: each taxi-in's first point just off the runway.
+    void Add(int off, int n)
+    {
+        for (var k = 0; k < n; k++)
+        {
+            var (la, lo) = apt.Map.ToLatLon(apt.Nodes[off] + new V2(k % 3 * 10, -20));
+            prof.Taxi.Add(new AirportProfile.TaxiTrack { Kind = "arrival", Runway = "27", Points = new() { new[] { la, lo, 180.0 } } });
+        }
+    }
+    var second = links[Math.Min(1, links.Count - 1)]; var last = links[^1];
+    Add(second, 24); Add(last, 6);
+    var world = new TrafficWorld(apt, new TestSource(), seed: 5) { Automatic = false, Wind = new Wind(270, 5), Learned = prof };
+    var rex = world.RealExits(rwy);
+    Console.WriteLine($"  exits {links.Count}; counted: {(rex is null ? "none" : string.Join(", ", rex.Select(kv => kv.Key + ": " + kv.Value)))}");
+    Check(rex is not null && rex.GetValueOrDefault(second) >= 20 && rex.Values.Sum() == 30, "the second exit holds the real turn-offs there, all 30 placed");
+    var none = new TrafficWorld(apt, new TestSource(), seed: 5) { Automatic = false, Learned = new AirportProfile { Icao = "TEST" } };
+    Check(none.RealExits(rwy) is null, "no taxi tracks: no real exit shares (the braking model alone)");
+}
+
+Console.WriteLine("== STAR chart notes: \"expect radar vectors to final approach course after FIX\" (WYNDE3)");
+{
+    var fixes = new HashSet<string> { "WYNDE", "PAPPI", "BACEN", "ERNNY" };
+    var t = "NOTE: ORD LANDING WEST: EXPECT RADAR VECTORS TO FINAL APPROACH COURSE AFTER PAPPI. ORD LANDING EAST: EXPECT RADAR VECTORS TO FINAL APPROACH COURSE AFTER ERNNY. MDW LANDING SOUTH: EXPECT RADAR VECTORS AFTER BACEN.";
+    var v = Laia.Server.StarCharts.VectorNotes(t, fixes, "CHICAGO O'HARE INTL", "KORD");
+    Console.WriteLine("  " + string.Join("; ", v.Select(Laia.Server.StarCharts.Describe)));
+    Check(v.Any(e => e.Fix == "PAPPI" && e.When == "dir:W") && v.Any(e => e.Fix == "ERNNY" && e.When == "dir:E"), "O'Hare: after PAPPI landing west, after ERNNY landing east");
+    Check(!v.Any(e => e.Fix == "BACEN"), "Midway's note isn't O'Hare's");
+    var plain = Laia.Server.StarCharts.VectorNotes("EXPECT RADAR VECTORS TO FINAL APPROACH COURSE AFTER WYNDE.", fixes, "X", "KORD");
+    Check(plain.Count == 1 && plain[0].When == "" && plain[0].How == "vectors after", "with no flow: always");
+}
+
 Console.WriteLine("== Traffic starts even when no installed model fits the small gates");
 {
     var apt = new AirportModel(TestAirport.Build(false));
