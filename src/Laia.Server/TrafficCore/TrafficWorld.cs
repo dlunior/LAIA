@@ -530,6 +530,7 @@ public sealed partial class TrafficWorld
         DepRwy = dep;
         ArrRwys = new() { arr };
         DepRwys = new() { dep };
+        if (peak) _peakRank = 0;
     }
 
     private int _peakRank = -1;
