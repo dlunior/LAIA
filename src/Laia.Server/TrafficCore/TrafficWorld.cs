@@ -1326,15 +1326,30 @@ public sealed partial class TrafficWorld
     /// (when the real one would be taking off) and climb out into the whole sky; arrivals are taken over from the whole
     /// sky within 60 nm and land, disappearing once slowed on the runway.
     /// </summary>
+    private int _seenReplays;
+    private double _capLogged = -1e9;
+    /// <summary>How many times the Peak test has started over (neighbouring fields replay with it).</summary>
+    public int PeakReplays { get; private set; }
+
     private void RunNeighbour()
     {
         var legs = Schedule!.Legs;
         var me = Apt.Icao;
+        // When the main airport's Peak test replays its busiest hours, so does this field (22 Nov: JFK and Newark kept
+        // the list of flights they had flown, so every replay skipped them — Newark's landings went 20 an hour, 6, 4, 0).
+        if (ClockOwner is { } co && co.PeakReplays != _seenReplays) { _seenReplays = co.PeakReplays; _done.Clear(); }
         var active = Flights.Count(f => !f.Done);
-        const int cap = 16;
+        // No count of aircraft limits a level (user rule: a level is a share of the field's schedule); only the runaway
+        // guard (JFK at Peak had been capped at 16 at once, arrivals and departures together — taken over up to 50
+        // minutes out, its inbound traffic alone filled that).
+        var (_, cap, _, _) = Budget;
         foreach (var l in legs)
         {
-            if (active >= cap) break;
+            if (active >= cap)
+            {
+                if (Time - _capLogged > 600) { _capLogged = Time; Log($"{me}: {active} aircraft at once — the runaway guard; later flights wait"); }
+                break;
+            }
             if (l.Dep == me && Keep(l))
             {
                 var u = Until(l.DepMin);
@@ -1402,12 +1417,13 @@ public sealed partial class TrafficWorld
         var me = Apt.Icao;
         if (Level == TrafficLevel.Peak)
         {
-            if (!_peakSet) { PlanPeak(legs); _schedStarted = false; foreach (var f in Flights.Where(f => f.Kind == "parked" && f.Phase == "parked" && f.Reg.Length > 0)) f.Done = true; }
+            if (!_peakSet) { PlanPeak(legs); PeakReplays++; _schedStarted = false; foreach (var f in Flights.Where(f => f.Kind == "parked" && f.Phase == "parked" && f.Reg.Length > 0)) f.Done = true; }
             else if (((SchedNow - _peakStart) % 10080 + 10080) % 10080 >= _peakLen)
             {
                 // The busiest hours are over: replay them (each flight may run again, but never one that's still around).
                 _peakOffset -= _peakLen;
                 _done.Clear();
+                PeakReplays++;
                 Log($"{me}: peak test: replaying the busiest hours again");
             }
         }
