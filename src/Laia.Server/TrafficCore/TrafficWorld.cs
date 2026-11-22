@@ -5815,6 +5815,44 @@ public sealed partial class TrafficWorld
     }
 
     /// <summary>An arriving aircraft that can't get to its gate takes another free gate it can reach.</summary>
+    /// <summary>
+    /// The user's aircraft in this one's way: along the route it will taxi (not straight ahead of its nose — 22 Nov,
+    /// KLGA: the taxilane behind gate 48 points straight at the gate before it bends off to 45–47, so ten Uniteds stopped
+    /// 78 m short of the user parked on 48, though their route passed 30–48 m from the user's nose, and were removed).
+    /// The user's aircraft is its fuselage (from the stand's heading when parked on one) and wings; parked on a stand
+    /// for a minute it is part of the scenery like LAIA's parked aircraft (a small margin), otherwise a wider one.
+    /// </summary>
+    private bool UserInTheWay(Flight f, V2 u, double v)
+    {
+        var up = Perf.For(string.IsNullOrEmpty(UserType) ? "B738" : UserType);
+        var parked = Time - _userMovedAt > 60 ? Apt.Spots.Where(sp => (sp.P - u).Length < sp.RadiusM + 5).OrderBy(sp => (sp.P - u).Length).FirstOrDefault() : null;
+        var udir = V2.FromBearing(parked?.Heading ?? UserTrack);
+        var nose = u + udir * (up.LengthM * 0.45); var tail = u - udir * (up.LengthM * 0.55);
+        var margin = parked is not null ? 4.0 : 12.0;
+        var look = f.P.LengthM / 2 + 60 + v * v / 2.0;
+        if (f.Path is not { } path)
+        {
+            var r = u - f.Pos; var mdir = V2.FromBearing(f.Reverse ? Geo2.Norm(f.Heading + 180) : f.Heading);
+            return V2.Dot(r, mdir) > 0 && V2.Dot(r, mdir) < look && Math.Abs(V2.Cross(mdir, r)) < f.P.SpanM / 2 + up.SpanM / 2 + margin;
+        }
+        for (var d = 5.0; d <= look; d += 5)
+        {
+            var sp = Math.Min(f.S + d, path.Length);
+            var p = path.At(sp).p;
+            // Its wing past the user's fuselage, or wing to wing where the user's wings are.
+            if (SegDist(p, tail, nose) < f.P.SpanM / 2 + margin || (p - u).Length < (f.P.SpanM + up.SpanM) / 2 + margin) return true;
+            if (sp >= path.Length) break;
+        }
+        return false;
+    }
+
+    private static double SegDist(V2 p, V2 a, V2 b)
+    {
+        var ab = b - a; var l2 = V2.Dot(ab, ab);
+        var t = l2 < 1e-9 ? 0 : Math.Clamp(V2.Dot(p - a, ab) / l2, 0, 1);
+        return (p - (a + ab * t)).Length;
+    }
+
     private bool TryOtherGate(Flight f)
     {
         var old = f.Spot;
@@ -5823,7 +5861,10 @@ public sealed partial class TrafficWorld
         if (gate is not null && gate != old)
         {
             f.Spot = gate;
-            if (Reroute(f, f.Pos + V2.FromBearing(f.Heading) * 40, "the blockage")) { Log($"{f.Callsign}: going to {gate.Label} instead"); return true; }
+            // Round what is in the way: the user's aircraft when it's the user (22 Nov, KLGA: the point 40 m ahead was the
+            // taxilane itself, so no new way was found and ten were removed instead).
+            var avoid = f.BlockedByUser && UserPos is { } uu ? uu : f.Pos + V2.FromBearing(f.Heading) * 40;
+            if (Reroute(f, avoid, f.BlockedByUser ? "your aircraft" : "the blockage")) { Log($"{f.Callsign}: going to {gate.Label} instead"); return true; }
         }
         f.Spot = old;
         return false;
@@ -5970,13 +6011,7 @@ public sealed partial class TrafficWorld
                 if (by is not null) break;
             }
         }
-        if (by is null && UserOnGround && UserPos is { } u)
-        {
-            var r = u - f.Pos;
-            var ahead = V2.Dot(r, mdir);
-            var lat = Math.Abs(V2.Cross(mdir, r));
-            if (ahead > 0 && ahead < f.P.LengthM / 2 + 60 + v * v / 2.0 && lat < f.P.SpanM / 2 + 25) userBlock = true;
-        }
+        if (by is null && UserOnGround && UserPos is { } u && UserInTheWay(f, u, v)) userBlock = true;
         f.BlockedByUser = userBlock;
         if (by is null) { f.BlockedBy = null; f.BlockedFor = 0; return userBlock; }
         if (f.BlockedBy == by) f.BlockedFor += 0.25; else { f.BlockedBy = by; f.BlockedFor = 0; }
