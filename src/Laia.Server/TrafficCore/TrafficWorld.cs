@@ -5661,6 +5661,17 @@ public sealed partial class TrafficWorld
         if (ns >= path.Length) { ns = path.Length; v = 0; }
         f.S = ns;
         var (p, dir, _) = path.At(f.S);
+        // The main gear on the line, not the nose (user: big jets' main gear cut the corners): the aircraft's
+        // reference point sits ahead of its main gear, so the gear follows the path a little behind it, the aircraft
+        // points the way the gear is rolling, and the reference point swings wide in a turn — the "judgmental
+        // oversteer" taxi pilots of long aircraft use. On a straight line nothing changes.
+        var gearBack = f.Reverse ? 0 : Math.Clamp(0.2 * f.P.LengthM - 4, 0, 12);
+        if (gearBack > 0 && f.S > gearBack)
+        {
+            var (gp, gdir, _) = path.At(f.S - gearBack);
+            p = gp + V2.FromBearing(gdir) * gearBack;
+            dir = gdir;
+        }
         f.Pos = p;
         f.Heading = f.Reverse ? Geo2.Norm(dir + 180) : dir;
         f.Gs = v / Kt;
