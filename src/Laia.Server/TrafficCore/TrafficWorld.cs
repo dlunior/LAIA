@@ -79,7 +79,9 @@ public sealed class Flight
     public double VectorRejoinS = double.NegativeInfinity;
     public int DelayVectors, RwySwitches;
     public string? HoldWhy; public bool HoldWhyLogged;
-    public double RunwayStopFor;
+    public double RunwayStopFor, SpeedAt = -1e9;
+    public int BreakOffs;
+    public string ExitNote = "";
     public bool ReplanFree;
     /// <summary>Departures: its number in its runway's departure order (0 when not in it: at the gate, boarding).</summary>
     public int DepSeq;
@@ -725,7 +727,11 @@ public sealed partial class TrafficWorld
                     }
                     slot = Math.Max(slot, prevSlot + gapNeed + 15);
                 }
-                if (f != UserArr && !f.Frozen && !f.Test && slot - f.EtaNominal > 900 && f.Path is not null && (f.ThrS - f.S) / Geo2.MPerNm > 100)
+                var outNm = f.Path is null ? 0 : (f.ThrS - f.S) / Geo2.MPerNm;
+                // Left out further in too (overload, KATL 21 Nov on a stale ATIS: break-off after break-off close in):
+                // 15 minutes late down to 60 nm out, before it's in the sequence near the field, where the only tools
+                // left are break-offs.
+                if (f != UserArr && !f.Frozen && !f.Test && f.Path is not null && f.BreakOffs == 0 && slot - f.EtaNominal > 900 && outNm > 60)
                 {
                     // More than 15 minutes late on arrival, still 100 nm or more out (Peak beyond what the runways take,
                     // KORD 18 Nov: number 36 for 27C with 28 minutes to lose): another runway if one has room, else it's
@@ -3222,7 +3228,11 @@ public sealed partial class TrafficWorld
             // schedule has them, some already on the STAR (SWA2236 29 nm out at 11,270 ft, 5 nm before "at 7,000" at
             // BUNIE) — they'd have been brought down to it already.
             f.AltFt = Math.Min(en.altFt, Restricted(f, en.altFt));
+            // And no higher than a 3:1 descent along the way it will fly, +1,000 ft (22 Nov: as an airport or neighbour
+            // starts, arrivals appear where the whole sky had them — UAL2036 74 nm out at 30,850 ft, SWA2463 52 nm out
+            // at 24,640 ft — the whole sky's own descent for an airport not yet run in detail).
             var dth0 = f.ThrS / Geo2.MPerNm;
+            f.AltFt = Math.Max(Math.Min(f.AltFt, rwy.ElevationFt + 1000 + 300 * dth0), Math.Min(en.altFt, rwy.ElevationFt + 3000));
             f.Ias = ArrivalSpeed(f, dth0);
             f.Gs = Wind.Tas(f.Ias, f.AltFt);
             f.SetPhase("arriving", Time);
@@ -3365,6 +3375,19 @@ public sealed partial class TrafficWorld
             // or base, so the STAR is only flown until it's about 8 nm from the airport.
             var near0 = starPts.FindIndex(p => p.P.Length < 8 * Geo2.MPerNm);
             if (near0 >= 0) starPts.RemoveRange(near0, starPts.Count - near0);
+            // The chart's "Expect radar vectors to final approach course after PAPPI" (WYNDE3 landing west, user 21 Nov):
+            // without real tracks for this STAR and runway to follow, the STAR is flown to that fix and the vectors
+            // start there, not at the STAR's last fix.
+            if (star is not null && StarExpects is { } se2 && se2.TryGetValue(star.Name, out var vexp)
+                && vexp.Where(e => e.how == "vectors after" && ExpectApplies(e.when, rwy.Ident, rwy.Heading)).OrderBy(e => e.when.Length == 0).ToList() is [var vAfter, ..])
+            {
+                var vi = starPts.FindIndex(p => p.Fix.Equals(vAfter.fix, StringComparison.OrdinalIgnoreCase));
+                if (vi >= 0 && vi < starPts.Count - 1 && RealFan(rwy, starPts) is not { Count: >= 3 })
+                {
+                    starPts.RemoveRange(vi + 1, starPts.Count - vi - 1);
+                    if (_vecNoteLogged.Add($"{star.Name}|{rwy.Ident}")) Log($"{star.Name} for {rwy.Ident}: vectors to final after {vAfter.fix} (the chart), no real tracks to follow");
+                }
+            }
             var fullStar = starPts.ToList();
             var trimmed = 0;
             // Still on its filed route (airways) to the STAR: those points first, dropping the ones it has passed; the
@@ -4566,7 +4589,7 @@ public sealed partial class TrafficWorld
         _lastBreakoffAt = Time; _lastBreakoffSide = side;
         var outPt = p + left * (side * (wide ? 7 : 4) * nm) - rwy.Dir * ((wide ? 8 : 4) * nm);
         var heading = (outPt - p).Bearing;
-        _breakoffs++; f.Mgr = "vectored around"; f.Frozen = false; f.Rejoin = true;   // re-sequenced behind those nearer in
+        _breakoffs++; f.BreakOffs++; f.Mgr = "vectored around"; f.Frozen = false; f.Rejoin = true;   // re-sequenced behind those nearer in
         Log($"{f.Callsign}: breaking off the approach for spacing ({why}): turn {(V2.Cross(V2.FromBearing(dir), outPt - p) > 0 ? "left" : "right")} heading {heading:000}, vectors back around");
         f.LastOrbit = Time; f.LastVector = Time; f.LastTrombone = Time;   // nothing else for it straight away
         // A real turn out to the break-off point, then another from there onto the vectors back round (the corner at
@@ -4910,7 +4933,12 @@ public sealed partial class TrafficWorld
                 dv = c;
                 if (EtaToThreshold(f, dth) - base0 >= f.Delay) break;
             }
-            f.SlowDv = Math.Abs(dv - keep) < 10 && keep > 0 ? keep : dv;
+            // Few, steady speed instructions (7110.65 5-7-1: the minimum necessary, no alternating; 20 Nov, CYUL: ACA336
+            // and ACA376 got 12–14 each): a change of less than 10 kt is never given, and within 2½ minutes of the last
+            // one only a change of 20 kt or more.
+            // Kept only when the speed it has is the slower one (a little early to its slot is fixed by the trombone; too
+            // fast for it, by nothing short of a break-off): any further reduction it needs is given.
+            f.SlowDv = keep > 0 && keep >= dv && (keep - dv < 10 || (Time - f.SpeedAt < 150 && keep - dv < 20)) ? keep : dv;
             // More delay than speed (40 kt slower) and the trombone near the runway can take: delay vectors on the way
             // in, far out (beyond 40 nm), a few minutes at a time — never a hold.
             // Far out, the delay speed can't take is planned onto a longer real track (the way real controllers stretch
@@ -4938,6 +4966,9 @@ public sealed partial class TrafficWorld
                     if (Vector(f, Math.Min(left, 300), rejoinNm: Math.Clamp(dth - 30, 25, 45), why: $"{f.Delay:0} s delay for the sequence (number {f.Seq} for {f.Rwy.Ident}), {bySpeed:0} s of it by speed")) f.DelayVectors++;
             }
         }
+        // Not slowed again for a small delay just after being let go (a delay wavering around 5–10 s turned it off and on).
+        if (old == 0 && f.SlowDv > 0 && f.Delay < 30 && Time - f.SpeedAt < 300) f.SlowDv = 0;
+        if (f.SlowDv != old) f.SpeedAt = Time;
         if (f.SlowDv > 0 && (old == 0 || Math.Abs(f.SlowDv - old) >= 10))
         {
             _speedAssigns++;
@@ -5313,6 +5344,34 @@ public sealed partial class TrafficWorld
         return best;
     }
 
+    private readonly HashSet<string> _vecNoteLogged = new();
+    private object? _rexFor;
+    private readonly Dictionary<string, Dictionary<int, int>> _rex = new();
+
+    /// <summary>Real turn-offs from a runway: each learned taxi-in's first position off it, put on the nearest of the
+    /// runway's exits (within 250 m of where the exit leaves it), counted per exit; null with fewer than 20.</summary>
+    public Dictionary<int, int>? RealExits(RunwayEnd rwy)
+    {
+        if (Learned is not { Taxi.Count: > 0 } lp) return null;
+        if (!ReferenceEquals(_rexFor, lp)) { _rexFor = lp; _rex.Clear(); }
+        var key = rwy.Ident;
+        if (!_rex.TryGetValue(key, out var res))
+        {
+            res = new Dictionary<int, int>();
+            var offs = Apt.RunwayLinks(rwy.Runway).Select(l => l.off).Distinct().ToList();
+            foreach (var t in lp.Taxi)
+            {
+                if (t.Kind != "arrival" || t.Runway != rwy.Ident || t.Points.Count == 0) continue;
+                var p0 = Apt.ToXY(t.Points[0][0], t.Points[0][1]);
+                var best = -1; var bd = 250.0;
+                foreach (var o in offs) { var d = (Apt.Nodes[o] - p0).Length; if (d < bd) { bd = d; best = o; } }
+                if (best >= 0) res[best] = res.GetValueOrDefault(best) + 1;
+            }
+            _rex[key] = res;
+        }
+        return res.Values.Sum() >= 20 ? res : null;
+    }
+
     private void StartRollout(Flight f)
     {
         var rwy = f.Rwy!;
@@ -5334,8 +5393,16 @@ public sealed partial class TrafficWorld
             // Not every landing brakes the same (user, 21 Nov, KATL: "a lot exiting the runway at the same spot … a bit
             // too frequent"): most at about 2.4 m/s², about one in six gently (the next exit or so), one in thirty a
             // long roll; heavies a little gentler.
+            // Only with room behind (21 Nov, KPHL: DAL2703 went around 90 s behind SWA2463 still on its long roll-out —
+            // the spacing assumes a normal one): the next arrival to this runway 2½ minutes or more out (3 for a long
+            // roll), as pilots expedite with traffic close behind.
             var u0 = Rng.NextDouble();
-            var decel = 2.4 * (u0 < 0.80 ? 0.9 + 0.2 * Rng.NextDouble() : u0 < 0.97 ? 0.65 + 0.15 * Rng.NextDouble() : 0.5 + 0.1 * Rng.NextDouble()) * (f.P.Heavy ? 0.9 : 1.0);
+            var nextIn = Flights.Where(o => o != f && o.Kind == "arrival" && !o.Done && !o.OnGround && o.Rwy?.Runway == rwy.Runway && !double.IsNaN(o.EtaSec))
+                .Select(o => o.EtaSec).DefaultIfEmpty(double.MaxValue).Min();
+            if (UserArr is { Done: false, OnGround: false } ua && ua.Rwy?.Runway == rwy.Runway && !double.IsNaN(ua.EtaSec)) nextIn = Math.Min(nextIn, ua.EtaSec);
+            if (u0 >= 0.97 && nextIn < 180) u0 = 0.9;
+            if (u0 >= 0.80 && nextIn < 150) u0 = 0.5;
+            var decel = 2.4 * (u0 < 0.80 ? 0.9 + 0.2 * Rng.NextDouble() : u0 < 0.97 ? 0.65 + 0.15 * Rng.NextDouble() : 0.5 + 0.1 * Rng.NextDouble()) * (u0 >= 0.80 && f.P.Heavy ? 0.9 : 1.0);
             double Needed(double dot) { var vx = dot > 0.5 ? ExitSpeedFast : ExitSpeedSquare; return tdAlong + Math.Max(250, (v0 * v0 - vx * vx) / (2 * decel)); }
             var links = Apt.RunwayLinks(rwy.Runway)
                 .Select(l => (l.on, l.off, along: rwy.Along(Apt.Nodes[l.on]), dir: (Apt.Nodes[l.off] - Apt.Nodes[l.on]).Unit))
@@ -5345,6 +5412,22 @@ public sealed partial class TrafficWorld
             var cands = links.Where(l => l.along >= Needed(V2.Dot(l.dir, rwy.Dir)))
                 .OrderBy(l => WrongSide(l) ? 1 : 0).ThenBy(l => l.along).ToList();
             if (cands.Count == 0) cands = links.OrderByDescending(l => l.along).ToList();
+            // Where real aircraft turned off this runway (the learned taxi-ins' first positions off it): among the exits
+            // it can make, one picked in proportion to real use (user, 21 Nov: "a lot exiting the runway at the same
+            // spot"); with traffic close behind, only the first two it can make (expedite).
+            else if (RealExits(rwy) is { } rex)
+            {
+                var right = cands.Where(l => !WrongSide(l)).ToList();
+                var pool = (nextIn < 150 ? (right.Count > 0 ? right : cands).OrderBy(l => l.along).Take(2) : right.Count > 0 ? right : cands).ToList();
+                var w = pool.Select(l => (double)rex.GetValueOrDefault(l.off)).ToList();
+                if (w.Sum() >= 10)
+                {
+                    var pick = Rng.NextDouble() * w.Sum(); var k = 0;
+                    while (k < w.Count - 1 && pick >= w[k]) { pick -= w[k]; k++; }
+                    var chosen = pool[k];
+                    cands.Remove(chosen); cands.Insert(0, chosen);
+                }
+            }
             List<int>? taxi = null;
             (int on, int off, double along, V2 dir)? exit = null;
             foreach (var c in cands.Take(5))
@@ -5357,6 +5440,8 @@ public sealed partial class TrafficWorld
             if (taxi is null) gate = null;
             if (exit is { } x)
             {
+                var exName = Apt.Adj[x.off].FirstOrDefault(e => e.Type == 1 && e.Name.Length > 0)?.Name;
+                f.ExitNote = $"; turning off {(exName is null ? "" : "at " + exName + " ")}{x.along:N0} m down{(nextIn < 600 ? $" (next arrival {nextIn:0} s behind)" : "")}";
                 pts.Add(rwy.Threshold + rwy.Dir * x.along);
                 route = new List<int> { x.on };
                 route.AddRange(taxi ?? new List<int> { x.off });
@@ -5576,6 +5661,17 @@ public sealed partial class TrafficWorld
         if (ns >= path.Length) { ns = path.Length; v = 0; }
         f.S = ns;
         var (p, dir, _) = path.At(f.S);
+        // The main gear on the line, not the nose (user: big jets' main gear cut the corners): the aircraft's
+        // reference point sits ahead of its main gear, so the gear follows the path a little behind it, the aircraft
+        // points the way the gear is rolling, and the reference point swings wide in a turn — the "judgmental
+        // oversteer" taxi pilots of long aircraft use. On a straight line nothing changes.
+        var gearBack = f.Reverse ? 0 : Math.Clamp(0.2 * f.P.LengthM - 4, 0, 12);
+        if (gearBack > 0 && f.S > gearBack)
+        {
+            var (gp, gdir, _) = path.At(f.S - gearBack);
+            p = gp + V2.FromBearing(gdir) * gearBack;
+            dir = gdir;
+        }
         f.Pos = p;
         f.Heading = f.Reverse ? Geo2.Norm(dir + 180) : dir;
         f.Gs = v / Kt;
@@ -6247,7 +6343,7 @@ public sealed partial class TrafficWorld
     }
 
     /// <summary>The STAR charts' "expect" restrictions, by STAR: when is "" (always), "dir:S" (landing south) or "rwy:18".</summary>
-    public Dictionary<string, List<(string fix, double min, double max, double kt, string when)>>? StarExpects { get; set; }
+    public Dictionary<string, List<(string fix, double min, double max, double kt, string when, string how)>>? StarExpects { get; set; }
 
     /// <summary>The SID top altitudes from the FAA departure charts, by SID name (set by the server; null: none known).</summary>
     public Dictionary<string, int>? SidTops { get; set; }
@@ -6479,7 +6575,12 @@ public sealed partial class TrafficWorld
                     // gone around: its predicted time is far too late (21 Nov, KATL: SWA727 took a shorter real track to
                     // close "405 s behind DAL3127" while DAL3127 was on its second break-off loop; DAL3127 landed first
                     // and SWA727 was broken off 215 s short behind the next one).
+                    // And on the landing schedule (its slot from the arrival manager), not only the leader's live time:
+                    // a shortcut never takes it more than a minute ahead of its slot, where the one ahead of its leader
+                    // may be.
+                    var staAdd = f.Frozen && f.FrozenSlot > 0 ? f.FrozenSlot - (Time + EtaToThreshold(f, dth)) : double.NaN;
                     if (add < 0 && (leader.Mgr is "vectored around" or "vectored" || leader.Rejoin || leader.WentAround || leader.DetourSec > 0)) add = 0;
+                    else if (add < 0 && !double.IsNaN(staAdd)) add = Math.Max(add, Math.Min(0, staAdd - 60));
                     f.TromboneLeft = Trombone(f, add > 10 || add < -25 ? add : 0, $"{gapSec:0} s behind {leader.Callsign} at the runway, {wantGap:0} wanted");
                     if (double.IsNaN(f.TromboneLeft) && f.Fan is not null)
                         f.TromboneLeft = FanPick(f, add > 10 || add < -25 ? add : 0, $"{gapSec:0} s behind {leader.Callsign} at the runway, {wantGap:0} wanted");
@@ -6500,7 +6601,9 @@ public sealed partial class TrafficWorld
                     && Vector(f, Math.Max(short_, 45) + 15, $"{gapText}, {short_:0} s short at the runway")) return;
                 // Short only because the one ahead was just turned off on a detour while this one is on the final, well
                 // behind it: it'll be put ahead in the next sequence pass, so no break-off for that (AAL2740, 19 Nov).
-                var leaderDetour = leader is { } ld && Time - ld.LastVector < 120 && !tooClose && OnFinal(f, dth);
+                var leaderDetour = leader is { } ld && ((Time - ld.LastVector < 120 && OnFinal(f, dth)) || ld.Rejoin) && !tooClose;
+                // (Or the one ahead just went around or was broken off — waiting to be put back in behind those nearer in:
+                // "429 s short" behind it says nothing, and the next pass makes this one the leader's leader.)
                 if (!trombone && !leaderDetour && (tooClose || (short_ > 20 && OnFinal(f, dth))) && dth > 5 && dth <= 12 && Time - f.LastOrbit > 240) { BreakOff(f, $"{gapText}, {short_:0} s short at the runway"); return; }
             }
             if (f.Phase == "flare") target = f.P.Vapp - 5;
@@ -6620,7 +6723,7 @@ public sealed partial class TrafficWorld
                 f.MaxKt = 30;
                 MoveAir(f, dt);
                 StartRollout(f);
-                Log($"{f.Callsign}: landed runway {rwy.Ident}{(f.Spot is not null ? ", taxiing to " + f.Spot.Label : "")}{PredictionReport(f)}{ChecksReport(f)}{LandingGapReport(f)}");
+                Log($"{f.Callsign}: landed runway {rwy.Ident}{(f.Spot is not null ? ", taxiing to " + f.Spot.Label : "")}{PredictionReport(f)}{ChecksReport(f)}{LandingGapReport(f)}{f.ExitNote}");
                 return;
             }
         }

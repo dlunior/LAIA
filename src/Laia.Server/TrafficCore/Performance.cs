@@ -88,6 +88,8 @@ public static class Cwt
         if (t is "B752" or "B753") return 'E';
         if (t.StartsWith("A31") || t.StartsWith("A32") || t is "A19N" or "A20N" or "A21N" || t.StartsWith("B73") || t is "B37M" or "B38M" or "B39M" or "B3XM" or "B712"
             || t.StartsWith("MD8") || t == "MD90" || t is "BCS1" or "BCS3" or "C130" or "B721" or "B722") return 'F';
+        // Lower Large (G): the regional jets and big turboprops (over 41,000 lb, under the A320 / 737 class).
+        if (t.StartsWith("CRJ") || t is "E135" or "E145" or "E35L" or "E170" or "E75L" or "E75S" or "DH8C" or "DH8D" or "AT72" or "AT75" or "AT76" or "F70" or "F100" or "RJ85" or "RJ1H" or "B462" or "B463") return 'G';
         if (t is "SF34" or "AT43" or "AT45" or "AT46" or "B190" or "JS41" or "E120" or "DH8A" or "DH8B" or "CL30" or "CL35" or "C25B" or "C25C" or "C560" or "C56X" or "LJ45" or "LJ60") return 'H';
         if (t is "C208" or "PC12" or "BE20" or "BE9L" or "C172" or "C182" or "PA28" or "SR22" or "BE58" or "C510" or "E50P") return 'I';
         return p.Family switch
@@ -102,9 +104,11 @@ public static class Cwt
     // Distance behind (nm), leader row, follower column A..I; 0 = the 3 nm radar minimum (7110.65 5-5-4, TBL 5-5-1).
     private static readonly double[,] InTrail =
     {
-        /* A */ { 0, 4.5, 6, 6, 7, 7, 7, 7, 8 },
+        // Checked cell by cell against 7110.65's current table (TBL 5-5-3, directly behind, 22 Nov 2026): behind an A,
+        // a B 5 nm and an H 8; behind a C, an H 5. Rows F–I are all the radar minimum (blank in the table).
+        /* A */ { 0, 5, 6, 6, 7, 7, 7, 8, 8 },
         /* B */ { 0, 3, 4, 4, 5, 5, 5, 5, 5 },
-        /* C */ { 0, 0, 0, 0, 3.5, 3.5, 3.5, 3.5, 5 },
+        /* C */ { 0, 0, 0, 0, 3.5, 3.5, 3.5, 5, 5 },
         /* D */ { 0, 3, 4, 4, 5, 5, 5, 5, 5 },
         /* E */ { 0, 0, 0, 0, 0, 0, 0, 0, 4 },
         /* F */ { 0, 0, 0, 0, 0, 0, 0, 0, 0 },

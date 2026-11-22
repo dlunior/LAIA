@@ -33,7 +33,7 @@ public static class StarCharts
     /// </list>
     /// Charts printed sideways (FQM3) are read along their text, whichever way it runs.
     /// </summary>
-    public static List<StarExpect> ReadExpects(PdfDocument doc, HashSet<string> fixes, string aptName)
+    public static List<StarExpect> ReadExpects(PdfDocument doc, HashSet<string> fixes, string aptName, string icao = "")
     {
         var res = new List<StarExpect>();
         var text = new StringBuilder();
@@ -64,7 +64,33 @@ public static class StarCharts
             res.RemoveAll(e => e.Fix == fix && e.When == "" && e.How == "plan view");   // the note's wording (with "or above/below") wins over the plan view
             res.Add(new StarExpect(fix, mn, mx, kt, "", "notes"));
         }
-        return res.GroupBy(e => (e.Fix, e.When)).Select(g => g.Last()).ToList();
+        res.AddRange(VectorNotes(t, fixes, aptName, icao));
+        return res.GroupBy(e => (e.Fix, e.When, e.How == "vectors after")).Select(g => g.Last()).ToList();
+    }
+
+    /// <summary>
+    /// "ORD LANDING WEST: EXPECT RADAR VECTORS TO FINAL APPROACH COURSE AFTER PAPPI" (WYNDE3, user 21 Nov): where the STAR
+    /// is left for vectors, in that flow (or always, with no flow before it). How = "vectors after". text: the chart's
+    /// text, upper case, one space between words.
+    /// </summary>
+    public static List<StarExpect> VectorNotes(string text, HashSet<string> fixes, string aptName, string icao = "")
+    {
+        var res = new List<StarExpect>();
+        foreach (Match m in Regex.Matches(text,
+            @"(?:(?<pre>[A-Z0-9 ]{0,40}?)\s*LANDING (?<dir>NORTH|SOUTH|EAST|WEST)(?: ?(?:AND|/) ?(?<dir2>NORTH|SOUTH|EAST|WEST))?\s*[:,\-–]?\s*|(?:RWYS?|RUNWAYS?) (?<rw>\d{1,2}[LCR]?)\s*[:,\-–]?\s*)?"
+            + @"EXPECT (?:RADAR )?VECTORS (?:TO (?:THE )?(?:FINAL(?: APPROACH)?(?: COURSE)?|FAC)(?: FOR (?:RWYS?|RUNWAYS?) [0-9LCR ,/&AND]+?)? )?(?:AFTER|AT|ABEAM|OVER|PRIOR TO|BEFORE) (?<fix>[A-Z]{3,5})\b"))
+        {
+            var fix = m.Groups["fix"].Value;
+            if (!fixes.Contains(fix)) continue;
+            // "ORD LANDING WEST" names the airport by its FAA id: another airport's flow (on a STAR they share) is skipped.
+            var lastWord = m.Groups["pre"].Value.Trim().Split(' ').LastOrDefault() ?? "";
+            if (icao.Length == 4 && lastWord.Length == 3 && lastWord.All(char.IsLetter) && "K" + lastWord != icao
+                && !aptName.Split(' ').Contains(lastWord) && !"NOTE AND THE FOR ALL".Split(' ').Contains(lastWord)) continue;
+            var when = m.Groups["rw"].Success ? "rwy:" + m.Groups["rw"].Value : m.Groups["dir"].Success ? "dir:" + m.Groups["dir"].Value[0] : "";
+            res.Add(new StarExpect(fix, 0, 0, 0, when, "vectors after"));
+            if (m.Groups["dir2"].Success) res.Add(new StarExpect(fix, 0, 0, 0, "dir:" + m.Groups["dir2"].Value[0], "vectors after"));
+        }
+        return res;
     }
 
     /// <summary>A word in its text's own frame: text, start and end along the line, baseline (increasing down the text), size.</summary>
@@ -390,6 +416,8 @@ public static class StarCharts
 
     public static string Describe(StarExpect e)
     {
+        if (e.How == "vectors after")
+            return $"vectors to final after {e.Fix}" + (e.When.StartsWith("dir:") ? $" (landing {e.When[4..] switch { "N" => "north", "S" => "south", "E" => "east", _ => "west" }})" : e.When.StartsWith("rwy:") ? $" (runway {e.When[4..]})" : "");
         var a = e.MinFt > 0 && e.MaxFt > 0 ? (e.MinFt == e.MaxFt ? $"at {e.MinFt:N0}" : $"{e.MinFt:N0}–{e.MaxFt:N0}") : e.MinFt > 0 ? $"at or above {e.MinFt:N0}" : e.MaxFt > 0 ? $"at or below {e.MaxFt:N0}" : "";
         var w = e.When.StartsWith("dir:") ? $" (landing {e.When[4..] switch { "N" => "north", "S" => "south", "E" => "east", _ => "west" }})" : e.When.StartsWith("rwy:") ? $" (runway {e.When[4..]})" : "";
         return $"{e.Fix} {a}{(e.Kt > 0 ? $"{(a.Length > 0 ? ", " : "")}{e.Kt:0} kt" : "")}{w}".Trim();

@@ -14,6 +14,9 @@ public sealed class RealGates
     public DateTime UpdatedUtc { get; set; }
     /// <summary>Changes whenever new data is added (so the traffic recomputes its gate plan).</summary>
     public int Version { get; set; }
+    /// <summary>2: codeshares not counted for the selling airline (0.1.316); older files are learned again.</summary>
+    public int Format { get; set; }
+    public const int CurrentFormat = 2;
     /// <summary>Airline ICAO → gate ("terminal|gate", e.g. "C|61") → how many flights were seen there.</summary>
     public Dictionary<string, Dictionary<string, int>> ByAirline { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     /// <summary>Today's flights: callsign (e.g. DAL2131) → gate, so a known flight goes to its exact gate.</summary>

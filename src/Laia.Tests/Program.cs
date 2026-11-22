@@ -274,6 +274,8 @@ Console.WriteLine("== Rules: wake categories and crossing runways");
 {
     Check(Cwt.For("B77W", Perf.For("B77W")) == 'B' && Cwt.For("B738", Perf.For("B738")) == 'F' && Cwt.For("E75L", Perf.For("E75L")) == 'G' && Cwt.For("B752", Perf.For("B752")) == 'E' && Cwt.For("A388", Perf.For("A388")) == 'A',
         "aircraft get their CWT wake categories (777 B, 737 F, E175 G, 757 E, A380 A)");
+    Check(Cwt.MilesBehind('A', 'B') == 5 && Cwt.MilesBehind('A', 'H') == 8 && Cwt.MilesBehind('C', 'H') == 5 && Cwt.For("CRJ9", Perf.For("CRJ9")) == 'G' && Cwt.For("DH8D", Perf.For("DH8D")) == 'G' && Cwt.MilesBehind('H', 'I') == 3,
+        "the 7110.65 table as published (A→B 5, A→H 8, C→H 5; F–I behind anything small: radar minimum); CRJ900 and Q400 Lower Large");
     Check(Cwt.MilesBehind('B', 'F') == 5 && Cwt.MilesBehind('A', 'I') == 8 && Cwt.MilesBehind('F', 'F') == 3 && Cwt.MilesBehind('C', 'E') == 3.5,
         "spacing on final follows the CWT table (heavy→large 5 nm, A380→small 8, large→large 3)");
     Check(Cwt.DepartureSeconds('B', 'F') == 120 && Cwt.DepartureSeconds('A', 'B') == 180 && Cwt.DepartureSeconds('F', 'F') == 0,
@@ -309,6 +311,68 @@ Console.WriteLine("== Rules: wake categories and crossing runways");
     w.Level = TrafficLevel.Light;
     w.Level = TrafficLevel.Busy; w.Wind = new Wind(120, 12); w.SelectRunways(true);
     Check(w.ArrRwy?.Ident == "09" || w.ArrRwy?.Ident == "18", $"wind change: landing runway turns into the wind ({w.ArrRwy?.Ident})");
+}
+
+Console.WriteLine("== Crossing runways at Busy for an hour: land 27, depart 36 across it (LaGuardia-style)");
+{
+    var data = TestAirport.Build(false);
+    var map = new LocalMap(40, -75);
+    // Runway 18/36 crossing 27 300 m past 27's threshold, with a taxiway to 36's start and hold lines both sides of
+    // it on the parallel taxiway.
+    var (clat, clon) = map.ToLatLon(new V2(1200, 0));
+    data.Runways.Add(new AirportRunway { Lat = clat, Lon = clon, ElevationM = 10, Heading = 0, LengthM = 2500, WidthM = 45, PrimaryNumber = 36, SecondaryNumber = 18 });
+    int Find(double x, double y) => data.Points.FindIndex(q => Math.Abs(q.BiasX - x) < 1 && Math.Abs(q.BiasZ - y) < 1);
+    int Pt(double x, double y, int type = 1) { data.Points.Add(new TaxiPoint { Type = type, BiasX = x, BiasZ = y }); return data.Points.Count - 1; }
+    void Path(int a, int b, int type = 1) => data.Paths.Add(new TaxiPath { Type = type, Start = a, End = b, WidthM = 23 });
+    int tw900 = Find(900, -200), tw1200 = Find(1200, -200), tw1500 = Find(1500, -200), rw1200 = Find(1200, 0);
+    data.Paths.RemoveAll(q => q.Type == 1 && ((q.Start == tw900 && q.End == tw1200) || (q.Start == tw1200 && q.End == tw1500)));
+    int hW = Pt(1140, -200, 2), hE = Pt(1260, -200, 2), t1 = Pt(1350, -200);
+    Path(tw900, hW); Path(hW, tw1200); Path(tw1200, hE); Path(hE, t1); Path(t1, tw1500);
+    var south = new[] { -500.0, -800, -1100, -1250 }.Select(y => Pt(1350, y)).ToList();
+    Path(t1, south[0]); for (var i = 0; i + 1 < south.Count; i++) Path(south[i], south[i + 1]);
+    var hold36 = Pt(1270, -1250, 2);
+    var r36 = new[] { -1250.0, -1000, -750, -500 }.Select(y => Pt(1200, y)).Concat(new[] { tw1200, rw1200 }).Concat(new[] { 300.0, 600, 900, 1250 }.Select(y => Pt(1200, y))).ToList();
+    for (var i = 0; i + 1 < r36.Count; i++) Path(r36[i], r36[i + 1], 2);
+    Path(south[^1], hold36); Path(hold36, r36[0]);
+    var apt = new AirportModel(data);
+    var world = new TrafficWorld(apt, new TestSource(), seed: 21) { Level = TrafficLevel.Busy, Wind = new Wind(300, 15), SafetyLogic = true };
+    var log = new List<string>(); world.Log = l => log.Add($"{world.Time:0} {l}");
+    world.SelectRunways(true);
+    var e27 = apt.Ends.First(e => e.Ident == "27"); var e36 = apt.Ends.First(e => e.Ident == "36");
+    var xing = new V2(1200, 0);
+    var conflicts = new List<string>(); var deps36 = new HashSet<string>(); var maxHold = 0.0; string maxHoldWho = "";
+    var holdSince = new Dictionary<string, double>();
+    for (var t = 0.0; t < 3600; t += 0.5)
+    {
+        world.Step(0.5);
+        foreach (var f in world.Flights)
+        {
+            if (f.Kind == "departure" && f.Rwy?.Ident == "36")
+            {
+                if (f.Phase == "takeoff roll") deps36.Add(f.Callsign);
+                if (f.Phase is "holding short" or "lined up") { holdSince.TryAdd(f.Callsign, world.Time); var w0 = world.Time - holdSince[f.Callsign]; if (w0 > maxHold) { maxHold = w0; maxHoldWho = f.Callsign; } }
+                else holdSince.Remove(f.Callsign);
+                // 3-10-4: a departure rolling through the intersection with an arrival over the 27 threshold or rolling
+                // towards the intersection.
+                if (f.Phase == "takeoff roll" && Math.Abs(e36.Along(f.Pos) - e36.Along(xing)) < 60)
+                    foreach (var a in world.Flights.Where(a => a.Kind == "arrival" && a.Rwy?.Ident == "27" && !a.Done))
+                    {
+                        var dA = (a.Pos - xing).Length;
+                        if ((a.OnGround && a.OnRunway == e27.Runway && e27.Along(a.Pos) < e27.Along(xing) + 30) || (!a.OnGround && dA < 1500 && a.AltFt - apt.ElevationFt < 600))
+                            conflicts.Add($"{world.Time:0} {f.Callsign} through the intersection with {a.Callsign} {(a.OnGround ? "rolling" : "over the threshold")} {dA:0} m away");
+                    }
+            }
+        }
+    }
+    var gaXing = log.Count(l => l.Contains("departing the crossing runway"));
+    var landed = log.Count(l => l.Contains(": landed runway 27"));
+    Console.WriteLine($"  runways {world.ArrRwy?.Ident}/{world.DepRwy?.Ident}; {landed} landed on 27, {deps36.Count} took off from 36; longest wait at 36 {maxHold:0} s ({maxHoldWho}); go-arounds for a crossing departure {gaXing}; conflicts {conflicts.Count}");
+    foreach (var c in conflicts.Take(3)) Console.WriteLine("    " + c);
+    Check(world.ArrRwy?.Ident == "27" && world.DepRwy?.Ident == "36", "land 27, depart the crossing runway 36");
+    Check(deps36.Count >= 4 && landed >= 6, $"both runways work: departures go between the arrivals ({deps36.Count} departures, {landed} arrivals)");
+    Check(conflicts.Count == 0, "no departure through the intersection while an arrival is over the threshold or rolling towards it");
+    Check(maxHold < 600, $"no departure held at 36 for 10 minutes or more ({maxHold:0} s)");
+    Check(gaXing <= 1, $"go-arounds for a crossing departure stay rare ({gaXing})");
 }
 
 Console.WriteLine("== Runway-only airport (test buttons without a layout)");
@@ -2318,6 +2382,44 @@ Console.WriteLine("== Taxi flow: real taxi tracks decide a stretch over the layo
     Check(fl.Against(w, e) && !fl.Against(e, w), "B flows west as the real aircraft did (eastbound is against the flow)");
 }
 
+Console.WriteLine("== Runway exits: real turn-offs (learned taxi-ins) counted per exit");
+{
+    var data = TestAirport.Build(false, twoParallels: true);
+    var apt = new AirportModel(data);
+    var rwy = apt.Ends.First(e => e.Ident == "27");
+    var links = apt.RunwayLinks(rwy.Runway).Select(l => l.off).Distinct().OrderBy(o => rwy.Along(apt.Nodes[o])).ToList();
+    var prof = new AirportProfile { Icao = "TEST", Version = AirportProfile.CurrentVersion };
+    // 24 real arrivals turned off at the second exit, 6 at the last one: each taxi-in's first point just off the runway.
+    void Add(int off, int n)
+    {
+        for (var k = 0; k < n; k++)
+        {
+            var (la, lo) = apt.Map.ToLatLon(apt.Nodes[off] + new V2(k % 3 * 10, -20));
+            prof.Taxi.Add(new AirportProfile.TaxiTrack { Kind = "arrival", Runway = "27", Points = new() { new[] { la, lo, 180.0 } } });
+        }
+    }
+    var second = links[Math.Min(1, links.Count - 1)]; var last = links[^1];
+    Add(second, 24); Add(last, 6);
+    var world = new TrafficWorld(apt, new TestSource(), seed: 5) { Automatic = false, Wind = new Wind(270, 5), Learned = prof };
+    var rex = world.RealExits(rwy);
+    Console.WriteLine($"  exits {links.Count}; counted: {(rex is null ? "none" : string.Join(", ", rex.Select(kv => kv.Key + ": " + kv.Value)))}");
+    Check(rex is not null && rex.GetValueOrDefault(second) >= 20 && rex.Values.Sum() == 30, "the second exit holds the real turn-offs there, all 30 placed");
+    var none = new TrafficWorld(apt, new TestSource(), seed: 5) { Automatic = false, Learned = new AirportProfile { Icao = "TEST" } };
+    Check(none.RealExits(rwy) is null, "no taxi tracks: no real exit shares (the braking model alone)");
+}
+
+Console.WriteLine("== STAR chart notes: \"expect radar vectors to final approach course after FIX\" (WYNDE3)");
+{
+    var fixes = new HashSet<string> { "WYNDE", "PAPPI", "BACEN", "ERNNY" };
+    var t = "NOTE: ORD LANDING WEST: EXPECT RADAR VECTORS TO FINAL APPROACH COURSE AFTER PAPPI. ORD LANDING EAST: EXPECT RADAR VECTORS TO FINAL APPROACH COURSE AFTER ERNNY. MDW LANDING SOUTH: EXPECT RADAR VECTORS AFTER BACEN.";
+    var v = Laia.Server.StarCharts.VectorNotes(t, fixes, "CHICAGO O'HARE INTL", "KORD");
+    Console.WriteLine("  " + string.Join("; ", v.Select(Laia.Server.StarCharts.Describe)));
+    Check(v.Any(e => e.Fix == "PAPPI" && e.When == "dir:W") && v.Any(e => e.Fix == "ERNNY" && e.When == "dir:E"), "O'Hare: after PAPPI landing west, after ERNNY landing east");
+    Check(!v.Any(e => e.Fix == "BACEN"), "Midway's note isn't O'Hare's");
+    var plain = Laia.Server.StarCharts.VectorNotes("EXPECT RADAR VECTORS TO FINAL APPROACH COURSE AFTER WYNDE.", fixes, "X", "KORD");
+    Check(plain.Count == 1 && plain[0].When == "" && plain[0].How == "vectors after", "with no flow: always");
+}
+
 Console.WriteLine("== Traffic starts even when no installed model fits the small gates");
 {
     var apt = new AirportModel(TestAirport.Build(false));
@@ -2429,7 +2531,7 @@ Console.WriteLine("== STAR chart \"expect\" restrictions (BITHO7, FQM3; d-TPP 26
     Check(mco.Any(e => e.Fix == "LAMMA" && e.When == "" && e.MinFt == 12000 && e.MaxFt == 12000), "Orlando: LAMMA at 12,000");
     Check(mco.Any(e => e.Fix == "LAMMA" && e.When == "dir:S" && e.Kt == 250), "Orlando landing south: LAMMA at 250 kt");
     Check(mco.Any(e => e.Fix == "COZMO" && e.When == "rwy:18" && e.MinFt == 10000), "Orlando runway 18: COZMO at 10,000");
-    Check(!mco.Any(e => e.Fix == "BITHO") && !mco.Any(e => e.MinFt == 15000), "Orlando: not the 15,000 or BITHO's 8,000 (they're for other airports)");
+    Check(!mco.Any(e => e.Fix == "BITHO" && e.How != "vectors after") && !mco.Any(e => e.MinFt == 15000), "Orlando: not the 15,000 or BITHO's 8,000 (they're for other airports)");
     var mlb = Laia.Server.StarCharts.ReadExpects(doc, fixes, "MELBOURNE ORLANDO INTL");
     Console.WriteLine("  Melbourne Orlando Intl: " + Show(mlb));
     Check(mlb.Any(e => e.Fix == "LAMMA" && e.MinFt == 15000) && mlb.Any(e => e.Fix == "BITHO" && e.MinFt == 8000) && !mlb.Any(e => e.Fix == "COZMO") && !mlb.Any(e => e.MinFt == 12000),

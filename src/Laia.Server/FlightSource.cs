@@ -409,7 +409,8 @@ public sealed class FlightSource(SettingsStore settings, ILogger<FlightSource> l
     {
         if (_gates.TryGetValue(airport, out var g)) return g;
         try { if (File.Exists(GatesFile(airport))) g = JsonSerializer.Deserialize<RealGates>(File.ReadAllText(GatesFile(airport))); } catch { }
-        g ??= new RealGates { Airport = airport.ToUpperInvariant(), Source = "AirLabs" };
+        if (g is not null && g.Format < RealGates.CurrentFormat) g = null;   // counted codeshares: learned again
+        g ??= new RealGates { Airport = airport.ToUpperInvariant(), Source = "AirLabs", Format = RealGates.CurrentFormat };
         g.ByAirline = new(g.ByAirline, StringComparer.OrdinalIgnoreCase);
         g.ByFlight = new(g.ByFlight, StringComparer.OrdinalIgnoreCase);
         return _gates[airport] = g;
@@ -496,10 +497,32 @@ public sealed class FlightSource(SettingsStore settings, ILogger<FlightSource> l
                 }
                 using var doc = JsonDocument.Parse(body);
                 if (!doc.RootElement.TryGetProperty("response", out var arr) || arr.ValueKind != JsonValueKind.Array) continue;
-                foreach (var f in arr.EnumerateArray())
+                // Gates: one airline per flight. AirLabs lists a codeshare as its own flight, often without saying so
+                // (Virgin, WestJet, Air France and Qatar at LaGuardia and Moline gates): of the flights at the same
+                // minute, to the same airport, from the same gate, only the one that flies it counts — the airline the
+                // others name as their operator, else the airline with the most flights here.
+                static string P(JsonElement e, string n) => e.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
+                var recs = arr.EnumerateArray().ToList();
+                var busy = recs.GroupBy(e => P(e, "airline_iata")).ToDictionary(g => g.Key, g => g.Count());
+                var skipGate = new HashSet<int>();
+                foreach (var grp in recs.Select((e, i) => (e, i))
+                             .Where(x => P(x.e, dep ? "dep_gate" : "arr_gate").Length > 0 && P(x.e, dep ? "dep_time" : "arr_time").Length > 0)
+                             .GroupBy(x => (P(x.e, dep ? "dep_time" : "arr_time"), P(x.e, dep ? "arr_icao" : "dep_icao"), P(x.e, dep ? "dep_gate" : "arr_gate")))
+                             .Where(g => g.Select(x => P(x.e, "airline_iata")).Distinct().Count() > 1))
                 {
+                    var named = grp.Select(x => P(x.e, "cs_airline_iata")).Where(c => c.Length > 0).ToHashSet();
+                    var keep = grp.Where(x => P(x.e, "cs_airline_iata").Length == 0)
+                        .OrderByDescending(x => named.Contains(P(x.e, "airline_iata")) ? 1 : 0)
+                        .ThenByDescending(x => busy.GetValueOrDefault(P(x.e, "airline_iata")))
+                        .Select(x => x.i).DefaultIfEmpty(-1).First();
+                    foreach (var x in grp) if (x.i != keep && P(x.e, "cs_airline_iata").Length == 0) skipGate.Add(x.i);
+                }
+                var idx = -1;
+                foreach (var f in recs)
+                {
+                    idx++;
                     string S(string n) => f.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
-                    LearnGates(airport, dep, f, S);
+                    if (!skipGate.Contains(idx)) LearnGates(airport, dep, f, S);
                     var airline = S("airline_icao");
                     var cs = S("flight_icao");
                     var other = dep ? S("arr_icao") : S("dep_icao");
