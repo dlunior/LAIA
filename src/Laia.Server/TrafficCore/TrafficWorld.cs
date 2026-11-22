@@ -80,6 +80,7 @@ public sealed class Flight
     public int DelayVectors, RwySwitches;
     public string? HoldWhy; public bool HoldWhyLogged;
     public double RunwayStopFor, SpeedAt = -1e9;
+    public int BreakOffs;
     public bool ReplanFree;
     /// <summary>Departures: its number in its runway's departure order (0 when not in it: at the gate, boarding).</summary>
     public int DepSeq;
@@ -725,7 +726,12 @@ public sealed partial class TrafficWorld
                     }
                     slot = Math.Max(slot, prevSlot + gapNeed + 15);
                 }
-                if (f != UserArr && !f.Frozen && !f.Test && slot - f.EtaNominal > 900 && f.Path is not null && (f.ThrS - f.S) / Geo2.MPerNm > 100)
+                var outNm = f.Path is null ? 0 : (f.ThrS - f.S) / Geo2.MPerNm;
+                // Left out earlier and sooner (overload, KATL 21 Nov on a stale ATIS: break-off after break-off close in):
+                // 10 minutes late while still 100 nm or more out, or 15 minutes late inside that down to 60 nm — before
+                // it's in the sequence near the field, where the only tools left are break-offs.
+                if (f != UserArr && !f.Frozen && !f.Test && f.Path is not null && f.BreakOffs == 0
+                    && ((slot - f.EtaNominal > 600 && outNm > 100) || (slot - f.EtaNominal > 900 && outNm > 60)))
                 {
                     // More than 15 minutes late on arrival, still 100 nm or more out (Peak beyond what the runways take,
                     // KORD 18 Nov: number 36 for 27C with 28 minutes to lose): another runway if one has room, else it's
@@ -734,7 +740,7 @@ public sealed partial class TrafficWorld
                     var was = f.Rwy;
                     try { BalanceRunway(f); } catch { }
                     if (f.Rwy != was) continue;
-                    if (f.Delay > 900)
+                    if (f.Delay > (outNm > 100 ? 600 : 900))
                     {
                         f.Done = true; _leftOut++;
                         Log($"{f.Callsign}: left out — {f.Delay / 60:0} min of delay for {was!.Ident} at this traffic level (more than the runways take)");
@@ -4570,7 +4576,7 @@ public sealed partial class TrafficWorld
         _lastBreakoffAt = Time; _lastBreakoffSide = side;
         var outPt = p + left * (side * (wide ? 7 : 4) * nm) - rwy.Dir * ((wide ? 8 : 4) * nm);
         var heading = (outPt - p).Bearing;
-        _breakoffs++; f.Mgr = "vectored around"; f.Frozen = false; f.Rejoin = true;   // re-sequenced behind those nearer in
+        _breakoffs++; f.BreakOffs++; f.Mgr = "vectored around"; f.Frozen = false; f.Rejoin = true;   // re-sequenced behind those nearer in
         Log($"{f.Callsign}: breaking off the approach for spacing ({why}): turn {(V2.Cross(V2.FromBearing(dir), outPt - p) > 0 ? "left" : "right")} heading {heading:000}, vectors back around");
         f.LastOrbit = Time; f.LastVector = Time; f.LastTrombone = Time;   // nothing else for it straight away
         // A real turn out to the break-off point, then another from there onto the vectors back round (the corner at
@@ -6540,7 +6546,13 @@ public sealed partial class TrafficWorld
                     // gone around: its predicted time is far too late (21 Nov, KATL: SWA727 took a shorter real track to
                     // close "405 s behind DAL3127" while DAL3127 was on its second break-off loop; DAL3127 landed first
                     // and SWA727 was broken off 215 s short behind the next one).
-                    if (add < 0 && (leader.Mgr is "vectored around" or "vectored" || leader.Rejoin || leader.WentAround || leader.DetourSec > 0)) add = 0;
+                    // On the landing schedule (its slot from the arrival manager) rather than only the leader's live
+                    // time: with the leader off its plan, the slot is what it aims for (not "nothing"), and a shortcut
+                    // never takes it more than a minute ahead of its slot, where the one ahead of its leader may be.
+                    var staAdd = f.Frozen && !double.IsNaN(f.FrozenSlot) && f.FrozenSlot > 0 ? f.FrozenSlot - (Time + EtaToThreshold(f, dth)) : double.NaN;
+                    var offPlan = leader.Mgr is "vectored around" or "vectored" || leader.Rejoin || leader.WentAround || leader.DetourSec > 0;
+                    if (add < 0 && offPlan) add = double.IsNaN(staAdd) ? 0 : Math.Clamp(staAdd, add, 0);
+                    else if (add < 0 && !double.IsNaN(staAdd)) add = Math.Max(add, Math.Min(0, staAdd - 60));
                     f.TromboneLeft = Trombone(f, add > 10 || add < -25 ? add : 0, $"{gapSec:0} s behind {leader.Callsign} at the runway, {wantGap:0} wanted");
                     if (double.IsNaN(f.TromboneLeft) && f.Fan is not null)
                         f.TromboneLeft = FanPick(f, add > 10 || add < -25 ? add : 0, $"{gapSec:0} s behind {leader.Callsign} at the runway, {wantGap:0} wanted");
