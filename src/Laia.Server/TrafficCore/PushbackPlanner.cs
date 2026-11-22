@@ -342,6 +342,11 @@ public sealed class PushbackPlanner(AirportModel apt)
     /// <summary>Route length to the target starting off in the given direction (never back through the end).</summary>
     private double? Distance(V2 end, V2 dir, int target)
     {
+        // First along the taxi line the push ends on: the next node that way, however far (long taxilane edges, or the
+        // line bending away from a straight look ahead — KORD's and Calgary's surveys: "faces a dead end" at stands
+        // whose push ends on an open taxilane).
+        var onLine = OnLine(end, dir, target);
+        if (onLine is not null) return onLine;
         var start = -1; var bestD = double.MaxValue;
         for (var i = 0; i < apt.TaxiPointCount; i++)
         {
@@ -364,6 +369,37 @@ public sealed class PushbackPlanner(AirportModel apt)
         var route = apt.Route(start, target, null, behind);
         if (route is null) return null;
         double len = bestD;
+        for (var i = 1; i < route.Count; i++) len += (apt.Nodes[route[i]] - apt.Nodes[route[i - 1]]).Length;
+        return len;
+    }
+
+    private double? OnLine(V2 end, V2 dir, int target)
+    {
+        GraphEdge? line = null; var bestOff = 5.0;
+        foreach (var l in apt.TaxiLines)
+        {
+            var a = apt.Nodes[l.A]; var b = apt.Nodes[l.B];
+            var u = b - a; if (u.Length < 1) continue;
+            if (Math.Abs(V2.Dot(u.Unit, dir)) < 0.8) continue;
+            var d = DistToSegment(end, a, b);
+            if (d < bestOff) { bestOff = d; line = l; }
+        }
+        if (line is null) return null;
+        var (na, nb) = V2.Dot(apt.Nodes[line.B] - apt.Nodes[line.A], dir) > 0 ? (line.A, line.B) : (line.B, line.A);
+        var start = nb;
+        var d0 = (apt.Nodes[start] - end).Length;
+        if (d0 < 3)
+        {
+            // Practically at the node: on from it, the way the nose points.
+            var on = apt.Adj[start].Where(e => e.B < apt.TaxiPointCount && e.B != na && V2.Dot((apt.Nodes[e.B] - apt.Nodes[start]).Unit, dir) > 0.3)
+                .OrderByDescending(e => V2.Dot((apt.Nodes[e.B] - apt.Nodes[start]).Unit, dir)).FirstOrDefault();
+            if (on is null) return null;
+            na = start; start = on.B; d0 += on.Len;
+        }
+        if (start == target) return d0;
+        var route = apt.Route(start, target, null, new HashSet<int> { na });
+        if (route is null) return null;
+        double len = d0;
         for (var i = 1; i < route.Count; i++) len += (apt.Nodes[route[i]] - apt.Nodes[route[i - 1]]).Length;
         return len;
     }
