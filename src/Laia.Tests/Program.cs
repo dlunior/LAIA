@@ -375,6 +375,41 @@ Console.WriteLine("== Crossing runways at Busy for an hour: land 27, depart 36 a
     Check(gaXing <= 1, $"go-arounds for a crossing departure stay rare ({gaXing})");
 }
 
+Console.WriteLine("== Peak runways: the ATIS first, real pairs, and kept until a tailwind over 5 kt (KLGA, 22 Nov)");
+{
+    var data = TestAirport.Build(false);
+    var map = new LocalMap(40, -75);
+    var (clat, clon) = map.ToLatLon(new V2(0, 0));
+    data.Runways.Add(new AirportRunway { Lat = clat, Lon = clon, ElevationM = 10, Heading = 0, LengthM = 2500, WidthM = 45, PrimaryNumber = 36, SecondaryNumber = 18 });
+    var apt = new AirportModel(data);
+    // Learned days: landing 27 (60), departing 27 more than anything overall (90) — but at other times; with the
+    // landings on 27, real take-offs were off 36 (40).
+    var prof = new AirportProfile { Icao = "TEST", Version = AirportProfile.CurrentVersion, Day = "test days" };
+    prof.Arrivals["27"] = new AirportProfile.RunwayArrivals { Count = 60 };
+    prof.Departures["27"] = new AirportProfile.RunwayDepartures { Count = 90 };
+    prof.Departures["36"] = new AirportProfile.RunwayDepartures { Count = 40 };
+    for (var k = 0; k < 60; k++) prof.Samples.Add(new AirportProfile.SampleTrack { Kind = "arrival", Runway = "27", T = 1_000_000 + k * 120 });
+    for (var k = 0; k < 40; k++) prof.Samples.Add(new AirportProfile.SampleTrack { Kind = "departure", Runway = "36", T = 1_000_000 + k * 170 + 40 });
+    for (var k = 0; k < 90; k++) prof.Samples.Add(new AirportProfile.SampleTrack { Kind = "departure", Runway = "27", T = 2_000_000 + k * 120 });
+    var w = new TrafficWorld(apt, new TestSource(), seed: 3) { Automatic = false, Wind = new Wind(270, 5), Learned = prof };
+    var lines = new List<string>(); w.Log = l => lines.Add(l);
+    w.Level = TrafficLevel.Peak; w.SelectRunways(true);
+    Console.WriteLine("  " + lines.LastOrDefault(l => l.StartsWith("Runways in use")));
+    Check(w.ArrRwy?.Ident == "27" && w.DepRwy?.Ident == "36", $"learned days: departing the runway used together with the landings, not the busiest overall ({w.ArrRwy?.Ident}/{w.DepRwy?.Ident})");
+    var changes = 0; w.Log = l => { lines.Add(l); if (l.StartsWith("Runways in use")) changes++; };
+    foreach (var (d, kt) in new[] { (300, 9), (360, 0), (230, 11), (180, 3), (330, 12), (10, 4) }) { w.Wind = new Wind(d, kt); w.SelectRunways(); }
+    Check(changes == 0, $"Peak: calm, a few knots more or the wind swinging round don't change the runways ({changes} changes)");
+    w.Wind = new Wind(90, 8); w.SelectRunways();
+    Check(changes == 1 && w.ArrRwy?.Ident != "27", $"a tailwind over 5 kt on the landing runway does ({w.ArrRwy?.Ident})");
+    // A field with an ATIS: it decides at Peak too.
+    var w2 = new TrafficWorld(apt, new TestSource(), seed: 3) { Automatic = false, Wind = new Wind(270, 5), Learned = prof };
+    var l2 = new List<string>(); w2.Log = l => l2.Add(l);
+    w2.AtisText = "TEST ATIS INFO K 0151Z. LDG RWY 27. DEPG RWY 36. NOTAMS...";
+    w2.Level = TrafficLevel.Peak; w2.SelectRunways(true);
+    Console.WriteLine("  " + l2.LastOrDefault(l => l.StartsWith("Runways in use")));
+    Check(w2.ArrRwy?.Ident == "27" && w2.DepRwy?.Ident == "36" && l2.Any(l => l.Contains("from the real ATIS")), "Peak follows the real ATIS when the field has one");
+}
+
 Console.WriteLine("== Runway-only airport (test buttons without a layout)");
 {
     var model = AirportModel.RunwayOnly("KTST", 40, -75, 20, 40, 7000, "04", 40, -75);

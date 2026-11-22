@@ -440,6 +440,22 @@ public sealed partial class TrafficWorld
         // Every runway it names is used: several landing runways (Orlando lands 35L and 36L) and several departure runways.
         List<RunwayEnd> Ends(IEnumerable<string> ids) => ids.Where(id => !_atis.Closed.Contains(id))
             .Select(id => Apt.Ends.FirstOrDefault(e => e.Ident == id)).Where(e => e is not null).Select(e => e!).Distinct().OrderByDescending(e => e.LengthM).ToList();
+        if (peak && PeakConfig(usable, Ends) is { } pc)
+        {
+            // Peak (user, 22 Nov: "for Peak I would not change ops unless the tailwind component is greater than five
+            // knots"): once set, the runways stay while no landing runway has more than 5 kt of tailwind — calm, a few
+            // knots more or a swing of the wind don't turn the airport round (KLGA Peak, 22 Nov: six changes in the night
+            // between 22/31 and 31/31 as the wind wavered round 050 at 0–11 kt). Only better information (the ATIS, the
+            // learned days, after the wind alone) or a new start replaces them sooner.
+            var keep = !force && ArrRwys.Count > 0 && ArrRwys.All(e => Apt.Ends.Contains(e) && Wind.Headwind(e.Heading) >= -5) && pc.rank <= _peakRank;
+            if (keep) return;
+            if (!force && ArrRwys.Count > 0 && !pc.arr.SequenceEqual(ArrRwys) && UserRunwayHeld(pc.arr)) return;
+            if (!ArrRwys.SequenceEqual(pc.arr) || !DepRwys.SequenceEqual(pc.dep))
+                Log($"Runways in use at {Apt.Icao}: landing {string.Join(", ", pc.arr.Select(e => e.Ident))}, departing {string.Join(", ", pc.dep.Select(e => e.Ident))} ({pc.why}; wind {Wind.FromDeg:000} at {Wind.Kt:0} kt)");
+            _peakRank = pc.rank; _lastRunwayChange = Time;
+            ArrRwys = pc.arr; DepRwys = pc.dep; ArrRwy = pc.arr[0]; DepRwy = pc.dep[0];
+            return;
+        }
         var atisArrs = peak ? new List<RunwayEnd>() : Ends(AtisLanding);
         if (atisArrs.Count > 0)
         {
@@ -516,6 +532,42 @@ public sealed partial class TrafficWorld
         DepRwys = new() { dep };
     }
 
+    private int _peakRank = -1;
+
+    /// <summary>
+    /// The Peak test's runways: the real ATIS first (user, 22 Nov: "This is a field with an ATIS, which is supposed to be
+    /// the first and most deciding factor"), with the runways real traffic also uses that way round added back when it
+    /// names fewer (a night configuration: KORD, 18 Nov, one landing runway and six closed under a daytime rush). Without
+    /// an ATIS, the learned days in this wind. rank: 2 ATIS, 1 learned days; null when neither (the wind decides).
+    /// </summary>
+    private (List<RunwayEnd> arr, List<RunwayEnd> dep, string why, int rank)? PeakConfig(List<RunwayEnd> usable, Func<IEnumerable<string>, List<RunwayEnd>> ends)
+    {
+        var learned = RealConfig(usable);
+        var aA = ends(AtisLanding);
+        if (aA.Count == 0) return learned is { } l0 ? (l0.arr, l0.dep, l0.why + ", Peak test", 1) : null;
+        var aD = ends(AtisDeparting);
+        if (aD.Count == 0) aD = new() { aA[0] };
+        aD = aD.OrderBy(e => aA.Any(a => a.Runway == e.Runway) ? 1 : 0).ThenByDescending(e => e.LengthM).ToList();
+        var why = $"from the real ATIS{(_atis.CodeArr is { } c ? " info " + c : "")}";
+        if (learned is { } l)
+        {
+            var addA = l.arr.Where(e => !aA.Contains(e) && Math.Abs(Geo2.Diff(e.Heading, aA[0].Heading)) < 60).ToList();
+            var addD = DeparturesWith(aA.Concat(addA).ToList()) is { Count: > 0 } dw && dw.Values.Sum() >= 20
+                ? l.dep.Concat(dw.OrderByDescending(kv => kv.Value).Where(kv => kv.Value * 10 >= dw.Values.Max()).Select(kv => usable.FirstOrDefault(u => u.Ident == kv.Key)).Where(e => e is not null).Select(e => e!))
+                    .Distinct().Where(e => !aD.Contains(e) && !aA.Concat(addA).Any(a => a.Runway == e.Runway) && Math.Abs(Geo2.Diff(e.Heading, aA[0].Heading)) < 100 && Wind.Headwind(e.Heading) >= -5).ToList()
+                : new List<RunwayEnd>();
+            // Only when the ATIS names fewer than real traffic uses that way round (a night configuration).
+            if (aA.Count >= l.arr.Count(e => Math.Abs(Geo2.Diff(e.Heading, aA[0].Heading)) < 60)) addA.Clear();
+            if (aD.Count >= l.dep.Count) addD.Clear();
+            if (addA.Count + addD.Count > 0)
+            {
+                aA = aA.Concat(addA).ToList(); aD = aD.Concat(addD).ToList();
+                why += $", with {string.Join(", ", addA.Concat(addD).Select(e => e.Ident))} added as real traffic uses them that way round (the ATIS's night configuration isn't the replayed rush's)";
+            }
+        }
+        return (aA, aD, why + ", Peak test", 2);
+    }
+
     private string _livePendingSig = "";
     private double _livePendingSince, _lastRunwayChange = double.NegativeInfinity;
 
@@ -541,6 +593,23 @@ public sealed partial class TrafficWorld
     /// wind (tailwind up to 10 kt, crosswind 25), with parallels used at least a quarter as much. Null when neither.
     /// </summary>
     private bool _rwyFromLive;
+
+    /// <summary>Take-offs (learned samples) per runway within 15 minutes of a landing on one of these runways.</summary>
+    private Dictionary<string, int> DeparturesWith(List<RunwayEnd> arr)
+    {
+        var res = new Dictionary<string, int>();
+        if (Learned is null) return res;
+        var ids = arr.Select(a => a.Ident).ToHashSet();
+        var lands = Learned.Samples.Where(x => x.Kind == "arrival" && ids.Contains(x.Runway) && x.T > 0).Select(x => x.T).OrderBy(t => t).ToList();
+        if (lands.Count == 0) return res;
+        foreach (var d in Learned.Samples)
+        {
+            if (d.Kind != "departure" || d.T <= 0) continue;
+            var i = lands.BinarySearch(d.T - 900); if (i < 0) i = ~i;
+            if (i < lands.Count && lands[i] <= d.T + 900) res[d.Runway] = res.GetValueOrDefault(d.Runway) + 1;
+        }
+        return res;
+    }
 
     private (List<RunwayEnd> arr, List<RunwayEnd> dep, string why)? RealConfig(List<RunwayEnd> usable)
     {
@@ -585,6 +654,11 @@ public sealed partial class TrafficWorld
         var arr = Top(Learned.Arrivals.Select(kv => (kv.Key, kv.Value.Count)));
         var dep = Top(Learned.Departures.Select(kv => (kv.Key, kv.Value.Count)));
         if (arr.Count == 0) return null;
+        // The departure runways real traffic used together with these landing runways (take-offs within 15 minutes of a
+        // landing on them), not simply the most used ones overall (22 Nov, KLGA Peak: landing 31 came with departing 31 —
+        // LaGuardia's busiest departure runway, but when it lands 31 it departs 04: 174 of 180 take-offs).
+        var together = DeparturesWith(arr);
+        if (together.Values.Sum() >= 20 && Top(together.Select(kv => (kv.Key, kv.Value))) is { Count: > 0 } tg) dep = tg;
         // Departures off the learned day must be the same way round as today's landings.
         dep = dep.Where(d => arr.Any(a => Math.Abs(Geo2.Diff(a.Heading, d.Heading)) < 100)).ToList();
         if (dep.Count == 0) dep = arr.ToList();
