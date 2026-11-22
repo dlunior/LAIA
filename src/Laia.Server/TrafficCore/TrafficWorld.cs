@@ -4935,7 +4935,8 @@ public sealed partial class TrafficWorld
             // Few, steady speed instructions (7110.65 5-7-1: the minimum necessary, no alternating; 20 Nov, CYUL: ACA336
             // and ACA376 got 12–14 each): a change of less than 10 kt is never given, and within 2½ minutes of the last
             // one only a change of 20 kt or more.
-            f.SlowDv = keep > 0 && (Math.Abs(dv - keep) < 10 || (Time - f.SpeedAt < 150 && Math.Abs(dv - keep) < 20)) ? keep : dv;
+            // The 20 kt rule only when the speed it has is the slower one: never kept too fast for its slot.
+            f.SlowDv = keep > 0 && (Math.Abs(dv - keep) < 10 || (Time - f.SpeedAt < 150 && keep >= dv && keep - dv < 20)) ? keep : dv;
             // More delay than speed (40 kt slower) and the trombone near the runway can take: delay vectors on the way
             // in, far out (beyond 40 nm), a few minutes at a time — never a hold.
             // Far out, the delay speed can't take is planned onto a longer real track (the way real controllers stretch
