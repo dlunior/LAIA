@@ -81,6 +81,9 @@ public sealed class Flight
     public string? HoldWhy; public bool HoldWhyLogged;
     public double RunwayStopFor, SpeedAt = -1e9;
     public int BreakOffs;
+    public bool JunctionHeld, GoFirstFailed;
+    public double GoFirstAt = -1, JhCheckAt = -1e9;
+    public (string name, Flight ahead)? JhLast;
     public string ExitNote = "";
     public bool ReplanFree;
     /// <summary>Departures: its number in its runway's departure order (0 when not in it: at the gate, boarding).</summary>
@@ -126,7 +129,7 @@ public sealed class Flight
     public string DepReport = "";
     public double GateTryTime = -999;
     /// <summary>A departure's climb stopped below crossing traffic (NaN: none), and when that was last checked.</summary>
-    public double ClimbStop = double.NaN, ProbeAt = -99;
+    public double ClimbStop = double.NaN, ProbeAt = -99, ClimbHoldFt = double.NaN;
     public string? StoppedFor;
     /// <summary>The SID's top altitude (the chart's "maintain 7,000", NaN: none) and whether the climb above it was given.</summary>
     public double TopAltFt = double.NaN, ReleaseAt = -99, TopReachedAt = double.NaN;
@@ -440,6 +443,22 @@ public sealed partial class TrafficWorld
         // Every runway it names is used: several landing runways (Orlando lands 35L and 36L) and several departure runways.
         List<RunwayEnd> Ends(IEnumerable<string> ids) => ids.Where(id => !_atis.Closed.Contains(id))
             .Select(id => Apt.Ends.FirstOrDefault(e => e.Ident == id)).Where(e => e is not null).Select(e => e!).Distinct().OrderByDescending(e => e.LengthM).ToList();
+        if (peak && PeakConfig(usable, Ends) is { } pc)
+        {
+            // Peak (user, 22 Nov: "for Peak I would not change ops unless the tailwind component is greater than five
+            // knots"): once set, the runways stay while no landing runway has more than 5 kt of tailwind — calm, a few
+            // knots more or a swing of the wind don't turn the airport round (KLGA Peak, 22 Nov: six changes in the night
+            // between 22/31 and 31/31 as the wind wavered round 050 at 0–11 kt). Only better information (the ATIS, the
+            // learned days, after the wind alone) or a new start replaces them sooner.
+            var keep = !force && ArrRwys.Count > 0 && ArrRwys.All(e => Apt.Ends.Contains(e) && Wind.Headwind(e.Heading) >= -5) && pc.rank <= _peakRank;
+            if (keep) return;
+            if (!force && ArrRwys.Count > 0 && !pc.arr.SequenceEqual(ArrRwys) && UserRunwayHeld(pc.arr)) return;
+            if (!ArrRwys.SequenceEqual(pc.arr) || !DepRwys.SequenceEqual(pc.dep))
+                Log($"Runways in use at {Apt.Icao}: landing {string.Join(", ", pc.arr.Select(e => e.Ident))}, departing {string.Join(", ", pc.dep.Select(e => e.Ident))} ({pc.why}; wind {Wind.FromDeg:000} at {Wind.Kt:0} kt)");
+            _peakRank = pc.rank; _lastRunwayChange = Time;
+            ArrRwys = pc.arr; DepRwys = pc.dep; ArrRwy = pc.arr[0]; DepRwy = pc.dep[0];
+            return;
+        }
         var atisArrs = peak ? new List<RunwayEnd>() : Ends(AtisLanding);
         if (atisArrs.Count > 0)
         {
@@ -448,7 +467,7 @@ public sealed partial class TrafficWorld
             // The main departure runway is one not also used for landing, when there is one.
             atisDeps = atisDeps.OrderBy(e => atisArrs.Any(a => a.Runway == e.Runway) ? 1 : 0).ThenByDescending(e => e.LengthM).ToList();
             if (!ArrRwys.SequenceEqual(atisArrs) || !DepRwys.SequenceEqual(atisDeps))
-                Log($"Runways in use at {Apt.Icao}: landing {string.Join(", ", atisArrs.Select(e => e.Ident))}, departing {string.Join(", ", atisDeps.Select(e => e.Ident))} (from the real ATIS{(_atis.CodeArr is { } c ? " info " + c : "")}; wind {Wind.FromDeg:000} at {Wind.Kt:0} kt)");
+                Log($"Runways in use at {Apt.Icao}: landing {string.Join(", ", atisArrs.Select(e => e.Ident))}, departing {string.Join(", ", atisDeps.Select(e => e.Ident))} (from the real ATIS{(!string.IsNullOrEmpty(_atis.CodeArr) ? " info " + _atis.CodeArr : "")}; wind {Wind.FromDeg:000} at {Wind.Kt:0} kt)");
             ArrRwys = atisArrs; DepRwys = atisDeps;
             ArrRwy = atisArrs[0];
             DepRwy = atisDeps[0];
@@ -514,6 +533,43 @@ public sealed partial class TrafficWorld
         DepRwy = dep;
         ArrRwys = new() { arr };
         DepRwys = new() { dep };
+        if (peak) _peakRank = 0;
+    }
+
+    private int _peakRank = -1;
+
+    /// <summary>
+    /// The Peak test's runways: the real ATIS first (user, 22 Nov: "This is a field with an ATIS, which is supposed to be
+    /// the first and most deciding factor"), with the runways real traffic also uses that way round added back when it
+    /// names fewer (a night configuration: KORD, 18 Nov, one landing runway and six closed under a daytime rush). Without
+    /// an ATIS, the learned days in this wind. rank: 2 ATIS, 1 learned days; null when neither (the wind decides).
+    /// </summary>
+    private (List<RunwayEnd> arr, List<RunwayEnd> dep, string why, int rank)? PeakConfig(List<RunwayEnd> usable, Func<IEnumerable<string>, List<RunwayEnd>> ends)
+    {
+        var learned = RealConfig(usable);
+        var aA = ends(AtisLanding);
+        if (aA.Count == 0) return learned is { } l0 ? (l0.arr, l0.dep, l0.why + ", Peak test", 1) : null;
+        var aD = ends(AtisDeparting);
+        if (aD.Count == 0) aD = new() { aA[0] };
+        aD = aD.OrderBy(e => aA.Any(a => a.Runway == e.Runway) ? 1 : 0).ThenByDescending(e => e.LengthM).ToList();
+        var why = $"from the real ATIS{(!string.IsNullOrEmpty(_atis.CodeArr) ? " info " + _atis.CodeArr : "")}";
+        if (learned is { } l)
+        {
+            var addA = l.arr.Where(e => !aA.Contains(e) && Math.Abs(Geo2.Diff(e.Heading, aA[0].Heading)) < 60).ToList();
+            var addD = DeparturesWith(aA.Concat(addA).ToList()) is { Count: > 0 } dw && dw.Values.Sum() >= 20
+                ? l.dep.Concat(dw.OrderByDescending(kv => kv.Value).Where(kv => kv.Value * 10 >= dw.Values.Max()).Select(kv => usable.FirstOrDefault(u => u.Ident == kv.Key)).Where(e => e is not null).Select(e => e!))
+                    .Distinct().Where(e => !aD.Contains(e) && !aA.Concat(addA).Any(a => a.Runway == e.Runway) && Math.Abs(Geo2.Diff(e.Heading, aA[0].Heading)) < 100 && Wind.Headwind(e.Heading) >= -5).ToList()
+                : new List<RunwayEnd>();
+            // Only when the ATIS names fewer than real traffic uses that way round (a night configuration).
+            if (aA.Count >= l.arr.Count(e => Math.Abs(Geo2.Diff(e.Heading, aA[0].Heading)) < 60)) addA.Clear();
+            if (aD.Count >= l.dep.Count) addD.Clear();
+            if (addA.Count + addD.Count > 0)
+            {
+                aA = aA.Concat(addA).ToList(); aD = aD.Concat(addD).ToList();
+                why += $", with {string.Join(", ", addA.Concat(addD).Select(e => e.Ident))} added as real traffic uses them that way round (the ATIS's night configuration isn't the replayed rush's)";
+            }
+        }
+        return (aA, aD, why + ", Peak test", 2);
     }
 
     private string _livePendingSig = "";
@@ -541,6 +597,23 @@ public sealed partial class TrafficWorld
     /// wind (tailwind up to 10 kt, crosswind 25), with parallels used at least a quarter as much. Null when neither.
     /// </summary>
     private bool _rwyFromLive;
+
+    /// <summary>Take-offs (learned samples) per runway within 15 minutes of a landing on one of these runways.</summary>
+    private Dictionary<string, int> DeparturesWith(List<RunwayEnd> arr)
+    {
+        var res = new Dictionary<string, int>();
+        if (Learned is null) return res;
+        var ids = arr.Select(a => a.Ident).ToHashSet();
+        var lands = Learned.Samples.Where(x => x.Kind == "arrival" && ids.Contains(x.Runway) && x.T > 0).Select(x => x.T).OrderBy(t => t).ToList();
+        if (lands.Count == 0) return res;
+        foreach (var d in Learned.Samples)
+        {
+            if (d.Kind != "departure" || d.T <= 0) continue;
+            var i = lands.BinarySearch(d.T - 900); if (i < 0) i = ~i;
+            if (i < lands.Count && lands[i] <= d.T + 900) res[d.Runway] = res.GetValueOrDefault(d.Runway) + 1;
+        }
+        return res;
+    }
 
     private (List<RunwayEnd> arr, List<RunwayEnd> dep, string why)? RealConfig(List<RunwayEnd> usable)
     {
@@ -585,6 +658,11 @@ public sealed partial class TrafficWorld
         var arr = Top(Learned.Arrivals.Select(kv => (kv.Key, kv.Value.Count)));
         var dep = Top(Learned.Departures.Select(kv => (kv.Key, kv.Value.Count)));
         if (arr.Count == 0) return null;
+        // The departure runways real traffic used together with these landing runways (take-offs within 15 minutes of a
+        // landing on them), not simply the most used ones overall (22 Nov, KLGA Peak: landing 31 came with departing 31 —
+        // LaGuardia's busiest departure runway, but when it lands 31 it departs 04: 174 of 180 take-offs).
+        var together = DeparturesWith(arr);
+        if (together.Values.Sum() >= 20 && Top(together.Select(kv => (kv.Key, kv.Value))) is { Count: > 0 } tg) dep = tg;
         // Departures off the learned day must be the same way round as today's landings.
         dep = dep.Where(d => arr.Any(a => Math.Abs(Geo2.Diff(a.Heading, d.Heading)) < 100)).ToList();
         if (dep.Count == 0) dep = arr.ToList();
@@ -1248,15 +1326,30 @@ public sealed partial class TrafficWorld
     /// (when the real one would be taking off) and climb out into the whole sky; arrivals are taken over from the whole
     /// sky within 60 nm and land, disappearing once slowed on the runway.
     /// </summary>
+    private int _seenReplays;
+    private double _capLogged = -1e9;
+    /// <summary>How many times the Peak test has started over (neighbouring fields replay with it).</summary>
+    public int PeakReplays { get; private set; }
+
     private void RunNeighbour()
     {
         var legs = Schedule!.Legs;
         var me = Apt.Icao;
+        // When the main airport's Peak test replays its busiest hours, so does this field (22 Nov: JFK and Newark kept
+        // the list of flights they had flown, so every replay skipped them — Newark's landings went 20 an hour, 6, 4, 0).
+        if (ClockOwner is { } co && co.PeakReplays != _seenReplays) { _seenReplays = co.PeakReplays; _done.Clear(); }
         var active = Flights.Count(f => !f.Done);
-        const int cap = 16;
+        // No count of aircraft limits a level (user rule: a level is a share of the field's schedule); only the runaway
+        // guard (JFK at Peak had been capped at 16 at once, arrivals and departures together — taken over up to 50
+        // minutes out, its inbound traffic alone filled that).
+        var (_, cap, _, _) = Budget;
         foreach (var l in legs)
         {
-            if (active >= cap) break;
+            if (active >= cap)
+            {
+                if (Time - _capLogged > 600) { _capLogged = Time; Log($"{me}: {active} aircraft at once — the runaway guard; later flights wait"); }
+                break;
+            }
             if (l.Dep == me && Keep(l))
             {
                 var u = Until(l.DepMin);
@@ -1324,12 +1417,13 @@ public sealed partial class TrafficWorld
         var me = Apt.Icao;
         if (Level == TrafficLevel.Peak)
         {
-            if (!_peakSet) { PlanPeak(legs); _schedStarted = false; foreach (var f in Flights.Where(f => f.Kind == "parked" && f.Phase == "parked" && f.Reg.Length > 0)) f.Done = true; }
+            if (!_peakSet) { PlanPeak(legs); PeakReplays++; _schedStarted = false; foreach (var f in Flights.Where(f => f.Kind == "parked" && f.Phase == "parked" && f.Reg.Length > 0)) f.Done = true; }
             else if (((SchedNow - _peakStart) % 10080 + 10080) % 10080 >= _peakLen)
             {
                 // The busiest hours are over: replay them (each flight may run again, but never one that's still around).
                 _peakOffset -= _peakLen;
                 _done.Clear();
+                PeakReplays++;
                 Log($"{me}: peak test: replaying the busiest hours again");
             }
         }
@@ -2378,6 +2472,7 @@ public sealed partial class TrafficWorld
         // Line up and wait behind a take-off roll, or behind a landing rolling out (safety logic, fair weather).
         var behind = Flights.Where(o => o != f && !o.Done && (o.Reserve == r || (o.OnRunway == r && !(o.Kind == "departure" && !o.OnGround)))).ToList();
         if (UserOnRunway(r)) { f.HoldWhy = "your aircraft on the runway"; return false; }
+        if (GoAroundAhead(f) is { } ga) { f.HoldWhy = $"{ga.Callsign} going around over the runway"; return false; }
         if (behind.FirstOrDefault(o => !MayLineUpBehind(o, f)) is { } bo) { f.HoldWhy = $"{bo.Callsign} on the runway"; return false; }
         // During a runway change, no departures the new way while arrivals still come in the old way (the opposite
         // direction) within 30 nm: the airport turns round once the last of them has landed.
@@ -2402,10 +2497,29 @@ public sealed partial class TrafficWorld
         return true;
     }
 
+    /// <summary>
+    /// A go-around still over or ahead of the departure runway, low (22 Nov, KJFK: DLH410 went around on 31L just as
+    /// CPA831 lined up there; they came within 1.0 nm): no line-up or take-off until it has climbed through 3,000 ft
+    /// above the field, or is more than 5 nm past the runway's end or 1.5 nm to either side of its line.
+    /// </summary>
+    private Flight? GoAroundAhead(Flight f)
+    {
+        var d = f.Rwy!;
+        foreach (var o in Flights)
+        {
+            if (o.Done || o.OnGround || o.Phase != "go-around" || o == f) continue;
+            if (o.AltFt - d.ElevationFt > 3000) continue;
+            var along = d.Along(o.Pos); var off = Math.Abs(d.Offset(o.Pos));
+            if (along > -2 * Geo2.MPerNm && along < d.LengthM + 5 * Geo2.MPerNm && off < 1.5 * Geo2.MPerNm) return o;
+        }
+        return null;
+    }
+
     private bool TakeoffAllowed(Flight f)
     {
         var r = f.Rwy!.Runway;
         if (RunwayBusy(r, f)) return false;
+        if (GoAroundAhead(f) is not null) return false;
         // Airborne and 6,000 ft down the runway before the next arrival crosses the threshold (3-10-3), a few seconds spare.
         if (ArrivalEta(r) < TimeToClearForArrival(f) + 5) return false;
         if (!CrossingRunwayClearForTakeoff(f)) return false;
@@ -4620,6 +4734,22 @@ public sealed partial class TrafficWorld
         f.WentAround = true;
         var p = f.Pos;
         var climbOut = p + rwy.Dir * (4 * Geo2.MPerNm);
+        // A departure rolling or just off this runway (or one crossing ahead): the go-around turns 25° away from where it
+        // goes, as the tower would ("turn left heading …"), instead of climbing out straight behind or into it.
+        var dep = Flights.Where(o => o != f && !o.Done && o.Kind == "departure" && o.Rwy is { } dr
+                && (dr.Runway == rwy.Runway || Crossing(rwy, dr) is not null)
+                && (o.Phase is "takeoff roll" or "lined up" || (!o.OnGround && o.AltFt - rwy.ElevationFt < 4000 && (o.Pos - p).Length < 8 * Geo2.MPerNm)))
+            .OrderBy(o => (o.Pos - p).Length).FirstOrDefault();
+        if (dep is not null)
+        {
+            // Which side of the go-around's line the departure is or will be (its route 3 nm on).
+            var dp = dep.Path is { } dpath ? dpath.At(Math.Min(dpath.Length, dep.S + 3 * Geo2.MPerNm)).p : dep.Pos;
+            var side = V2.Cross(rwy.Dir, dp - p);
+            var turn = Math.Abs(side) < 300 ? 25 : side > 0 ? 25 : -25;   // V2.Cross > 0: to the left; turn right then
+            var hdg = Geo2.Norm(rwy.Heading + turn);
+            climbOut = p + rwy.Dir * (0.5 * Geo2.MPerNm) + V2.FromBearing(hdg) * (3.5 * Geo2.MPerNm);
+            Log($"{f.Callsign}: go-around turns {(turn > 0 ? "right" : "left")} heading {hdg:000} away from {dep.Callsign} departing");
+        }
         BuildArrivalPath(f, climbOut);
         // Prepend the current position so the path starts where the aircraft is.
         var pts = new List<V2> { p };
@@ -5701,7 +5831,8 @@ public sealed partial class TrafficWorld
         }
         else f.RunwayStopFor = 0;
         var atHold = f.Stops.Any(st => !st.Cleared && Math.Abs(st.S - f.S) < 3);
-        if (f.Gs > 0.5 || atHold || InQueue(f)) { f.StuckFor = 0; return; }
+        if (f.Gs > 0.5) { f.GoFirstAt = -1; f.GoFirstFailed = false; }
+        if (f.Gs > 0.5 || atHold || f.JunctionHeld || InQueue(f)) { f.StuckFor = 0; return; }
         f.StuckFor += dt;
         // After 2 minutes on the way in, another gate comes first (it used to wait for a minute without a reroute,
         // which the reroutes every minute never allowed: DAL2225 was removed at MCO instead of going elsewhere).
@@ -5740,6 +5871,107 @@ public sealed partial class TrafficWorld
     }
 
     /// <summary>An arriving aircraft that can't get to its gate takes another free gate it can reach.</summary>
+    /// <summary>
+    /// The user's aircraft in this one's way: along the route it will taxi (not straight ahead of its nose — 22 Nov,
+    /// KLGA: the taxilane behind gate 48 points straight at the gate before it bends off to 45–47, so ten Uniteds stopped
+    /// 78 m short of the user parked on 48, though their route passed 30–48 m from the user's nose, and were removed).
+    /// The user's aircraft is its fuselage (from the stand's heading when parked on one) and wings; parked on a stand
+    /// for a minute it is part of the scenery like LAIA's parked aircraft (a small margin), otherwise a wider one.
+    /// </summary>
+    private bool UserInTheWay(Flight f, V2 u, double v)
+    {
+        var up = Perf.For(string.IsNullOrEmpty(UserType) ? "B738" : UserType);
+        var parked = Time - _userMovedAt > 60 ? Apt.Spots.Where(sp => (sp.P - u).Length < sp.RadiusM + 5).OrderBy(sp => (sp.P - u).Length).FirstOrDefault() : null;
+        var udir = V2.FromBearing(parked?.Heading ?? UserTrack);
+        var nose = u + udir * (up.LengthM * 0.45); var tail = u - udir * (up.LengthM * 0.55);
+        var margin = parked is not null ? 4.0 : 12.0;
+        var look = f.P.LengthM / 2 + 60 + v * v / 2.0;
+        if (f.Path is not { } path)
+        {
+            var r = u - f.Pos; var mdir = V2.FromBearing(f.Reverse ? Geo2.Norm(f.Heading + 180) : f.Heading);
+            return V2.Dot(r, mdir) > 0 && V2.Dot(r, mdir) < look && Math.Abs(V2.Cross(mdir, r)) < f.P.SpanM / 2 + up.SpanM / 2 + margin;
+        }
+        for (var d = 5.0; d <= look; d += 5)
+        {
+            var sp = Math.Min(f.S + d, path.Length);
+            var p = path.At(sp).p;
+            // Its wing past the user's fuselage, or wing to wing where the user's wings are.
+            if (SegDist(p, tail, nose) < f.P.SpanM / 2 + margin || (p - u).Length < (f.P.SpanM + up.SpanM) / 2 + margin) return true;
+            if (sp >= path.Length) break;
+        }
+        return false;
+    }
+
+    /// <summary>Getting off a runway: on it, or its tail still within the runway's protected area (about 80 m from the
+    /// centreline). Only that far: once its tail is past the hold line it is ordinary taxi traffic (user, 22 Nov: "Traffic
+    /// coming immediately off a runway should be given priority. But just immediately off a runway").</summary>
+    private bool Vacating(Flight x)
+    {
+        if (!x.OnGround || x.Phase is "parked" or "boarding" or "pushback") return false;
+        if (x.OnRunway >= 0 && x.Phase is "taxi" or "taxi in" or "landing roll") return true;
+        if (x.Phase != "taxi in" && x.Phase != "landing roll") return false;
+        var tail = x.Pos - V2.FromBearing(x.Heading) * (x.P.LengthM / 2);
+        return Apt.Ends.Any(e => e.Contains(tail, 60));
+    }
+
+    /// <summary>
+    /// Hold short of the next taxiway junction on its route when the aircraft ahead beyond it, stopped or crawling,
+    /// would leave it across the junction: the room past the junction (to that aircraft's tail) must take its whole
+    /// length plus 10 m. Not for one getting off a runway, or one already in the junction. Checked once a second.
+    /// </summary>
+    private (string name, Flight ahead)? JunctionHold(Flight f, double v)
+    {
+        if (f.Phase is not ("taxi" or "taxi in") || f.Reverse || f.Path is not { } path || f.TaxiRoute is not { Count: > 1 } route) return null;
+        if (Vacating(f)) return null;
+        if (Time - f.JhCheckAt < 1) return f.JhLast;
+        f.JhCheckAt = Time; f.JhLast = null;
+        var nose = f.S + f.P.LengthM / 2;
+        var lead = 30 + v * v / 2.0;
+        // The next junction ahead: a node on its route where three or more taxi lines meet, off the runways.
+        var ne = NextEdge(f);
+        var start = ne is { } e0 ? Math.Max(0, route.IndexOf(e0.v)) : 0;
+        for (var i = start; i < route.Count && i < start + 12; i++)
+        {
+            var n = route[i];
+            if (Apt.NodeRunway[n] >= 0) continue;
+            if (Apt.Adj[n].Count(x => x.B < Apt.TaxiPointCount && x.Type is 1 or 4) < 3) continue;
+            var jp = Apt.Nodes[n];
+            if ((jp - f.Pos).Length > nose - f.S + lead + 40) return null;
+            // Where it is along the path.
+            double sJ = double.NaN; var bd = 12.0;
+            for (var sp = f.S; sp <= Math.Min(path.Length, f.S + 200); sp += 4) { var d = (path.At(sp).p - jp).Length; if (d < bd) { bd = d; sJ = sp; } }
+            if (double.IsNaN(sJ)) return null;
+            var edgeIn = sJ - 15;
+            if (nose > edgeIn) continue;                 // already in it: through it
+            if (edgeIn - nose > lead) return null;       // not yet
+            // The nearest aircraft on its path beyond the junction.
+            Flight? ahead = null; double sAhead = double.MaxValue;
+            foreach (var o in Flights)
+            {
+                if (o == f || o.Done || !o.OnGround || o.Phase is "parked" or "boarding") continue;
+                if ((o.Pos - jp).Length > f.P.LengthM + o.P.LengthM + 60) continue;
+                for (var sp = sJ; sp <= Math.Min(path.Length, sJ + f.P.LengthM + o.P.LengthM + 40); sp += 4)
+                    if ((path.At(sp).p - o.Pos).Length < o.P.SpanM * 0.25 + 6) { if (sp < sAhead) { sAhead = sp; ahead = o; } break; }
+            }
+            // Not when that one is waiting for this one (it would never move up), nor for it rolling along.
+            if (ahead is null || ahead.Gs > 3 || ahead.BlockedBy == f) return null;
+            var room = sAhead - ahead.P.LengthM / 2 - (sJ + 15);
+            if (room >= f.P.LengthM + 10) return null;
+            var name = Apt.Adj[n].Where(x => x.Name.Length > 0 && !route.Contains(x.B)).Select(x => x.Name).FirstOrDefault()
+                       ?? Apt.Adj[n].Where(x => x.Name.Length > 0).Select(x => x.Name).FirstOrDefault() ?? "the junction";
+            f.JhLast = (name, ahead);
+            return f.JhLast;
+        }
+        return null;
+    }
+
+    private static double SegDist(V2 p, V2 a, V2 b)
+    {
+        var ab = b - a; var l2 = V2.Dot(ab, ab);
+        var t = l2 < 1e-9 ? 0 : Math.Clamp(V2.Dot(p - a, ab) / l2, 0, 1);
+        return (p - (a + ab * t)).Length;
+    }
+
     private bool TryOtherGate(Flight f)
     {
         var old = f.Spot;
@@ -5748,7 +5980,10 @@ public sealed partial class TrafficWorld
         if (gate is not null && gate != old)
         {
             f.Spot = gate;
-            if (Reroute(f, f.Pos + V2.FromBearing(f.Heading) * 40, "the blockage")) { Log($"{f.Callsign}: going to {gate.Label} instead"); return true; }
+            // Round what is in the way: the user's aircraft when it's the user (22 Nov, KLGA: the point 40 m ahead was the
+            // taxilane itself, so no new way was found and ten were removed instead).
+            var avoid = f.BlockedByUser && UserPos is { } uu ? uu : f.Pos + V2.FromBearing(f.Heading) * 40;
+            if (Reroute(f, avoid, f.BlockedByUser ? "your aircraft" : "the blockage")) { Log($"{f.Callsign}: going to {gate.Label} instead"); return true; }
         }
         f.Spot = old;
         return false;
@@ -5877,7 +6112,7 @@ public sealed partial class TrafficWorld
             // Paths crossing (intersections): look a few seconds ahead; whoever gets there second waits — except that an
             // aircraft on a runway (crossing it, or turning off it) always goes first, to clear it (KORD, 18 Nov: four
             // arrivals went around for aircraft that stopped on a runway they were crossing).
-            if (ahead > -10 && dist < 160 && !(f.OnRunway >= 0 && o.OnRunway < 0))
+            if (ahead > -10 && dist < 160 && !(Vacating(f) && !Vacating(o)))
             {
                 var odir = V2.FromBearing(o.Reverse ? Geo2.Norm(o.Heading + 180) : o.Heading);
                 var ov = o.Gs * Kt;
@@ -5889,20 +6124,24 @@ public sealed partial class TrafficWorld
                     if ((mine - theirs).Length >= minD) continue;
                     // The one closer to the meeting point goes first.
                     var meet = (mine + theirs) * 0.5;
-                    if ((o.Pos - meet).Length < (f.Pos - meet).Length || (o.OnRunway >= 0 && f.OnRunway < 0)) { by = o; }
+                    if ((o.Pos - meet).Length < (f.Pos - meet).Length || (Vacating(o) && !Vacating(f))) { by = o; }
                     break;
                 }
                 if (by is not null) break;
             }
         }
-        if (by is null && UserOnGround && UserPos is { } u)
-        {
-            var r = u - f.Pos;
-            var ahead = V2.Dot(r, mdir);
-            var lat = Math.Abs(V2.Cross(mdir, r));
-            if (ahead > 0 && ahead < f.P.LengthM / 2 + 60 + v * v / 2.0 && lat < f.P.SpanM / 2 + 25) userBlock = true;
-        }
+        if (by is null && UserOnGround && UserPos is { } u && UserInTheWay(f, u, v)) userBlock = true;
         f.BlockedByUser = userBlock;
+        // Don't block the intersection (user, 22 Nov: "have traffic hold short of a taxiway if traffic before it would
+        // make it block an intersection — a tactic real ATC use"): KLGA 07:23, three aircraft each stopped part-way
+        // through a junction another needed, a ring that never cleared.
+        if (by is null && !userBlock && JunctionHold(f, v) is { } jh)
+        {
+            if (!f.JunctionHeld) Log($"{f.Callsign}: holding short of {jh.name} — {jh.ahead.Callsign} ahead would leave it stopped across the junction");
+            f.JunctionHeld = true; f.BlockedBy = null; f.BlockedFor = 0;
+            return true;
+        }
+        f.JunctionHeld = false;
         if (by is null) { f.BlockedBy = null; f.BlockedFor = 0; return userBlock; }
         if (f.BlockedBy == by) f.BlockedFor += 0.25; else { f.BlockedBy = by; f.BlockedFor = 0; }
         // Standoff: aircraft all waiting for each other — two head-on on a taxilane, or three or four in a ring at an
@@ -5914,7 +6153,11 @@ public sealed partial class TrafficWorld
             // One on a runway always goes first (21 Nov, KATL: DAL330 crossing 08R after landing and DAL2952 waiting to
             // depart from it each waited for the other; DAL2952, the older, "went first" but couldn't line up with DAL330
             // on the runway — 08R had no departures for nearly three hours).
-            var oldest = ring.FirstOrDefault(x => x.OnRunway >= 0) ?? ring.OrderBy(x => x.Id, StringComparer.Ordinal).First();
+            // ... and one that was given the go but couldn't move for a minute hands it on to the next (KLGA, 22 Nov: DAL969
+            // "going first" every 20 s for six minutes without moving; ACA713 and AAL1608 were removed).
+            if (ring.All(x => x.GoFirstFailed)) foreach (var x in ring) x.GoFirstFailed = false;
+            var able = ring.Where(x => !x.GoFirstFailed).ToList();
+            var oldest = able.FirstOrDefault(Vacating) ?? able.FirstOrDefault(x => x.OnRunway >= 0) ?? able.OrderBy(x => x.Id, StringComparer.Ordinal).First();
             if (f != oldest && f.BlockedFor > 8 && Time - f.RerouteTime > 60)
             {
                 f.RerouteTime = Time;
@@ -5922,6 +6165,15 @@ public sealed partial class TrafficWorld
             }
             if (f == oldest && f.BlockedFor > 20)
             {
+                if (f.GoFirstAt < 0) f.GoFirstAt = Time;
+                else if (Time - f.GoFirstAt > 60)
+                {
+                    f.GoFirstFailed = true; f.GoFirstAt = -1;
+                    Log($"{f.Callsign}: can't go first in the standoff with {string.Join(", ", ring.Where(x => x != f).Select(x => x.Callsign))}; looking for another way, the next one goes");
+                    f.RerouteTime = Time;
+                    if (Reroute(f, by)) { f.BlockedBy = null; f.BlockedFor = 0; return false; }
+                    return true;
+                }
                 if (f.BlockedFor < 20.3) Log($"{f.Callsign}: standoff with {string.Join(", ", ring.Where(x => x != f).Select(x => x.Callsign))}; going first");
                 // Past every one of them, not just the one it saw first: in a ring of three it only ever passed one,
                 // then waited for the next (KORD, 19 Nov: UAL590 "going first" for 7 minutes between UAL2059 and
@@ -5992,7 +6244,10 @@ public sealed partial class TrafficWorld
         double floor = double.NaN; string? who = null;
         foreach (var o in OthersAndUser())
         {
-            if (!o.Main || o.AltFt > f.AltFt + 500 || (o.Pos - f.Pos).Length > 20 * Geo2.MPerNm) continue;
+            // A neighbour's arrival over the main airport's traffic; and (22 Nov, KLGA/KJFK) the main airport's arrival
+            // over a neighbour's departure climbing below it — LaGuardia's arrivals kept descending onto JFK's departures
+            // whose climbs had been stopped (JBU625 at 4,829 ft, DAL2140 down through 5,204 ft 2.9 nm away).
+            if (!(o.Main || (!RunwayOnly && o.Kind == "departure")) || o.AltFt > f.AltFt + 500 || (o.Pos - f.Pos).Length > 20 * Geo2.MPerNm) continue;
             // An arrival behind the user in the same runway's sequence is spaced by distance, not kept above (KATL,
             // 15 Nov: DAL2266, behind the user for 08L, "descent stopped at 5,000 ft for DAL1196 (you) below" — it would
             // end up high on the approach).
@@ -6121,7 +6376,15 @@ public sealed partial class TrafficWorld
         var cap = f.AltLimits.Where(c => c.Max > 0 && c.S > f.S - 0.2 * Geo2.MPerNm).Select(c => c.Max).DefaultIfEmpty(double.MaxValue).Min();
         // Departure control: stop the climb below an arrival it would otherwise climb into (radar vectors or not).
         if (Time - f.ProbeAt >= 2) { f.ProbeAt = Time; f.ClimbStop = ProbeArrivals(f, f.P.ClimbFpm * 0.8); }
-        if (!double.IsNaN(f.ClimbStop)) cap = Math.Min(cap, Math.Max(f.ClimbStop, Math.Min(f.AltFt, cap)));
+        // A stop below where it already is holds the altitude it had when the stop came — not "where it is now" every
+        // 2 s, which crept up with the climb still easing off (22 Nov, KLGA: UAL2485 "climb stopped at" 3,852, 3,973,
+        // 4,053, 4,075 ft while UAL1499 and UAL1826 came down to 778 ft above it).
+        if (double.IsNaN(f.ClimbStop)) f.ClimbHoldFt = double.NaN;
+        else
+        {
+            if (f.ClimbStop < f.AltFt && double.IsNaN(f.ClimbHoldFt)) f.ClimbHoldFt = f.AltFt;
+            cap = Math.Min(cap, Math.Max(f.ClimbStop, double.IsNaN(f.ClimbHoldFt) ? Math.Min(f.AltFt, cap) : f.ClimbHoldFt));
+        }
         // The SID's top altitude (MCO: 7,000 ft, under the arrivals' "at or above 8,000"): level there; the climb is
         // given early once it's clear of the arrivals, and in any case 10 minutes after take-off.
         if (!f.ClimbReleased)
@@ -6236,15 +6499,18 @@ public sealed partial class TrafficWorld
         foreach (var o in OthersAndUser())
         {
             if (o.AltFt < d.AltFt - 1500 || (o.Pos - d.Pos).Length > 20 * Geo2.MPerNm || o.Phase is "flare" or "landing roll") continue;
+            // Another airport's traffic is only known where it is now and projected straight on — its turns aren't — so
+            // looked at further ahead (3 minutes) and wider (5 nm) than this airport's own (22 Nov, KLGA/KJFK: ten losses,
+            // 2.1–3.0 nm and 850–950 ft, most with the climb stopped only once the other was 3 nm away).
             double lowest = double.MaxValue; var conflict = false;
-            for (var t = 0.0; t <= 120; t += 10)
+            for (var t = 0.0; t <= 180; t += 10)
             {
                 var dp = d.Path.At(Math.Min(d.Path.Length, d.S + d.Gs * 0.5144 * t)).p;
                 var op = Ahead(o, t);
                 var oAlt = Math.Max(o.AltFt + (o.Phase == "user" ? o.Vs * Math.Min(t, 60) / 60 : (o.Kind == "arrival" ? Math.Min(0, o.Vs) : Math.Max(0, o.Vs)) * t / 60), 0);
                 var lat = (dp - op).Length;
-                if (lat < 5 * Geo2.MPerNm) lowest = Math.Min(lowest, Math.Min(o.AltFt, oAlt));
-                if (lat < 3.5 * Geo2.MPerNm && Math.Abs(d.AltFt + climbFpm * t / 60 - oAlt) < 1000 && d.AltFt < oAlt) conflict = true;
+                if (lat < 6 * Geo2.MPerNm) lowest = Math.Min(lowest, Math.Min(o.AltFt, oAlt));
+                if (lat < 5 * Geo2.MPerNm && Math.Abs(d.AltFt + climbFpm * t / 60 - oAlt) < 1000 && d.AltFt < oAlt) conflict = true;
             }
             if (conflict && lowest < double.MaxValue) Stop(Math.Floor((lowest - 1000) / 1000) * 1000, $"{o.Callsign} ({o.Airport})", o.AltFt, o.Pos);
         }
