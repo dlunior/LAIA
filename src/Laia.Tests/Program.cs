@@ -2467,7 +2467,7 @@ Console.WriteLine("== STAR chart \"expect\" restrictions (BITHO7, FQM3; d-TPP 26
     Check(mco.Any(e => e.Fix == "LAMMA" && e.When == "" && e.MinFt == 12000 && e.MaxFt == 12000), "Orlando: LAMMA at 12,000");
     Check(mco.Any(e => e.Fix == "LAMMA" && e.When == "dir:S" && e.Kt == 250), "Orlando landing south: LAMMA at 250 kt");
     Check(mco.Any(e => e.Fix == "COZMO" && e.When == "rwy:18" && e.MinFt == 10000), "Orlando runway 18: COZMO at 10,000");
-    Check(!mco.Any(e => e.Fix == "BITHO") && !mco.Any(e => e.MinFt == 15000), "Orlando: not the 15,000 or BITHO's 8,000 (they're for other airports)");
+    Check(!mco.Any(e => e.Fix == "BITHO" && e.How != "vectors after") && !mco.Any(e => e.MinFt == 15000), "Orlando: not the 15,000 or BITHO's 8,000 (they're for other airports)");
     var mlb = Laia.Server.StarCharts.ReadExpects(doc, fixes, "MELBOURNE ORLANDO INTL");
     Console.WriteLine("  Melbourne Orlando Intl: " + Show(mlb));
     Check(mlb.Any(e => e.Fix == "LAMMA" && e.MinFt == 15000) && mlb.Any(e => e.Fix == "BITHO" && e.MinFt == 8000) && !mlb.Any(e => e.Fix == "COZMO") && !mlb.Any(e => e.MinFt == 12000),

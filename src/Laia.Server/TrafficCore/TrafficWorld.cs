@@ -727,11 +727,10 @@ public sealed partial class TrafficWorld
                     slot = Math.Max(slot, prevSlot + gapNeed + 15);
                 }
                 var outNm = f.Path is null ? 0 : (f.ThrS - f.S) / Geo2.MPerNm;
-                // Left out earlier and sooner (overload, KATL 21 Nov on a stale ATIS: break-off after break-off close in):
-                // 10 minutes late while still 100 nm or more out, or 15 minutes late inside that down to 60 nm — before
-                // it's in the sequence near the field, where the only tools left are break-offs.
-                if (f != UserArr && !f.Frozen && !f.Test && f.Path is not null && f.BreakOffs == 0
-                    && ((slot - f.EtaNominal > 600 && outNm > 100) || (slot - f.EtaNominal > 900 && outNm > 60)))
+                // Left out further in too (overload, KATL 21 Nov on a stale ATIS: break-off after break-off close in):
+                // 15 minutes late down to 60 nm out, before it's in the sequence near the field, where the only tools
+                // left are break-offs.
+                if (f != UserArr && !f.Frozen && !f.Test && f.Path is not null && f.BreakOffs == 0 && slot - f.EtaNominal > 900 && outNm > 60)
                 {
                     // More than 15 minutes late on arrival, still 100 nm or more out (Peak beyond what the runways take,
                     // KORD 18 Nov: number 36 for 27C with 28 minutes to lose): another runway if one has room, else it's
@@ -740,7 +739,7 @@ public sealed partial class TrafficWorld
                     var was = f.Rwy;
                     try { BalanceRunway(f); } catch { }
                     if (f.Rwy != was) continue;
-                    if (f.Delay > (outNm > 100 ? 600 : 900))
+                    if (f.Delay > 900)
                     {
                         f.Done = true; _leftOut++;
                         Log($"{f.Callsign}: left out — {f.Delay / 60:0} min of delay for {was!.Ident} at this traffic level (more than the runways take)");
@@ -6587,7 +6586,9 @@ public sealed partial class TrafficWorld
                     && Vector(f, Math.Max(short_, 45) + 15, $"{gapText}, {short_:0} s short at the runway")) return;
                 // Short only because the one ahead was just turned off on a detour while this one is on the final, well
                 // behind it: it'll be put ahead in the next sequence pass, so no break-off for that (AAL2740, 19 Nov).
-                var leaderDetour = leader is { } ld && Time - ld.LastVector < 120 && !tooClose && OnFinal(f, dth);
+                var leaderDetour = leader is { } ld && ((Time - ld.LastVector < 120 && OnFinal(f, dth)) || ld.Rejoin) && !tooClose;
+                // (Or the one ahead just went around or was broken off — waiting to be put back in behind those nearer in:
+                // "429 s short" behind it says nothing, and the next pass makes this one the leader's leader.)
                 if (!trombone && !leaderDetour && (tooClose || (short_ > 20 && OnFinal(f, dth))) && dth > 5 && dth <= 12 && Time - f.LastOrbit > 240) { BreakOff(f, $"{gapText}, {short_:0} s short at the runway"); return; }
             }
             if (f.Phase == "flare") target = f.P.Vapp - 5;
