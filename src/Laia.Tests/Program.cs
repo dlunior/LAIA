@@ -274,6 +274,8 @@ Console.WriteLine("== Rules: wake categories and crossing runways");
 {
     Check(Cwt.For("B77W", Perf.For("B77W")) == 'B' && Cwt.For("B738", Perf.For("B738")) == 'F' && Cwt.For("E75L", Perf.For("E75L")) == 'G' && Cwt.For("B752", Perf.For("B752")) == 'E' && Cwt.For("A388", Perf.For("A388")) == 'A',
         "aircraft get their CWT wake categories (777 B, 737 F, E175 G, 757 E, A380 A)");
+    Check(Cwt.MilesBehind('A', 'B') == 5 && Cwt.MilesBehind('A', 'H') == 8 && Cwt.MilesBehind('C', 'H') == 5 && Cwt.For("CRJ9", Perf.For("CRJ9")) == 'G' && Cwt.For("DH8D", Perf.For("DH8D")) == 'G' && Cwt.MilesBehind('H', 'I') == 3,
+        "the 7110.65 table as published (A→B 5, A→H 8, C→H 5; F–I behind anything small: radar minimum); CRJ900 and Q400 Lower Large");
     Check(Cwt.MilesBehind('B', 'F') == 5 && Cwt.MilesBehind('A', 'I') == 8 && Cwt.MilesBehind('F', 'F') == 3 && Cwt.MilesBehind('C', 'E') == 3.5,
         "spacing on final follows the CWT table (heavy→large 5 nm, A380→small 8, large→large 3)");
     Check(Cwt.DepartureSeconds('B', 'F') == 120 && Cwt.DepartureSeconds('A', 'B') == 180 && Cwt.DepartureSeconds('F', 'F') == 0,
