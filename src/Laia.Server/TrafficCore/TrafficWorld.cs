@@ -5953,7 +5953,8 @@ public sealed partial class TrafficWorld
                 for (var sp = sJ; sp <= Math.Min(path.Length, sJ + f.P.LengthM + o.P.LengthM + 40); sp += 4)
                     if ((path.At(sp).p - o.Pos).Length < o.P.SpanM * 0.25 + 6) { if (sp < sAhead) { sAhead = sp; ahead = o; } break; }
             }
-            if (ahead is null || ahead.Gs > 3) return null;
+            // Not when that one is waiting for this one (it would never move up), nor for it rolling along.
+            if (ahead is null || ahead.Gs > 3 || ahead.BlockedBy == f) return null;
             var room = sAhead - ahead.P.LengthM / 2 - (sJ + 15);
             if (room >= f.P.LengthM + 10) return null;
             var name = Apt.Adj[n].Where(x => x.Name.Length > 0 && !route.Contains(x.B)).Select(x => x.Name).FirstOrDefault()
