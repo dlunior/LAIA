@@ -81,6 +81,7 @@ public sealed class Flight
     public string? HoldWhy; public bool HoldWhyLogged;
     public double RunwayStopFor, SpeedAt = -1e9;
     public int BreakOffs;
+    public string ExitNote = "";
     public bool ReplanFree;
     /// <summary>Departures: its number in its runway's departure order (0 when not in it: at the gate, boarding).</summary>
     public int DepSeq;
@@ -5438,6 +5439,8 @@ public sealed partial class TrafficWorld
             if (taxi is null) gate = null;
             if (exit is { } x)
             {
+                var exName = Apt.Adj[x.off].FirstOrDefault(e => e.Type == 1 && e.Name.Length > 0)?.Name;
+                f.ExitNote = $"; turning off {(exName is null ? "" : "at " + exName + " ")}{x.along:N0} m down{(nextIn < 600 ? $" (next arrival {nextIn:0} s behind)" : "")}";
                 pts.Add(rwy.Threshold + rwy.Dir * x.along);
                 route = new List<int> { x.on };
                 route.AddRange(taxi ?? new List<int> { x.off });
@@ -6709,7 +6712,7 @@ public sealed partial class TrafficWorld
                 f.MaxKt = 30;
                 MoveAir(f, dt);
                 StartRollout(f);
-                Log($"{f.Callsign}: landed runway {rwy.Ident}{(f.Spot is not null ? ", taxiing to " + f.Spot.Label : "")}{PredictionReport(f)}{ChecksReport(f)}{LandingGapReport(f)}");
+                Log($"{f.Callsign}: landed runway {rwy.Ident}{(f.Spot is not null ? ", taxiing to " + f.Spot.Label : "")}{PredictionReport(f)}{ChecksReport(f)}{LandingGapReport(f)}{f.ExitNote}");
                 return;
             }
         }
