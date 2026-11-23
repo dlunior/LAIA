@@ -693,6 +693,8 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         }
     }
 
+    private readonly HashSet<TrafficWorld> _recorded = new();
+
     private IEnumerable<TrafficWorld> Worlds()
     {
         if (_world is not null) yield return _world;
@@ -1449,6 +1451,18 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                         Part(w.Apt.Icao);
                     }
                     _retiring.RemoveAll(w => w.Flights.Count == 0 || w.Flights.All(f => f.Kind == "parked"));
+                    // LAIA's own track recording (map replay, and the log reviews): each world's log lines about an
+                    // aircraft become markers where it was.
+                    if (live)
+                    {
+                        foreach (var w in Worlds())
+                        {
+                            if (w == _testWorld || !_recorded.Add(w)) continue;
+                            var inner = w.Log; var ww = w;
+                            w.Log = s => { inner?.Invoke(s); TrackRecorder.Instance.Event(ww, s); };
+                        }
+                        TrackRecorder.Instance.Frame(Worlds().Where(w => w != _testWorld && !_retiring.Contains(w)));
+                    }
                     try { SelfTestStep(); } catch (Exception ex) { log.LogInformation("Self-test stopped: {msg}", ex.Message); _shadow = null; _shadowDoneFor = _shadowKey; }
                     _stampMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 }

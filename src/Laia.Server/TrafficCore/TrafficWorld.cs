@@ -83,6 +83,7 @@ public sealed class Flight
     public int BreakOffs;
     public bool JunctionHeld, GoFirstFailed;
     public HashSet<int> LeftRunways = new();
+    public string? LeaderCs;
     public double GoFirstAt = -1, JhCheckAt = -1e9, JunctionHeldSince = -1e9, JunctionFreeUntil = -1e9;
     public (string name, Flight ahead)? JhLast;
     public string ExitNote = "";
@@ -6822,6 +6823,7 @@ public sealed partial class TrafficWorld
                 var od = o.OnGround ? -1 : (o.ThrS - o.S) / Geo2.MPerNm;
                 if (od < dth && od > leaderD) { leaderD = od; leader = o; }
             }
+            f.LeaderCs = leader?.Callsign;
             if (leader is not null && !leader.OnGround && dth < 45)
             {
                 // Measured and predicted all the time: the gap now, and the predicted gap when each crosses the
