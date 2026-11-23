@@ -5223,7 +5223,7 @@ public sealed partial class TrafficWorld
         if (minNm > maxNm) return double.NaN;   // still further out than any base turn could be: nothing to move yet
         // Out a step at a time (2.5 nm an update, every 8 s or more), as base turns come back in — a single odd reading
         // can't throw an aircraft 12 nm out at once.
-        if (wantNm > baseNm + 6) wantNm = baseNm + 6;
+        if (false && wantNm > baseNm + 6) wantNm = baseNm + 6;
         // Once it is turning base or about to (within 1.5 nm of the turn along its path), the base turn isn't brought in:
         // speed does the rest (22 Nov, KMSP: SWA4367 turned base, then a base turn moved behind it sent it round a loop
         // to rejoin). Further out it may still be pushed out (a downwind is extended until the turn).
