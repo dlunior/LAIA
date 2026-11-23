@@ -4861,7 +4861,7 @@ public sealed partial class TrafficWorld
                 if (r.Runway != cur.Runway && !isFirst) c += 45 + 60 * f.RwySwitches;     // changing costs, more each time
                 // Going back to a runway it was moved off costs two minutes more (22 Nov, KMSP: SWA4367 30L → 30R for 80 s,
                 // then back to 30L ten minutes later for 11 s, cutting back across 30R's side).
-                if (r.Runway != cur.Runway && !isFirst && f.LeftRunways.Contains(r.Runway)) c += 120;
+                if (false && r.Runway != cur.Runway && !isFirst && f.LeftRunways.Contains(r.Runway)) c += 120;
                 return c;
             }
             RunwayEnd best = cur; var bestC = Cost(cur, out var bestEta, out _);
