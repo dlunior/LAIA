@@ -256,12 +256,14 @@ public sealed partial class TrafficWorld
     }
 
     /// <summary>Called every step before the sequencing: keeps the user's place in the arrival sequence.</summary>
+    private double _userEtaAbs = double.NaN, _userEtaJumpAt = double.NaN, _userEtaSeen;
+
     private void UpdateUserArrival()
     {
         UpdateExpected();
         if (!UserArriving() || UserPos is not { } u)
         {
-            UserArr = null; Sequence = null; _userSlot = double.NaN; _etaScale = 1; _etaSamples.Clear(); _seqSig = ""; _userRwyChanges = 0; _userHoldLogged = false; return;
+            UserArr = null; Sequence = null; _userSlot = double.NaN; _userEtaAbs = double.NaN; _etaScale = 1; _etaSamples.Clear(); _seqSig = ""; _userRwyChanges = 0; _userHoldLogged = false; return;
         }
         var arrs = ArrRwys.Count > 0 ? ArrRwys : ArrRwy is null ? new List<RunwayEnd>() : new() { ArrRwy };
         if (arrs.Count == 0) return;
@@ -303,6 +305,14 @@ public sealed partial class TrafficWorld
             _etaScale += (k - _etaScale) * Math.Min(1, 0.05);
         }
         f.EtaSec = nm > 10 ? UserEtaSec(10) + (raw - UserEtaSec(10)) * _etaScale : raw;
+        // A jump of more than 30 s in the user's landing time counts only once it has held for 10 s (22 Nov, KMSP: on
+        // final, one reading put the user minutes later — behind SWA4367 — and its downwind was stretched 12 nm for it).
+        var etaAbs = Time + f.EtaSec;
+        if (double.IsNaN(_userEtaAbs) || Math.Abs(etaAbs - _userEtaAbs) <= 30 + (Time - _userEtaSeen)) { _userEtaAbs = etaAbs; _userEtaJumpAt = double.NaN; }
+        else if (double.IsNaN(_userEtaJumpAt)) _userEtaJumpAt = Time;
+        else if (Time - _userEtaJumpAt >= 10) { _userEtaAbs = etaAbs; _userEtaJumpAt = double.NaN; }
+        _userEtaSeen = Time;
+        f.EtaSec = _userEtaAbs - Time;
         // The planned slot follows the user smoothly (closing any difference over 15 s with a time constant of about
         // 45 s), so the aircraft around them adjust with speed while there's time — instead of the slot holding still
         // until the user was 90 s off it and then jumping (the old way).

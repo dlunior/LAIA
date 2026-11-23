@@ -82,6 +82,7 @@ public sealed class Flight
     public double RunwayStopFor, SpeedAt = -1e9;
     public int BreakOffs;
     public bool JunctionHeld, GoFirstFailed;
+    public HashSet<int> LeftRunways = new();
     public double GoFirstAt = -1, JhCheckAt = -1e9, JunctionHeldSince = -1e9, JunctionFreeUntil = -1e9;
     public (string name, Flight ahead)? JhLast;
     public string ExitNote = "";
@@ -4857,6 +4858,9 @@ public sealed partial class TrafficWorld
                 var c = slot - nominal;                                        // delay (detours included) plus the extra flying
                 if (share is not null) c += 120 * (1 - share.GetValueOrDefault(r.Runway) / Math.Max(1e-6, share.Values.Max()));
                 if (r.Runway != cur.Runway && !isFirst) c += 45 + 60 * f.RwySwitches;     // changing costs, more each time
+                // Going back to a runway it was moved off costs two minutes more (22 Nov, KMSP: SWA4367 30L → 30R for 80 s,
+                // then back to 30L ten minutes later for 11 s, cutting back across 30R's side).
+                if (r.Runway != cur.Runway && !isFirst && f.LeftRunways.Contains(r.Runway)) c += 120;
                 return c;
             }
             RunwayEnd best = cur; var bestC = Cost(cur, out var bestEta, out _);
@@ -4874,7 +4878,7 @@ public sealed partial class TrafficWorld
                 f.Rwy = best;
                 BuildArrivalPath(f, null, f.Pos);
                 f.S = 0; f.Frozen = false; f.SlowDv = 0; f.EtaAt = -99;
-                if (!isFirst) { f.RwySwitchAt = Time; f.RwySwitches++; _rwySwitches++; }
+                if (!isFirst) { f.RwySwitchAt = Time; f.RwySwitches++; _rwySwitches++; f.LeftRunways.Add(cur.Runway); }
                 RefreshEta(f);
                 Log($"{f.Callsign}: runway {best.Ident} instead of {cur.Ident} ({(isFirst ? "first plan" : "planned with the others")}: {curC - bestC:0} s better there" +
                     (share is not null ? $"; real arrivals on its STAR or from its direction: {string.Join(", ", opts.Select(o => $"{o.Ident} {100 * share.GetValueOrDefault(o.Runway) / Math.Max(1e-6, share.Values.Sum()):0}%"))}" : "") + ")");
@@ -5216,6 +5220,13 @@ public sealed partial class TrafficWorld
         var maxNm = 25.0;
         var wantNm = baseNm + addSec * gs / 2 / nm;
         if (minNm > maxNm) return double.NaN;   // still further out than any base turn could be: nothing to move yet
+        // Out a step at a time (2.5 nm an update, every 8 s or more), as base turns come back in — a single odd reading
+        // can't throw an aircraft 12 nm out at once.
+        if (wantNm > baseNm + 2.5) wantNm = baseNm + 2.5;
+        // Once it is turning base or about to (within 1.5 nm of the turn along its path), the base turn stays where it is:
+        // speed does the rest (22 Nov, KMSP: SWA4367 turned base, then a base turn moved behind it sent it round a loop
+        // to rejoin).
+        if (keptS[ia] - f.S < 1.5 * nm) return addSec;
         var newNm = Math.Clamp(wantNm, minNm, maxNm);
         // Never pushed out when it isn't short: an aircraft already near its base turn turns there (it would otherwise
         // ride the "1 nm ahead" limit down an endless downwind).
@@ -5233,6 +5244,10 @@ public sealed partial class TrafficWorld
         var newA = pts.Count;
         pts.Add(nA); pts.Add(nB);
         for (var i = ia + 2; i < pts0.Count; i++) pts.Add(pts0[i]);
+        // Never a new way that starts by turning back (more than 100° from where it's heading) or loops (more than 300°
+        // of turning in its next 15 nm): that change isn't made.
+        if (pts.Count > 1 && Math.Abs(Geo2.Diff((pts[1] - pts[0]).Bearing, f.Heading)) > 100) return addSec;
+        if (TotalTurn(pts, 15 * nm) > 300) return addSec;
         var oldAS = keptS[ia];
         var thrIndex = pts.Count - 2;
         var oldS = f.S;
@@ -6837,6 +6852,12 @@ public sealed partial class TrafficWorld
                 // floor): a hold only when the shortfall is more than that.
                 if (!(gap > 0 && tooCloseNow(gap, needNm))) short_ -= Math.Max(0, dth - 20) * (3600 / 210.0 - 3600 / 250.0) + (dth > 12 ? 10 : 0);
                 var tooClose = gap > 0 && tooCloseNow(gap, needNm);
+                // The "one ahead" predicted to land well after this one is a mix-up in the order for the sequence to sort
+                // out, not a reason to stretch, vector or break off (22 Nov, KMSP: one pass put the user on final 279 s
+                // behind SWA4367 as its leader; its downwind went from a 10.6 to a 22.2 nm base turn, then back, and it
+                // looped). Radar spacing still counts.
+                var inverted = gapSec < -30 && !tooClose;
+                if (inverted) short_ = 0;
                 f.GapNm = double.IsInfinity(gap) ? double.NaN : gap; f.GapSec = gapSec;
                 // The trombone first: with a downwind and base ahead, the base turn moves so it lands the gap needed
                 // (plus 10 s) behind the one ahead — further out, or earlier when the gap is bigger than it needs to be.
@@ -6857,6 +6878,7 @@ public sealed partial class TrafficWorld
                     var staAdd = f.Frozen && f.FrozenSlot > 0 ? f.FrozenSlot - (Time + EtaToThreshold(f, dth)) : double.NaN;
                     if (add < 0 && (leader.Mgr is "vectored around" or "vectored" || leader.Rejoin || leader.WentAround || leader.DetourSec > 0)) add = 0;
                     else if (add < 0 && !double.IsNaN(staAdd)) add = Math.Max(add, Math.Min(0, staAdd - 60));
+                    if (inverted) add = 0;
                     f.TromboneLeft = Trombone(f, add > 10 || add < -25 ? add : 0, $"{gapSec:0} s behind {leader.Callsign} at the runway, {wantGap:0} wanted");
                     if (double.IsNaN(f.TromboneLeft) && f.Fan is not null)
                         f.TromboneLeft = FanPick(f, add > 10 || add < -25 ? add : 0, $"{gapSec:0} s behind {leader.Callsign} at the runway, {wantGap:0} wanted");
