@@ -5248,8 +5248,7 @@ public sealed partial class TrafficWorld
         for (var i = ia + 2; i < pts0.Count; i++) pts.Add(pts0[i]);
         // Never a new way that starts by turning back (more than 100° from where it's heading) or loops (more than 300°
         // of turning in its next 15 nm): that change isn't made.
-        if (pts.Count > 1 && Math.Abs(Geo2.Diff((pts[1] - pts[0]).Bearing, f.Heading)) > 100) return addSec;
-        if (TotalTurn(pts, 15 * nm) > 300) return addSec;
+        if (newNm < baseNm && pts.Count > 1 && (pts[1] - pts[0]).Length > 300 && Math.Abs(Geo2.Diff((pts[1] - pts[0]).Bearing, f.Heading)) > 100) return addSec;
         var oldAS = keptS[ia];
         var thrIndex = pts.Count - 2;
         var oldS = f.S;
