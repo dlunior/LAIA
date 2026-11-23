@@ -5224,11 +5224,12 @@ public sealed partial class TrafficWorld
         // Out a step at a time (2.5 nm an update, every 8 s or more), as base turns come back in — a single odd reading
         // can't throw an aircraft 12 nm out at once.
         if (wantNm > baseNm + 2.5) wantNm = baseNm + 2.5;
-        // Once it is turning base or about to (within 1.5 nm of the turn along its path), the base turn stays where it is:
+        // Once it is turning base or about to (within 1.5 nm of the turn along its path), the base turn isn't brought in:
         // speed does the rest (22 Nov, KMSP: SWA4367 turned base, then a base turn moved behind it sent it round a loop
-        // to rejoin).
-        if (keptS[ia] - f.S < 1.5 * nm) return addSec;
+        // to rejoin). Further out it may still be pushed out (a downwind is extended until the turn).
         var newNm = Math.Clamp(wantNm, minNm, maxNm);
+        // ... and never brought in once it is that close: a base turn moved in behind it means a turn back.
+        if (newNm < baseNm && keptS[ia] - f.S < 1.5 * nm) return addSec;
         // Never pushed out when it isn't short: an aircraft already near its base turn turns there (it would otherwise
         // ride the "1 nm ahead" limit down an endless downwind).
         if (addSec <= 0 && newNm > baseNm) newNm = baseNm;
