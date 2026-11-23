@@ -6859,7 +6859,8 @@ public sealed partial class TrafficWorld
                 // out, not a reason to stretch, vector or break off (22 Nov, KMSP: one pass put the user on final 279 s
                 // behind SWA4367 as its leader; its downwind went from a 10.6 to a 22.2 nm base turn, then back, and it
                 // looped). Radar spacing still counts.
-                var inverted = gapSec < -30 && !tooClose;
+                // (Two minutes or more: a little less is a faster follower catching up, which is real spacing work.)
+                var inverted = gapSec < -120 && !tooClose;
                 if (inverted) short_ = 0;
                 f.GapNm = double.IsInfinity(gap) ? double.NaN : gap; f.GapSec = gapSec;
                 // The trombone first: with a downwind and base ahead, the base turn moves so it lands the gap needed
