@@ -16,17 +16,54 @@ public sealed class WindsAloftReader(WorldAirports airports, NasrDb nasr, ILogge
     public WindsAloft Field { get; } = new();
     public string Status { get; private set; } = "no forecast yet";
 
+    // The same FD forecast (FD1US1, 6-hour, 3,000–39,000 ft) from three places, in order: aviationweather.gov (which
+    // answered 400 to region=all from 18 Nov and still to region=us on 22 Nov), the NWS text server, the NWS API.
+    private static readonly (string name, string url)[] Sources =
+    {
+        ("aviationweather.gov", Url),
+        ("NWS (tgftp)", "https://tgftp.nws.noaa.gov/data/raw/fd/fd1us1.txt"),
+        ("NWS API", "https://api.weather.gov/products/types/FD1/locations/US1/latest"),
+    };
+
+    private async Task<(string text, string from)> FetchAsync(HttpClient http, CancellationToken ct)
+    {
+        var why = new List<string>();
+        foreach (var (name, url) in Sources)
+        {
+            try
+            {
+                using var resp = await http.GetAsync(url, ct);
+                var body = await resp.Content.ReadAsStringAsync(ct);
+                if (!resp.IsSuccessStatusCode)
+                {
+                    why.Add($"{name}: {(int)resp.StatusCode} {body.Replace('\n', ' ')[..Math.Min(160, body.Length)]}");
+                    continue;
+                }
+                if (body.TrimStart().StartsWith("{"))
+                {
+                    using var doc = System.Text.Json.JsonDocument.Parse(body);
+                    body = doc.RootElement.TryGetProperty("productText", out var pt) ? pt.GetString() ?? "" : "";
+                }
+                if (WindsAloft.ParseFd(body).Count > 0) return (body, name);
+                why.Add($"{name}: nothing readable ({body.Length} characters)");
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception ex) { why.Add($"{name}: {ex.Message}"); }
+        }
+        throw new InvalidOperationException(string.Join(" · ", why));
+    }
+
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
-        http.DefaultRequestHeaders.UserAgent.ParseAdd("LAIA-Server");
+        http.DefaultRequestHeaders.UserAgent.ParseAdd("LAIA-Server/1.0 (+https://github.com/dlunior/LAIA)");
         await Task.Delay(TimeSpan.FromSeconds(20), ct).ContinueWith(_ => { });
         while (!ct.IsCancellationRequested)
         {
             var ok = false;
             try
             {
-                var text = await http.GetStringAsync(Url, ct);
+                var (text, from) = await FetchAsync(http, ct);
                 var parsed = WindsAloft.ParseFd(text);
                 var stations = new List<WindsAloft.Station>();
                 var unplaced = new List<string>();
@@ -41,8 +78,8 @@ public sealed class WindsAloftReader(WorldAirports airports, NasrDb nasr, ILogge
                 {
                     Field.SetForecast(stations, DateTime.UtcNow);
                     ok = true;
-                    Status = $"{stations.Count} stations (read {DateTime.UtcNow:HH:mm}Z)";
-                    log.LogInformation("Winds aloft forecast: {n} stations{un}", stations.Count,
+                    Status = $"{stations.Count} stations from {from} (read {DateTime.UtcNow:HH:mm}Z)";
+                    log.LogInformation("Winds aloft forecast ({from}): {n} stations{un}", from, stations.Count,
                         unplaced.Count > 0 ? $" ({unplaced.Count} not placed: {string.Join(", ", unplaced.Take(8))})" : "");
                 }
                 else log.LogInformation("Winds aloft forecast: nothing readable ({len} characters)", text.Length);
