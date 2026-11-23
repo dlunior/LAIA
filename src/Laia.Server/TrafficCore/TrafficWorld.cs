@@ -82,7 +82,7 @@ public sealed class Flight
     public double RunwayStopFor, SpeedAt = -1e9;
     public int BreakOffs;
     public bool JunctionHeld, GoFirstFailed;
-    public double GoFirstAt = -1, JhCheckAt = -1e9;
+    public double GoFirstAt = -1, JhCheckAt = -1e9, JunctionHeldSince = -1e9, JunctionFreeUntil = -1e9;
     public (string name, Flight ahead)? JhLast;
     public string ExitNote = "";
     public bool ReplanFree;
@@ -5948,10 +5948,17 @@ public sealed partial class TrafficWorld
             Flight? ahead = null; double sAhead = double.MaxValue;
             foreach (var o in Flights)
             {
-                if (o == f || o.Done || !o.OnGround || o.Phase is "parked" or "boarding") continue;
+                if (o == f || o.Done || !o.OnGround || o.Phase is "parked" or "boarding" or "pushback") continue;
                 if ((o.Pos - jp).Length > f.P.LengthM + o.P.LengthM + 60) continue;
                 for (var sp = sJ; sp <= Math.Min(path.Length, sJ + f.P.LengthM + o.P.LengthM + 40); sp += 4)
-                    if ((path.At(sp).p - o.Pos).Length < o.P.SpanM * 0.25 + 6) { if (sp < sAhead) { sAhead = sp; ahead = o; } break; }
+                {
+                    var (pp, pd, _) = path.At(sp);
+                    if ((pp - o.Pos).Length >= o.P.SpanM * 0.25 + 6) continue;
+                    // Only one going the same way — the line it would join — never one coming the other way (22 Nov, KMSP:
+                    // DAL2151 and DAL258 each held short of B for the other, nose to nose, and nothing moved for an hour).
+                    if (Math.Abs(Geo2.Diff(o.Heading, pd)) < 60 && sp < sAhead) { sAhead = sp; ahead = o; }
+                    break;
+                }
             }
             // Not when that one is waiting for this one (it would never move up), nor for it rolling along.
             if (ahead is null || ahead.Gs > 3 || ahead.BlockedBy == f) return null;
@@ -6135,9 +6142,12 @@ public sealed partial class TrafficWorld
         // Don't block the intersection (user, 22 Nov: "have traffic hold short of a taxiway if traffic before it would
         // make it block an intersection — a tactic real ATC use"): KLGA 07:23, three aircraft each stopped part-way
         // through a junction another needed, a ring that never cleared.
-        if (by is null && !userBlock && JunctionHold(f, v) is { } jh)
+        // At most 90 s, then it goes on for 3 minutes whatever is ahead (the line may not move for a long time).
+        if (f.JunctionHeld && Time - f.JunctionHeldSince > 90) { f.JunctionHeld = false; f.JunctionFreeUntil = Time + 180; }
+        if (by is null && !userBlock && Time > f.JunctionFreeUntil && JunctionHold(f, v) is { } jh)
         {
-            if (!f.JunctionHeld) Log($"{f.Callsign}: holding short of {jh.name} — {jh.ahead.Callsign} ahead would leave it stopped across the junction");
+            if (!f.JunctionHeld) f.JunctionHeldSince = Time;
+            if (!f.JunctionHeld && Time - f.JunctionHeldSince < 1) Log($"{f.Callsign}: holding short of {jh.name} — {jh.ahead.Callsign} ahead would leave it stopped across the junction");
             f.JunctionHeld = true; f.BlockedBy = null; f.BlockedFor = 0;
             return true;
         }
