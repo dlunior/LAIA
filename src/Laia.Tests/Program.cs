@@ -447,7 +447,7 @@ Console.WriteLine("== LAIA's own track recording: a frame and an instruction, re
     var apt = new AirportModel(TestAirport.Build(false));
     var w = new TrafficWorld(apt, new TestSource(), seed: 4) { Level = TrafficLevel.Busy, Wind = new Wind(270, 10) };
     for (var k = 0; k < 2400; k++) w.Step(0.5);
-    var rec = new Laia.Server.TrackRecorder();
+    var rec = new TrackRecorder();
     rec.Frame(new[] { w });
     var someone = w.Flights.First(f => !f.Done && f.Kind != "parked" && f.Phase is not ("parked" or "boarding"));
     rec.Event(w, $"{someone.Callsign}: turn base earlier, base turn now 9.1 nm out (was 10.7) — test");

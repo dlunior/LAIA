@@ -1,9 +1,7 @@
 using System.IO.Compression;
 using System.Text;
 using System.Text.Json;
-using Laia.Server.TrafficCore;
-
-namespace Laia.Server;
+namespace Laia.Server.TrafficCore;
 
 /// <summary>
 /// LAIA's own "ADS-B": every 5 s, every aircraft each airport LAIA runs is flying (and the user) — position, altitude,
@@ -24,7 +22,8 @@ public sealed class TrackRecorder
     private DateTime _lastFrame = DateTime.MinValue;
     private DateTime _lastClean = DateTime.MinValue;
 
-    public static string Dir => Path.Combine(Paths.DataDir, "tracks");
+    public static string Dir => Path.Combine(Environment.GetEnvironmentVariable("LAIA_DATA")
+        ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "LAIA"), "tracks");
 
     private static string HourKey(DateTime utc) => utc.ToString("yyyyMMdd-HH");
 
