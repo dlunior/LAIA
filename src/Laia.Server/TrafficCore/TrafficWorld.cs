@@ -4859,9 +4859,10 @@ public sealed partial class TrafficWorld
                 var c = slot - nominal;                                        // delay (detours included) plus the extra flying
                 if (share is not null) c += 120 * (1 - share.GetValueOrDefault(r.Runway) / Math.Max(1e-6, share.Values.Max()));
                 if (r.Runway != cur.Runway && !isFirst) c += 45 + 60 * f.RwySwitches;     // changing costs, more each time
-                // Going back to a runway it was moved off costs two minutes more (22 Nov, KMSP: SWA4367 30L → 30R for 80 s,
-                // then back to 30L ten minutes later for 11 s, cutting back across 30R's side).
-                if (false && r.Runway != cur.Runway && !isFirst && f.LeftRunways.Contains(r.Runway)) c += 120;
+                // Going back to a runway it was moved off, inside 60 nm, costs two minutes more (22 Nov, KMSP: SWA4367 30L →
+                // 30R for 80 s, then back to 30L ten minutes later for 11 s). Further out it is free: re-balancing far
+                // out is what keeps a rush flowing (the offline rush from 230 nm broke one off with it everywhere).
+                if (r.Runway != cur.Runway && !isFirst && f.LeftRunways.Contains(r.Runway) && (f.ThrS - f.S) / nm < 60) c += 120;
                 return c;
             }
             RunwayEnd best = cur; var bestC = Cost(cur, out var bestEta, out _);
@@ -5221,15 +5222,15 @@ public sealed partial class TrafficWorld
         var maxNm = 25.0;
         var wantNm = baseNm + addSec * gs / 2 / nm;
         if (minNm > maxNm) return double.NaN;   // still further out than any base turn could be: nothing to move yet
-        // Out a step at a time (2.5 nm an update, every 8 s or more), as base turns come back in — a single odd reading
-        // can't throw an aircraft 12 nm out at once.
-        if (false && wantNm > baseNm + 6) wantNm = baseNm + 6;
+        // Out a step at a time (4 nm an update, every 8 s or more) — a single odd reading can't throw an aircraft 12 nm
+        // out at once.
+        if (wantNm > baseNm + 4) wantNm = baseNm + 4;
         // Once it is turning base or about to (within 1.5 nm of the turn along its path), the base turn isn't brought in:
         // speed does the rest (22 Nov, KMSP: SWA4367 turned base, then a base turn moved behind it sent it round a loop
         // to rejoin). Further out it may still be pushed out (a downwind is extended until the turn).
         var newNm = Math.Clamp(wantNm, minNm, maxNm);
         // ... and never brought in once it is that close: a base turn moved in behind it means a turn back.
-        if (false && newNm < baseNm && keptS[ia] - f.S < 1.5 * nm) return addSec;
+        if (newNm < baseNm && keptS[ia] - f.S < 1.5 * nm) return addSec;
         // Never pushed out when it isn't short: an aircraft already near its base turn turns there (it would otherwise
         // ride the "1 nm ahead" limit down an endless downwind).
         if (addSec <= 0 && newNm > baseNm) newNm = baseNm;
