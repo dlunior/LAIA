@@ -165,6 +165,18 @@ app.MapGet("/api/learned", (TrafficEngine t, AdsbHistory h) => Results.Json(t.Ai
     .Where(x => x.file is not null).Select(x => new { x.icao, modified = File.GetLastWriteTimeUtc(x.file!) }), jsonOpts));
 app.MapPost("/api/selftest", (TrafficEngine t) => { t.RestartSelfTest(); return Results.Ok(); });
 app.MapGet("/api/learned/{icao}", (string icao, AdsbHistory h) => h.ProfileFile(icao) is { } f ? Results.File(f, "application/json") : Results.NotFound());
+// LAIA's own track recording (TrackRecorder): the files, one file, and a time range for the map's replay.
+app.MapGet("/api/tracks", () => Results.Json(Laia.Server.TrafficCore.TrackRecorder.Files().Select(f => new { f.name, f.size, f.modified }), jsonOpts));
+app.MapGet("/api/tracks/file/{name}", (string name) =>
+{
+    if (name.Contains('/') || name.Contains('\\') || !name.StartsWith("tracks-")) return Results.NotFound();
+    var path = Path.Combine(Laia.Server.TrafficCore.TrackRecorder.Dir, name);
+    if (!File.Exists(path)) return Results.NotFound();
+    var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+    return Results.File(fs, name.EndsWith(".gz") ? "application/gzip" : "application/x-ndjson", name);
+});
+app.MapGet("/api/tracks/range", (double from, double to, int? every) =>
+    Results.Content(Laia.Server.TrafficCore.TrackRecorder.Instance.Range(from, Math.Min(to, from + 3 * 3600), Math.Max(5, every ?? 5)), "application/json"));
 app.MapGet("/api/map/real", (TrafficEngine t) => t.RealTracks() is { } r ? Results.Json(r, jsonOpts) : Results.NotFound());
 app.MapGet("/api/map/net/{id}", (string id, TrafficEngine t) => t.MapNetPath(id) is { } p ? Results.Json(p, jsonOpts) : Results.NotFound());
 app.MapPost("/api/traffic/catalog", async (HttpContext ctx, FlightSource src) =>

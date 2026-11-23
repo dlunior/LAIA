@@ -78,7 +78,25 @@
       <label title="Satellite fields' real tracks: arrivals amber, departures pink"><input type="checkbox" id="tRealSat" checked>…satellites too</label>
       <label title="The planned direction of each one-way stretch of taxiway: violet arrivals, teal departures, white both; solid from real taxi tracks, dashed worked out from the layout"><input type="checkbox" id="tFlow">Taxi flow</label>
     </div>
-    <div style="margin-top:8px;display:flex;gap:6px"><button id="bAirport">Airport</button><button id="bMe">Me</button><button id="bList">Flights</button></div>
+    <div style="margin-top:8px;display:flex;gap:6px"><button id="bAirport">Airport</button><button id="bMe">Me</button><button id="bList">Flights</button><button id="bReplay" title="Play back what LAIA's traffic flew (its own track recording)">Replay</button></div>
+  </div>
+  <div class="card" id="rpCard" hidden>
+    <div class="tag" style="margin-bottom:6px">Replay — LAIA's own track recording</div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+      <input type="datetime-local" id="rpFrom" step="60" style="background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:4px 6px;font:inherit;font-size:12px">
+      <select id="rpLen" style="background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:4px;font:inherit;font-size:12px"><option value="1800">30 min</option><option value="3600" selected>1 hour</option><option value="7200">2 hours</option><option value="10800">3 hours</option></select>
+      <button id="rpLoad">Load</button><button id="rpExit">Back to live</button>
+    </div>
+    <div id="rpCtl" hidden style="margin-top:8px">
+      <input type="range" id="rpSlider" min="0" max="1000" value="0" style="width:100%;accent-color:var(--accent)">
+      <div style="display:flex;gap:6px;align-items:center;margin-top:4px">
+        <button id="rpPlay">Play</button>
+        <select id="rpSpeed" style="background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:4px;font:inherit;font-size:12px"><option value="1">×1</option><option value="5">×5</option><option value="10" selected>×10</option><option value="30">×30</option><option value="60">×60</option></select>
+        <span id="rpTime" class="num" style="margin-left:auto"></span>
+      </div>
+      <label class="sub" style="display:flex;gap:6px;align-items:center;margin-top:6px"><input type="checkbox" id="rpTrails" checked>Trails (3 min) and instruction markers</label>
+    </div>
+    <div class="sub" id="rpStatus"></div>
   </div>
   <div class="card" id="sel" hidden></div>
   <div class="card" id="seqCard"><div class="tag" style="margin-bottom:4px">Arrival sequence</div><div id="seq"></div></div>
@@ -489,8 +507,137 @@ function renderList() {
   for (const row of $("list").querySelectorAll(".row")) row.onclick = () => { select(row.dataset.id); const f = data.flights.find(x => x.id === row.dataset.id); if (f) map.panTo([f.lat, f.lon]); };
 }
 
+// ---- Replay of LAIA's own track recording (/api/tracks/range): aircraft, 3-minute trails and the instructions
+// they were given, as markers where they were given. Click an aircraft for its whole flight and every instruction.
+const rp = { on: false, tracks: new Map(), events: [], t0: 0, t1: 0, t: 0, playing: false, last: 0, sel: null, markers: new Map() };
+layers.rp = L.layerGroup().addTo(map); layers.rpTrail = L.layerGroup().addTo(map); layers.rpSel = L.layerGroup().addTo(map);
+function rpFmt(t) { return new Date(t * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" }); }
+function rpEnter() {
+  rp.on = true; $("rpCard").hidden = false;
+  layers.ac.clearLayers(); markers.clear(); layers.sel.clearLayers(); layers.paths.clearLayers(); $("sel").hidden = true; selected = null;
+  if (userMarker) { map.removeLayer(userMarker); userMarker = null; }
+  if (!$("rpFrom").value) { const d = new Date(Date.now() - 3600e3); d.setSeconds(0, 0); $("rpFrom").value = new Date(d.getTime() - d.getTimezoneOffset() * 60e3).toISOString().slice(0, 16); }
+}
+function rpExit() {
+  rp.on = false; rp.playing = false; $("rpCard").hidden = true; $("rpCtl").hidden = true;
+  layers.rp.clearLayers(); layers.rpTrail.clearLayers(); layers.rpSel.clearLayers(); rp.markers.clear(); rp.sel = null; $("sel").hidden = true;
+  render();
+}
+async function rpLoad() {
+  const from = new Date($("rpFrom").value).getTime() / 1000, len = +$("rpLen").value;
+  if (!from) return;
+  $("rpStatus").textContent = "Loading…";
+  try {
+    const r = await fetch(`/api/tracks/range?from=${from}&to=${from + len}&every=5`, { cache: "no-store" });
+    const lines = await r.json();
+    rp.tracks = new Map(); rp.events = [];
+    for (const l of lines) {
+      if (l.f) for (const a of l.f) {
+        const key = l.w + " " + a[0];
+        let tr = rp.tracks.get(key);
+        if (!tr) rp.tracks.set(key, tr = { cs: a[0], type: a[1], kind: a[2], w: l.w, pts: [] });
+        tr.pts.push({ t: l.t, lat: a[3], lon: a[4], alt: a[5], gs: a[6], hdg: a[7], phase: a[8], rwy: a[9], seq: a[10], leader: a[11] });
+      } else if (l.e) rp.events.push({ t: l.t, w: l.w, cs: l.e[0], lat: l.e[1], lon: l.e[2], alt: l.e[3], text: l.e[4] });
+    }
+    for (const tr of rp.tracks.values()) tr.pts.sort((a, b) => a.t - b.t);
+    rp.events.sort((a, b) => a.t - b.t);
+    const ts = [...rp.tracks.values()].flatMap(tr => [tr.pts[0].t, tr.pts[tr.pts.length - 1].t]);
+    if (!ts.length) { $("rpStatus").textContent = "Nothing recorded then (the recording starts with version 0.1.319, while the sim is connected)."; $("rpCtl").hidden = true; return; }
+    rp.t0 = Math.min(...ts); rp.t1 = Math.max(...ts); rp.t = rp.t0;
+    $("rpCtl").hidden = false;
+    $("rpStatus").textContent = `${rp.tracks.size} aircraft, ${rp.events.length} instructions and events · ${rpFmt(rp.t0)} – ${rpFmt(rp.t1)}`;
+    rpDraw();
+  } catch { $("rpStatus").textContent = "Couldn't load the recording."; }
+}
+// Where an aircraft was at time t (between two recorded points), or null when it wasn't flying then.
+function rpAt(tr, t) {
+  const p = tr.pts;
+  if (t < p[0].t || t > p[p.length - 1].t + 6) return null;
+  let lo = 0, hi = p.length - 1;
+  while (hi - lo > 1) { const m = (lo + hi) >> 1; if (p[m].t <= t) lo = m; else hi = m; }
+  const a = p[lo], b = p[Math.min(hi, p.length - 1)];
+  if (b.t - a.t > 30 || b.t <= a.t || t >= b.t) return t - a.t > 30 ? null : (t >= b.t ? b : a);
+  const k = (t - a.t) / (b.t - a.t);
+  let dh = ((b.hdg - a.hdg + 540) % 360) - 180;
+  return { ...a, lat: a.lat + (b.lat - a.lat) * k, lon: a.lon + (b.lon - a.lon) * k, alt: a.alt + (b.alt - a.alt) * k, gs: a.gs + (b.gs - a.gs) * k, hdg: (a.hdg + dh * k + 360) % 360 };
+}
+function rpColor(tr) { return tr.kind === "user" ? COLORS.user : tr.kind === "departure" ? COLORS.departing : tr.kind === "arrival" ? COLORS.drawn : COLORS.sim; }
+function rpDraw() {
+  if (!rp.on) return;
+  const t = rp.t;
+  $("rpTime").textContent = rpFmt(t);
+  $("rpSlider").value = Math.round(1000 * (t - rp.t0) / Math.max(1, rp.t1 - rp.t0));
+  const view = map.getBounds().pad(0.3), seen = new Set(), trails = $("rpTrails").checked;
+  layers.rpTrail.clearLayers();
+  for (const [key, tr] of rp.tracks) {
+    const p = rpAt(tr, t);
+    if (!p || !view.contains([p.lat, p.lon])) continue;
+    seen.add(key);
+    const col = key === rp.sel ? "#ffffff" : rpColor(tr);
+    let m = rp.markers.get(key);
+    const html = `${tr.cs}<br><span class="l2">${Math.round(p.alt / 100) >= 180 ? "FL" + Math.round(p.alt / 100) : Math.round(p.alt).toLocaleString()} · ${Math.round(p.gs)} kt${p.rwy ? " · " + p.rwy + (p.seq ? " #" + p.seq : "") : ""}</span>`;
+    if (!m) {
+      m = L.marker([p.lat, p.lon], { icon: planeIcon(col, p.hdg, p.phase === "ground" || p.alt < 50 ? 18 : 22) }).addTo(layers.rp);
+      m.on("click", e => { L.DomEvent.stopPropagation(e); rp.sel = key; rpSelDraw(); rpDraw(); });
+      m.bindTooltip(html, { permanent: $("tLabels").checked, direction: "right", offset: [10, 0], className: "ac-label" });
+      rp.markers.set(key, m);
+    } else {
+      m.setLatLng([p.lat, p.lon]); m.setIcon(planeIcon(col, p.hdg, p.alt < 50 ? 18 : 22)); m.setTooltipContent(html);
+    }
+    if (trails) {
+      const tp = tr.pts.filter(q => q.t >= t - 180 && q.t <= t).map(q => [q.lat, q.lon]);
+      tp.push([p.lat, p.lon]);
+      if (tp.length > 1) L.polyline(tp, { color: rpColor(tr), weight: 1.5, opacity: .7, interactive: false }).addTo(layers.rpTrail);
+    }
+  }
+  for (const [key, m] of rp.markers) if (!seen.has(key)) { layers.rp.removeLayer(m); rp.markers.delete(key); }
+  if (trails)
+    for (const e of rp.events) {
+      if (e.t > t) break;
+      if (e.t < t - 180 || !view.contains([e.lat, e.lon])) continue;
+      L.circleMarker([e.lat, e.lon], { radius: 4, color: COLORS.user, weight: 1, fillOpacity: .9 }).bindTooltip(`${e.cs} · ${rpFmt(e.t)}<br>${e.text}`, { direction: "top" }).addTo(layers.rpTrail);
+    }
+}
+function rpSelDraw() {
+  layers.rpSel.clearLayers();
+  const tr = rp.tracks.get(rp.sel);
+  if (!tr) { $("sel").hidden = true; return; }
+  L.polyline(tr.pts.map(q => [q.lat, q.lon]), { color: "#ffffff", weight: 2.5, opacity: .9 }).addTo(layers.rpSel);
+  const evs = rp.events.filter(e => e.cs === tr.cs && e.w === tr.w);
+  for (const e of evs) L.circleMarker([e.lat, e.lon], { radius: 5, color: "#ffffff", fillColor: COLORS.user, weight: 1.5, fillOpacity: 1 })
+    .bindTooltip(`${rpFmt(e.t)} · ${Math.round(e.alt).toLocaleString()} ft<br>${e.text}`, { direction: "top" }).on("click", ev => { L.DomEvent.stopPropagation(ev); rp.t = e.t; rpDraw(); }).addTo(layers.rpSel);
+  const esc = x => String(x).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+  $("sel").hidden = false;
+  $("sel").innerHTML = `<h2>${esc(tr.cs)} <small>${esc(tr.type)} · ${esc(tr.kind)} · ${esc(tr.w)}</small></h2>
+    <div class="sub">Recorded ${rpFmt(tr.pts[0].t)} – ${rpFmt(tr.pts[tr.pts.length - 1].t)}. Click an instruction to jump there.</div>
+    <div style="max-height:260px;overflow:auto;margin-top:6px;font-size:12px">${evs.map((e, i) => `<div class="rpEv" data-i="${i}" style="padding:3px 0;border-bottom:1px solid rgba(36,49,79,.6);cursor:pointer"><span class="num">${new Date(e.t * 1000).toLocaleTimeString()}</span> ${esc(e.text)}</div>`).join("") || '<div class="muted">No instructions recorded.</div>'}</div>
+    <div style="margin-top:8px;display:flex;gap:6px"><button id="rpZoom">Zoom to its flight</button><button id="rpClose">Close</button></div>`;
+  $("sel").querySelectorAll(".rpEv").forEach(d => d.onclick = () => { const e = evs[+d.dataset.i]; rp.t = e.t; map.panTo([e.lat, e.lon]); rpDraw(); });
+  $("rpZoom").onclick = () => map.fitBounds(L.polyline(tr.pts.map(q => [q.lat, q.lon])).getBounds().pad(0.1));
+  $("rpClose").onclick = () => { rp.sel = null; layers.rpSel.clearLayers(); $("sel").hidden = true; rpDraw(); };
+}
+function rpTick(now) {
+  if (rp.on && rp.playing) {
+    const dt = Math.min(1, (now - (rp.last || now)) / 1000);
+    rp.t = Math.min(rp.t1, rp.t + dt * +$("rpSpeed").value);
+    if (rp.t >= rp.t1) { rp.playing = false; $("rpPlay").textContent = "Play"; }
+    if (now - (rp.drawn || 0) > 200) { rp.drawn = now; rpDraw(); }
+  }
+  rp.last = now;
+  requestAnimationFrame(rpTick);
+}
+requestAnimationFrame(rpTick);
+$("bReplay").onclick = () => rp.on ? rpExit() : rpEnter();
+$("rpLoad").onclick = rpLoad;
+$("rpExit").onclick = rpExit;
+$("rpPlay").onclick = () => { rp.playing = !rp.playing; $("rpPlay").textContent = rp.playing ? "Pause" : "Play"; };
+$("rpSlider").oninput = () => { rp.t = rp.t0 + (rp.t1 - rp.t0) * $("rpSlider").value / 1000; rpDraw(); };
+$("rpTrails").onchange = rpDraw;
+map.on("moveend", () => { if (rp.on) rpDraw(); });
+
 function render() {
   if (!data) return;
+  if (rp.on) { updateRunways(data.runways); return; }
   updateRunways(data.runways);
   updateRing(data);
   updateAircraft(data.flights);

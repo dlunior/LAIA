@@ -55,6 +55,7 @@ internal sealed class Updater
         if (server is not null && DateTime.UtcNow - _lastLogCopy > TimeSpan.FromSeconds(60)) { _lastLogCopy = DateTime.UtcNow; await CopyLogAsync(server, "server", "server.log"); }
         if (server is not null && DateTime.UtcNow - _lastSetupCopy > TimeSpan.FromMinutes(30)) { _lastSetupCopy = DateTime.UtcNow; await CopyLogAsync(server, "setup", "server-setup.log"); }
         if (server is not null && DateTime.UtcNow - _lastLearnedCopy > TimeSpan.FromMinutes(15)) { _lastLearnedCopy = DateTime.UtcNow; await CopyLearnedAsync(server); }
+        if (server is not null && DateTime.UtcNow - _lastTracksCopy > TimeSpan.FromMinutes(5)) { _lastTracksCopy = DateTime.UtcNow; await CopyTracksAsync(server); }
     }
 
     public async Task CheckAsync()
@@ -197,6 +198,41 @@ internal sealed class Updater
             foreach (var old in Directory.GetFiles(dir, "server-*.log").Where(f => File.GetLastWriteTimeUtc(f) < DateTime.UtcNow.AddDays(-7))) File.Delete(old);
         }
         catch { }
+    }
+
+    private DateTime _lastTracksCopy = DateTime.MinValue;
+
+    /// <summary>
+    /// Copies LAIA's own track recording (an hour a file, the hours gone gzipped) to tracks\ beside the logs, so the
+    /// log reviews can look at what each aircraft really flew; the current hour's file again every 5 minutes. Kept 7 days.
+    /// </summary>
+    private async Task CopyTracksAsync(ServerInfo server)
+    {
+        try
+        {
+            var list = await _local.GetStringAsync($"{server.BaseUrl}/api/tracks");
+            using var doc = System.Text.Json.JsonDocument.Parse(list);
+            var dir = Path.Combine(Log.Dir, "tracks");
+            Directory.CreateDirectory(dir);
+            var names = new HashSet<string>();
+            foreach (var e in doc.RootElement.EnumerateArray())
+            {
+                var name = e.GetProperty("name").GetString();
+                if (string.IsNullOrEmpty(name) || !name.StartsWith("tracks-")) continue;
+                names.Add(name);
+                var mod = e.GetProperty("modified").GetDateTime();
+                var path = Path.Combine(dir, name);
+                if (File.Exists(path) && File.GetLastWriteTimeUtc(path) >= mod) continue;
+                var bytes = await _local.GetByteArrayAsync($"{server.BaseUrl}/api/tracks/file/{name}");
+                await File.WriteAllBytesAsync(path, bytes);
+                File.SetLastWriteTimeUtc(path, mod);
+                // The hour's plain copy goes once its gzipped one is here.
+                if (name.EndsWith(".gz")) { var plain = Path.Combine(dir, name[..^3]); if (File.Exists(plain)) File.Delete(plain); }
+            }
+            foreach (var f in Directory.GetFiles(dir, "tracks-*"))
+                if (File.GetLastWriteTimeUtc(f) < DateTime.UtcNow.AddDays(-7)) File.Delete(f);
+        }
+        catch { /* older server, or briefly unreachable */ }
     }
 
     /// <summary>Copies the learned real-traffic profiles of the airports in use (when changed) to learned\ICAO.json.</summary>

@@ -440,6 +440,28 @@ Console.WriteLine("== The user parked on a gate is part of the scenery (KLGA gat
     Check(closest > 0, "and nobody's wing passes over the user's aircraft");
 }
 
+Console.WriteLine("== LAIA's own track recording: a frame and an instruction, read back for the replay");
+{
+    var dir = Path.Combine(Path.GetTempPath(), "laia-rec-" + Guid.NewGuid().ToString("N")[..8]);
+    Environment.SetEnvironmentVariable("LAIA_DATA", dir);
+    var apt = new AirportModel(TestAirport.Build(false));
+    var w = new TrafficWorld(apt, new TestSource(), seed: 4) { Level = TrafficLevel.Busy, Wind = new Wind(270, 10) };
+    for (var k = 0; k < 2400; k++) w.Step(0.5);
+    var rec = new TrackRecorder();
+    rec.Frame(new[] { w });
+    var someone = w.Flights.First(f => !f.Done && f.Kind != "parked" && f.Phase is not ("parked" or "boarding"));
+    rec.Event(w, $"{someone.Callsign}: turn base earlier, base turn now 9.1 nm out (was 10.7) — test");
+    var now = DateTime.UtcNow.Subtract(DateTime.UnixEpoch).TotalSeconds;
+    var json = rec.Range(now - 60, now + 60, 5);
+    using var doc = System.Text.Json.JsonDocument.Parse(json);
+    var frames = doc.RootElement.EnumerateArray().Count(e => e.TryGetProperty("f", out _));
+    var events = doc.RootElement.EnumerateArray().Where(e => e.TryGetProperty("e", out _)).ToList();
+    var rows = doc.RootElement.EnumerateArray().Where(e => e.TryGetProperty("f", out _)).Sum(e => e.GetProperty("f").GetArrayLength());
+    Console.WriteLine($"  {frames} frame(s), {rows} aircraft, {events.Count} event(s): {(events.Count > 0 ? events[0].GetProperty("e")[4].GetString() : "-")}");
+    Check(frames == 1 && rows > 0 && events.Count == 1 && events[0].GetProperty("e")[0].GetString() == someone.Callsign, "recorded and read back: every flying aircraft, and the instruction where it was given");
+    Environment.SetEnvironmentVariable("LAIA_DATA", null);
+}
+
 Console.WriteLine("== Runway-only airport (test buttons without a layout)");
 {
     var model = AirportModel.RunwayOnly("KTST", 40, -75, 20, 40, 7000, "04", 40, -75);
