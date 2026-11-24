@@ -65,6 +65,7 @@ public sealed class Flight
     public double ArrivedAt = double.NaN;
     /// <summary>Parked after landing between 23:00 and 06:00 airport local time: stays for its next flight (user, 24 Nov).</summary>
     public bool Overnight;
+    public bool NoTurnLogged;
     /// <summary>When its departure pushes back (world time), for one placed at its gate ahead of it.</summary>
     public double PushAt = double.NaN;
     public double LiftoffTime = -1;
@@ -2082,7 +2083,16 @@ public sealed partial class TrafficWorld
         var toFirst = Apt.Nodes[route[0]] - f.Pos;
         if (lead.Count > 0) { }
         else if (V2.Dot(toFirst, fwd) < 0)
-        { pts.Add(f.Pos + fwd * 20); pts.Add(f.Pos + fwd * 50 + fwd.Perp * 40); }   // turn around in a wide teardrop, never on the spot
+        {
+            // No 180s on a taxiway (plan, Phase 3: "aircraft turn around only on a ramp, a holding pad or a wide apron"):
+            // turning back needs the apron round the stands; on a taxiway it waits instead.
+            if (!Apt.Spots.Any(sp => (sp.P - f.Pos).Length < 150))
+            {
+                if (!f.NoTurnLogged) { f.NoTurnLogged = true; Log($"{f.Callsign}: no room to turn round on the taxiway — waits for {otherName}"); }
+                return false;
+            }
+            pts.Add(f.Pos + fwd * 20); pts.Add(f.Pos + fwd * 50 + fwd.Perp * 40);   // turn around in a wide teardrop, never on the spot
+        }
         else if (toFirst.Length > 1 && V2.Dot(toFirst.Unit, fwd) < 0.85)
             pts.Add(f.Pos + fwd * 20);                  // roll ahead a little and turn in an arc, not on the spot
         var offset = pts.Count;
