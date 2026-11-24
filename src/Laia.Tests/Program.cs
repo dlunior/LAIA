@@ -375,6 +375,54 @@ Console.WriteLine("== Crossing runways at Busy for an hour: land 27, depart 36 a
     Check(gaXing <= 1, $"go-arounds for a crossing departure stay rare ({gaXing})");
 }
 
+Console.WriteLine("== Crossing a runway between departures (23 Nov, KATL: JBU1798 held short of 27R for 12+ minutes behind line up and wait)");
+{
+    var data = TestAirport.Build(false);
+    int Find(double x, double y) => data.Points.FindIndex(q => Math.Abs(q.BiasX - x) < 1 && Math.Abs(q.BiasZ - y) < 1);
+    int Pt(double x, double y, int type = 1) { data.Points.Add(new TaxiPoint { Type = type, BiasX = x, BiasZ = y }); return data.Points.Count - 1; }
+    void Path(int a, int b, int type = 1) => data.Paths.Add(new TaxiPath { Type = type, Start = a, End = b, WidthM = 23 });
+    // A north apron across the runway: a taxiway at y = +200, two crossings with hold lines both sides, three gates.
+    var n = new[] { -300, 0, 300 }.ToDictionary(x => x, x => Pt(x, 200));
+    Path(n[-300], n[0]); Path(n[0], n[300]);
+    foreach (var x in new[] { -300, 300 })
+    {
+        var hs = Pt(x, -95, 2); var hn = Pt(x, 95, 2);
+        Path(Find(x, -200), hs); Path(hs, Find(x, 0)); Path(Find(x, 0), hn); Path(hn, n[x]);
+    }
+    foreach (var x in new[] { -300, 0, 300 })
+    {
+        data.Parkings.Add(new Parking { Type = 9, Name = 12, Number = 60 + x / 300, Heading = 0, RadiusM = 22, BiasX = x, BiasZ = 330 });
+        data.Paths.Add(new TaxiPath { Type = 3, Start = n[x], End = data.Parkings.Count - 1 });
+    }
+    var apt = new AirportModel(data);
+    foreach (var sp in apt.Spots) if (sp.P.Y > 0) sp.Airlines = new() { "JBU" };
+    var sched = new Laia.Common.Airports.ScheduleData { Airport = "TEST", Source = "AIG" };
+    const int start = 2 * 1440 + 600;
+    for (var i = 0; i < 14; i++)
+        sched.Legs.Add(new() { Airline = "DAL", Operator = "DAL", Title = "T", Type = "B739", Reg = $"N{i}XD", Flight = $"{500 + i}", Dep = "TEST", Arr = "KYYY", DepMin = start + 5 + i, ArrMin = start + 150 });
+    sched.Legs.Add(new() { Airline = "JBU", Operator = "JBU", Title = "J", Type = "A320", Reg = "N798JB", Flight = "1798", Dep = "KXXX", Arr = "TEST", DepMin = start - 120, ArrMin = start + 9 });
+    var world = new TrafficWorld(apt, new TestSource(), seed: 4) { Level = TrafficLevel.RealWorld, Wind = new Wind(270, 8), Schedule = sched, WeekMinute = start, SafetyLogic = true, LocalMinuteOverride = 12 * 60 };
+    var log = new List<string>(); world.Log = l => log.Add($"{world.Time:0} {l}");
+    double maxWait = 0; var parked = false; var crossed = false;
+    for (var t = 0.0; t < 40 * 60 && !parked; t += 0.5)
+    {
+        world.WeekMinute = start + world.Time / 60;
+        world.Step(0.5);
+        if (world.Flights.FirstOrDefault(f => !f.Done && f.Reg == "N798JB") is { } jb)
+        {
+            foreach (var st in jb.Stops.Where(st => st.Runway >= 0 && !double.IsNaN(st.WaitSince) && !st.Cleared)) maxWait = Math.Max(maxWait, world.Time - st.WaitSince);
+            if (jb.OnGround && jb.Pos.Y > 100) crossed = true;
+            if (jb.Phase is "at gate" or "parked" && jb.Pos.Y > 100) parked = true;
+        }
+    }
+    foreach (var l in log.Where(l => l.Contains("JBU1798") || l.Contains("letting")).Take(8)) Console.WriteLine("    " + l);
+    var luaw = log.Count(l => l.Contains("lining up runway"));
+    Console.WriteLine($"  {luaw} departures lined up; JBU1798 crossed {crossed}, at its gate {parked}; longest wait to cross {maxWait:0} s");
+    Check(crossed && parked, "the arrival crosses the runway and reaches its gate across it");
+    Check(maxWait < 180, $"it waits no more than one departure and a bit to cross ({maxWait:0} s)");
+    Check(luaw >= 10, $"the departures still go ({luaw})");
+}
+
 Console.WriteLine("== Peak runways: the ATIS first, real pairs, and kept until a tailwind over 5 kt (KLGA, 22 Nov)");
 {
     var data = TestAirport.Build(false);

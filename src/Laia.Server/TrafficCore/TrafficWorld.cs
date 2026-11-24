@@ -2580,6 +2580,10 @@ public sealed partial class TrafficWorld
         if (UserOnRunway(r)) { f.HoldWhy = "your aircraft on the runway"; return false; }
         if (GoAroundAhead(f) is { } ga) { f.HoldWhy = $"{ga.Callsign} going around over the runway"; return false; }
         if (behind.FirstOrDefault(o => !MayLineUpBehind(o, f)) is { } bo) { f.HoldWhy = $"{bo.Callsign} on the runway"; return false; }
+        // Aircraft held short to cross get the runway after at most one more departure, or after 2 minutes (user, 23 Nov,
+        // KATL: JBU1798 held short of 27R for 12+ minutes while ten departures went with line up and wait — "it's okay to
+        // allow at least one aircraft to depart between departures if they are holding short of the runway").
+        if (CrosserWaiting(r) is { } cw) { f.HoldWhy = $"letting {cw.Callsign} cross"; return false; }
         // During a runway change, no departures the new way while arrivals still come in the old way (the opposite
         // direction) within 30 nm: the airport turns round once the last of them has landed.
         // Only the opposite way on this runway or a parallel (within 30° of the reciprocal): a crossing runway's
@@ -2600,7 +2604,35 @@ public sealed partial class TrafficWorld
         // only line up when the takeoff can follow the line-up (about 30 s later).
         if (!CrossingRunwayClearForTakeoff(f, extraSec: 30)) { f.HoldWhy = "arrivals to a crossing runway"; return false; }
         Log($"{f.Callsign}: lining up runway {f.Rwy.Ident} (next arrival {(double.IsInfinity(eta) ? "none" : eta.ToString("0") + " s")})");
+        _lastLineUp[r] = Time;
         return true;
+    }
+
+    private readonly Dictionary<int, double> _lastLineUp = new();
+
+    /// <summary>An aircraft held short of this runway to cross it, that has already let one departure go (or waited 2
+    /// minutes): the next departure waits for it.</summary>
+    private Flight? CrosserWaiting(int runway)
+    {
+        var lastLu = _lastLineUp.TryGetValue(runway, out var v) ? v : double.NegativeInfinity;
+        if (ArrivalEta(runway) < 90) return null;          // an arrival keeps it from crossing anyway: the departure may go
+        foreach (var o in Flights)
+        {
+            if (o.Done || !o.OnGround || (o.Kind == "departure" && o.Rwy?.Runway == runway)) continue;
+            foreach (var st in o.Stops)
+                if (st.Runway == runway && !st.Cleared && !double.IsNaN(st.WaitSince) && (lastLu > st.WaitSince || Time - st.WaitSince > 120))
+                    return o;
+        }
+        return null;
+    }
+
+    /// <summary>A departure already rolling past where this crossing is (300 m or more beyond it): the crossing can go
+    /// behind it ("cross behind the departing traffic").</summary>
+    private bool PassedCrossing(Flight dep, Flight f, Stop st)
+    {
+        if (dep.Phase != "takeoff roll" || dep.Rwy is not { } rw || f.Path is not { } path) return false;
+        var at = rw.Along(path.At(st.S).p);
+        return rw.Along(dep.Pos) > at + 300;
     }
 
     /// <summary>
@@ -6173,12 +6205,12 @@ public sealed partial class TrafficWorld
         var runway = st.Runway;
         if (UserOnRunway(runway)) return "your aircraft on the runway";
         foreach (var o in Flights)
-            if (o != f && !o.Done && (o.Reserve == runway || (o.OnRunway == runway && !(o.Kind == "departure" && !o.OnGround))))
+            if (o != f && !o.Done && (o.Reserve == runway || (o.OnRunway == runway && !(o.Kind == "departure" && !o.OnGround))) && !PassedCrossing(o, f, st))
                 return $"{o.Callsign} {(o.Reserve == runway && o.OnRunway != runway ? "crossing" : "on the runway")}";
         // Time to be across and clear of it (taxi speed about 15 kt from here to 60 m past the far side), plus 30 s.
         var crossSec = f.Path is not null ? Math.Max(0, st.ExitS + 60 - f.S) / Math.Max(4, f.Gs * Kt) + 15 : 45;
         if (ArrivalEta(runway) is var eta && eta < Math.Max(60, crossSec + 30)) return $"an arrival {eta:0} s out";
-        if (Flights.FirstOrDefault(o => o.Rwy?.Runway == runway && o.Phase is "lined up" or "takeoff roll") is { } dep) return $"{dep.Callsign} departing";
+        if (Flights.FirstOrDefault(o => o.Rwy?.Runway == runway && o.Phase is "lined up" or "takeoff roll" && !PassedCrossing(o, f, st)) is { } dep) return $"{dep.Callsign} departing";
         // Room on the far side: nobody on its way between the runway and 60 m past where it's clear of it.
         if (f.Path is { } path && st.ExitS > st.S)
         {
