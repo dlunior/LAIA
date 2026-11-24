@@ -6,7 +6,7 @@ namespace Laia.Server.TrafficCore;
 /// <list type="bullet">
 /// <item>the wind MSFS gives the user's aircraft, sampled as they fly — the reference: near where (and at the levels)
 /// the user has flown recently, LAIA's aircraft get the user's wind;</item>
-/// <item>the winds-aloft forecast (aviationweather.gov, the FD/FB product: 3,000–39,000 ft at about 175 US stations),
+/// <item>the winds-aloft forecast (Open-Meteo's GFS pressure-level winds on a grid over the US, 3,000–39,000 ft),
 /// for the levels and places the user hasn't flown, corrected by what the user found where both are known.</item>
 /// </list>
 /// The surface wind (METAR) still sets the runways; below the lowest forecast level the wind blends from the surface
@@ -74,6 +74,69 @@ public sealed class WindsAloft
                 if (DecodeField(field) is { } w) { winds[k] = w; any = true; }
             }
             if (any) res.Add((id, winds));
+        }
+        return res;
+    }
+
+    /// <summary>The pressure levels asked of Open-Meteo and their standard-atmosphere heights (ft).</summary>
+    public static readonly (int hPa, double ft)[] PressureLevels =
+        { (925, 2500), (850, 4780), (700, 9880), (600, 13800), (500, 18290), (400, 23570), (300, 30060), (250, 33990), (200, 38660) };
+
+    /// <summary>The "hourly=" list for an Open-Meteo request: wind speed and direction at each pressure level.</summary>
+    public static string OpenMeteoHourly() =>
+        string.Join(",", PressureLevels.SelectMany(p => new[] { $"wind_speed_{p.hPa}hPa", $"wind_direction_{p.hPa}hPa" }));
+
+    /// <summary>
+    /// Reads an Open-Meteo forecast (one location: an object; several: an array of them) as stations: for each, the hour
+    /// nearest now, the pressure-level winds turned into the forecast levels (between two pressure levels by their
+    /// standard heights), and none within 1,500 ft of the ground (as the FD leaves them out).
+    /// </summary>
+    public static List<Station> ParseOpenMeteo(string json, DateTime nowUtc)
+    {
+        var res = new List<Station>();
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        var items = doc.RootElement.ValueKind == System.Text.Json.JsonValueKind.Array
+            ? doc.RootElement.EnumerateArray().ToList() : new() { doc.RootElement };
+        foreach (var it in items)
+        {
+            if (!it.TryGetProperty("latitude", out var la) || !it.TryGetProperty("longitude", out var lo) || !it.TryGetProperty("hourly", out var h)) continue;
+            var elevFt = it.TryGetProperty("elevation", out var el) && el.ValueKind == System.Text.Json.JsonValueKind.Number ? el.GetDouble() * 3.28084 : 0;
+            if (!h.TryGetProperty("time", out var times)) continue;
+            var best = -1; var bestD = double.MaxValue; var idx = 0;
+            foreach (var t in times.EnumerateArray())
+            {
+                if (DateTime.TryParse(t.GetString(), System.Globalization.CultureInfo.InvariantCulture,
+                        System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal, out var at))
+                {
+                    var d = Math.Abs((at - nowUtc).TotalMinutes);
+                    if (d < bestD) { bestD = d; best = idx; }
+                }
+                idx++;
+            }
+            if (best < 0) continue;
+            double? Num(string name) => h.TryGetProperty(name, out var arr) && arr.ValueKind == System.Text.Json.JsonValueKind.Array
+                && arr.GetArrayLength() > best && arr[best].ValueKind == System.Text.Json.JsonValueKind.Number ? arr[best].GetDouble() : null;
+            var pl = new List<(double ft, V2 w)>();
+            foreach (var (hPa, ft) in PressureLevels)
+                if (Num($"wind_speed_{hPa}hPa") is { } kt && Num($"wind_direction_{hPa}hPa") is { } dir) pl.Add((ft, FromWind(dir, kt)));
+            if (pl.Count < 2) continue;
+            var winds = new V2?[Levels.Length];
+            for (var k = 0; k < Levels.Length; k++)
+            {
+                var z = Levels[k];
+                if (z < elevFt + 1500) continue;
+                if (z <= pl[0].ft) { winds[k] = pl[0].w; continue; }
+                if (z >= pl[^1].ft) { winds[k] = pl[^1].w; continue; }
+                for (var j = 1; j < pl.Count; j++)
+                    if (z <= pl[j].ft)
+                    {
+                        var f = (z - pl[j - 1].ft) / (pl[j].ft - pl[j - 1].ft);
+                        winds[k] = pl[j - 1].w + (pl[j].w - pl[j - 1].w) * f;
+                        break;
+                    }
+            }
+            var lat = la.GetDouble(); var lon = lo.GetDouble();
+            res.Add(new Station($"{lat:0.0},{lon:0.0}", lat, lon, elevFt, winds));
         }
         return res;
     }

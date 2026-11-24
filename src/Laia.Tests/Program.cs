@@ -1380,6 +1380,32 @@ Console.WriteLine("== Winds aloft: the FD forecast read, and the user's own sim 
     Check(none.FromDeg == 180 && none.Kt == 10, "with no forecast and no readings: the surface wind (as before)");
 }
 
+Console.WriteLine("== Winds aloft from Open-Meteo (the FD tables were discontinued, Nov 2026): pressure levels to the forecast levels");
+{
+    var json = """
+    [{"latitude":42.0,"longitude":-71.0,"elevation":30.0,"hourly":{"time":["2026-11-23T13:00","2026-11-23T14:00","2026-11-23T15:00"],
+      "wind_speed_925hPa":[5,20,5],"wind_direction_925hPa":[180,200,180],"wind_speed_850hPa":[5,30,5],"wind_direction_850hPa":[180,220,180],
+      "wind_speed_700hPa":[5,40,5],"wind_direction_700hPa":[180,250,180],"wind_speed_600hPa":[5,50,5],"wind_direction_600hPa":[180,260,180],
+      "wind_speed_500hPa":[5,60,5],"wind_direction_500hPa":[180,270,180],"wind_speed_400hPa":[5,80,5],"wind_direction_400hPa":[180,270,180],
+      "wind_speed_300hPa":[5,110,5],"wind_direction_300hPa":[180,270,180],"wind_speed_250hPa":[5,120,5],"wind_direction_250hPa":[180,270,180],
+      "wind_speed_200hPa":[5,100,5],"wind_direction_200hPa":[180,270,180]}},
+     {"latitude":39.75,"longitude":-105.0,"elevation":1650.0,"hourly":{"time":["2026-11-23T14:00"],
+      "wind_speed_925hPa":[10],"wind_direction_925hPa":[90],"wind_speed_850hPa":[10],"wind_direction_850hPa":[90],
+      "wind_speed_700hPa":[25],"wind_direction_700hPa":[270],"wind_speed_600hPa":[35],"wind_direction_600hPa":[270],
+      "wind_speed_500hPa":[50],"wind_direction_500hPa":[270],"wind_speed_400hPa":[70],"wind_direction_400hPa":[270],
+      "wind_speed_300hPa":[90],"wind_direction_300hPa":[270],"wind_speed_250hPa":[95],"wind_direction_250hPa":[270],
+      "wind_speed_200hPa":[80],"wind_direction_200hPa":[270]}}]
+    """;
+    var st = WindsAloft.ParseOpenMeteo(json, new DateTime(2026, 11, 23, 14, 10, 0, DateTimeKind.Utc));
+    string W(V2? v) => v is { } x ? $"{WindsAloft.ToWind(x).FromDeg:000}/{WindsAloft.ToWind(x).Kt:0}" : "-";
+    var bos = st.FirstOrDefault(x => x.Lat > 41)?.Winds; var den = st.FirstOrDefault(x => x.Lat < 40)?.Winds;
+    Console.WriteLine($"  {st.Count} points; Boston 3k {W(bos?[0])} 9k {W(bos?[2])} 30k {W(bos?[6])} 39k {W(bos?[8])}; Denver 3k {W(den?[0])} 6k {W(den?[1])} 9k {W(den?[2])}");
+    Check(st.Count == 2 && bos is not null && den is not null, "every point read (a list of locations)");
+    Check(bos![8] is { } b39 && Math.Abs(b39.Length - 100) < 1 && bos[6] is { } b30 && Math.Abs(b30.Length - 110) < 3, "the hour nearest now, and high levels from the nearest pressure levels");
+    Check(bos[0] is { } b3 && WindsAloft.ToWind(b3).FromDeg is > 200 and < 215 && WindsAloft.ToWind(b3).Kt is > 20 and < 28, "3,000 ft between 925 and 850 hPa");
+    Check(den![0] is null && den[1] is null && den[2] is { } d9 && Math.Abs(WindsAloft.ToWind(d9).FromDeg - 270) < 1, "none within 1,500 ft of the ground (Denver at 5,400 ft)");
+}
+
 Console.WriteLine("== Winds aloft: arrivals spaced and timed right in strong winds at altitude (tailwind, then headwind)");
 foreach (var (aloftFrom, label) in new[] { (90.0, "tailwind"), (270.0, "headwind") })
 {
@@ -1517,9 +1543,18 @@ Console.WriteLine("== Hand-over: a scheduled arrival taken over from the whole s
     Check(Geo2.DistanceNm(startPos.lat, startPos.lon, np!.Lat, np.Lon) < 1 && startAlt > 20000, "it starts exactly where the whole sky had it, at its level");
     double over250Low = 0, maxDescent = 0, maxClimb = 0, t = 0; var holds = 0; var landed = false; var prevAlt = f.AltFt;
     var lastHold = f.LastHold;
+    var hdgs = new Queue<(double t, double h)>(); double farTurn = 0;
     while (t < 3 * 3600 && !landed)
     {
         world.Step(0.5); t += 0.5;
+        // Far out (beyond 40 nm), never turned more than 90° in a minute (23 Nov, KBOS: sharp 180s when routes were rebuilt).
+        if (f.Pos.Length > 40 * nm)
+        {
+            hdgs.Enqueue((t, f.Heading));
+            while (hdgs.Count > 0 && t - hdgs.Peek().t > 60) hdgs.Dequeue();
+            farTurn = Math.Max(farTurn, Math.Abs(Geo2.Diff(f.Heading, hdgs.Peek().h)));
+        }
+        else hdgs.Clear();
         if (f.LastHold != lastHold) { holds++; lastHold = f.LastHold; }
         if (!f.OnGround && f.AltFt < 9800 && f.Ias > 255) over250Low = Math.Max(over250Low, f.Ias);
         var vs = (f.AltFt - prevAlt) / 0.5 * 60; prevAlt = f.AltFt;
@@ -1531,6 +1566,8 @@ Console.WriteLine("== Hand-over: a scheduled arrival taken over from the whole s
     Check(over250Low == 0, $"250 kt or less below 10,000 ft ({over250Low:0} kt)");
     Check(maxClimb < 300 && -maxDescent < 4000, "it only descends, at airliner rates");
     Check(holds == 0, "no holding far out on its own");
+    Console.WriteLine($"  biggest turn in a minute beyond 40 nm: {farTurn:0}°");
+    Check(farTurn <= 90, "far out, no turn of more than 90° in a minute");
     var landAt = world.Time;
     Console.WriteLine($"  landing time predicted 10 min out: {landAt - f.Pred10:+0;-0} s off; 5 min out: {landAt - f.Pred5:+0;-0} s off; first prediction {(double.IsNaN(f.Pred30) ? "after 30 min out" : $"30 min out: {landAt - f.Pred30:+0;-0} s off")}");
     Check(!double.IsNaN(f.Pred10) && Math.Abs(landAt - f.Pred10) < 45 && !double.IsNaN(f.Pred5) && Math.Abs(landAt - f.Pred5) < 30,
@@ -2171,6 +2208,42 @@ Console.WriteLine("== M8 Smart traffic notices: the user's place in the sequence
     for (var t = 0.0; t < 120 && fin is null; t += 0.5) { world2.Step(0.5); fin = world2.Notices.FirstOrDefault(n => n.Text.Contains("final"))?.Text; }
     Console.WriteLine($"  on the ground: {fin}");
     Check(fin is not null && fin.Contains("DAL73") && fin.Contains("don't line up"), "holding short with traffic on final: a notice, not an instruction to the AI");
+}
+
+Console.WriteLine("== The user's place holds while they slow to keep their spacing (23 Nov, KBOS: the SWA behind was put ahead and sped up)");
+{
+    var nm = Geo2.MPerNm;
+    var world = new TrafficWorld(new AirportModel(TestAirport.Build(false)), new TestSource(), seed: 16) { Automatic = false, Wind = new Wind(270, 10) };
+    var log = new List<string>(); world.Log = s2 => log.Add(s2);
+    world.SelectRunways(true);
+    var r = world.ArrRwy!;
+    Laia.Common.Airports.ScheduleLeg L(string reg, string fl) => new() { Airline = "SWA", Operator = "SWA", Type = "B737", Reg = reg, Flight = fl, Dep = "KXXX", Arr = "TEST" };
+    var a = world.SpawnArrival(22, false, L("N81", "81"))!;
+    var b = world.SpawnArrival(48, false, L("N82", "82"))!;
+    var u = r.Threshold - r.Dir * (34 * nm);
+    world.UserCallsign = "N456CD"; world.UserType = "A320"; world.UserDestination = "TEST";
+    world.UserOnGround = false; world.UserTrack = r.Heading; world.UserGs = 230; world.UserAltFt = 9000;
+    var seqs = new List<int>(); string? advice = null; double maxUp = 0, prevIas = double.NaN; var userLand = -1.0;
+    for (var t = 0.0; t < 1500 && userLand < 0; t += 0.5)
+    {
+        var left = -r.Along(u) / nm;
+        // Slows from 230 to 190 kt after a minute (keeping spacing behind the one ahead), 150 inside 8 nm.
+        var kt = left > 8 ? (t < 60 ? 230 : 190) : 150;
+        u += r.Dir * (kt * Geo2.MpsPerKt * 0.5);
+        world.UserGs = kt; world.UserAltFt = Math.Max(0, Math.Min(9000, left * 318));
+        if (r.Along(u) >= 0) userLand = world.Time;
+        world.UserPos = u;
+        world.Step(0.5);
+        if (world.Sequence is { } sq && t > 15) { if (seqs.Count == 0 || seqs[^1] != sq.Number) seqs.Add(sq.Number); advice ??= sq.SpeedAdvice; }
+        if (!b.OnGround && !double.IsNaN(prevIas)) maxUp = Math.Max(maxUp, (b.Ias - prevIas) / 0.5);
+        prevIas = b.Ias;
+    }
+    foreach (var x in log.Where(x => x.Contains("(you)") || x.Contains("N456CD"))) Console.WriteLine("  " + x);
+    Console.WriteLine($"  your numbers: {string.Join(", ", seqs)}; advice: {advice ?? "none"}; the one behind sped up at most {maxUp:0.0} kt/s");
+    Check(!log.Any(x => x.Contains("now ahead of N456CD") || x.Contains("(you): new sequence") || x.Contains("re-sequenced")), "nobody behind is put ahead of the user for slowing down, and no new sequence");
+    Check(seqs.Zip(seqs.Skip(1)).All(p => p.Second < p.First), "the user's number only goes down (as the ones ahead land)");
+    Check(advice is not null && advice.Contains("kt keeps your spacing"), "the notice gives a speed that keeps the spacing");
+    Check(maxUp <= 1.05, "speeding up comes in gradually (1 kt a second or less)");
 }
 
 Console.WriteLine("== The user's runway: never changed below 10,000 ft, at most once; live-traffic flicker waits 10 minutes");
