@@ -614,7 +614,7 @@ Console.WriteLine("== Traffic from a real schedule");
     Check(arrivalErrors.Count >= 9, "scheduled arrivals land");
     Check(arrivalErrors.Count > 0 && arrivalErrors.Average(Math.Abs) < 6, "arrivals land close to their scheduled time");
     Check(departureDelays.Count >= 18, "scheduled departures leave (including the arrived aircraft turning around)");
-    Check(departureDelays.Count > 0 && departureDelays.Min() > -1, "nobody leaves before their scheduled time");
+    Check(departureDelays.Count > 0 && departureDelays.Min() > -6, "nobody leaves more than 5 minutes early (early only when the runway is quiet)");
     var dl = sched.Legs.Where(l => l.Dep == "TEST" && l.Airline == "DAL").Count(l => airborneAt.ContainsKey(l.Callsign));
     Check(dl >= 9, $"arrived airframes leave again on their next flight ({dl} of 10)");
     Console.WriteLine($"  at the gates at the start: {atStart} (10 leave in the first 35 minutes, none of the 90-minute turnarounds); early at a gate: {earlyAtGate.Count} (up to {maxEarly:0} min before); stayed past 10 min: {stayed.Count}; away between flights: {goneBetween.Count} of 10");

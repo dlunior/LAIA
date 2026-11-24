@@ -1572,7 +1572,7 @@ public sealed partial class TrafficWorld
         foreach (var l in deps)
         {
             var u = Until(l.DepMin);
-            if (u > 3 || u < -15) continue;
+            if (u > 8 || u < -15) continue;   // boarding from 8 minutes before (it may push up to 5 early)
             if (_done.Contains(Key(l, 'D'))) continue;
             if (CallsignBusy(l.Callsign)) continue;   // the same flight number still flying: this one waits
             _done.Add(Key(l, 'D'));
@@ -3063,6 +3063,14 @@ public sealed partial class TrafficWorld
         f.GateHoldDone = true;
         Log($"{f.Callsign}: released from the gate hold after {(Time - f.GateHeldSince) / 60:0.0} min (wait now {Math.Max(0, wait) / 60:0.0} min)");
         return false;
+    }
+
+    /// <summary>No other departure on its way to this one's runway, and no wait predicted there.</summary>
+    private bool RunwayQuiet(Flight f)
+    {
+        if (RunwayOnly || f.Rwy is not { } r) return false;
+        if (Flights.Any(o => o != f && !o.Done && o.Kind == "departure" && o.Rwy?.Runway == r.Runway && o.Phase is "pushback" or "engine start" or "taxi" or "holding short" or "lining up" or "lined up")) return false;
+        return double.IsNaN(f.TakeoffAt) || double.IsNaN(f.ReadyAt) || f.TakeoffAt - (f.ReadyAt + 35) < 60;
     }
 
     private double _lastDepPredict = -999;
@@ -5809,6 +5817,14 @@ public sealed partial class TrafficWorld
                 f.Timer -= dt;
                 if (f.Timer <= 0 && GateHold(f)) break;
                 if (f.Timer <= 0 && PushbackClear(f)) StartPushback(f);
+                // Up to 5 minutes early when its runway is quiet (user, 23 Nov: traffic "doesn't have to be beholden to
+                // strict schedules" — departures as efficient as possible): nobody else on the way to it, no wait there.
+                else if (f.Timer > 0 && f.Timer <= 300 && RunwayQuiet(f) && PushbackClear(f))
+                {
+                    Log($"{f.Callsign}: pushing back {f.Timer / 60:0.0} min early — runway {f.Rwy?.Ident} is quiet");
+                    f.Timer = 0; f.GateHoldDone = true;
+                    StartPushback(f);
+                }
                 break;
             case "pushback":
                 f.Lights = Nav | Beacon | Logo;
