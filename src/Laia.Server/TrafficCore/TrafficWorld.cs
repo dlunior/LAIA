@@ -6952,9 +6952,7 @@ public sealed partial class TrafficWorld
             if (f.Phase == "flare") target = f.P.Vapp - 5;
             // Energy: it slows only as fast as its configuration and descent allow (descend OR slow, not both).
             if (target < f.Ias) f.Ias -= Math.Min(f.Ias - target, DecelRate(f, target, agl) * dt);
-            // Speeding up comes in gradually (user, 23 Nov: the SWA behind "sped up super fast" when its slow-down was
-            // cancelled): 1.5 kt a second level, 0.8 while descending (it can't do both at once).
-            else f.Ias += Math.Min(target - f.Ias, (f.Vs < -500 ? 0.8 : 1.5) * dt);
+            else f.Ias += Math.Min(target - f.Ias, 1.5 * dt);
             if (dth < 6.5 || agl < 2200) f.Gear = true;
 
             double vsTarget;
