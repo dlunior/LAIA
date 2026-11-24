@@ -1501,10 +1501,10 @@ Console.WriteLine("== Real flights from ADS-B (the LAIA Collector) and the real 
     void P(double dt, double la, double lo, string alt, string? cs = null) =>
         pts.Add($"[{dt},{la},{lo},{alt},250,270,0,0{(cs is null ? "" : $",{{\"flight\":\"{cs}   \"}}")}]");
     P(0, 40.0, -75.0, "\"ground\"", "DAL123"); P(300, 40.0, -75.01, "\"ground\"");
-    for (var k = 0; k <= 40; k++) P(400 + k * 90, 40.0 + k * 0.025, -75.01 - k * 0.05, (k == 0 ? 400 : Math.Min(35000, 400 + k * 2000)).ToString(), k == 5 ? "DAL123" : null);
+    for (var k = 0; k <= 40; k++) P(400 + k * 90, 40.0 + k * 0.025, -75.01 - k * 0.05, Math.Min(35000, Math.Min(400 + k * 2000, 3000 + (40 - k) * 2000)).ToString(), k == 5 ? "DAL123" : null);
     P(400 + 41 * 90, 40.99, -76.99, "1400");
     P(9000, 41.0, -77.0, "\"ground\"", "DAL124"); P(9600, 41.0, -77.0, "\"ground\"");
-    for (var k = 0; k <= 40; k++) P(9700 + k * 90, 41.0 - k * 0.025, -77.0 + k * 0.05, Math.Min(33000, 1200 + k * 1800).ToString());
+    for (var k = 0; k <= 40; k++) P(9700 + k * 90, 41.0 - k * 0.025, -77.0 + k * 0.05, Math.Min(33000, Math.Min(1200 + k * 1800, 900 + (40 - k) * 1800)).ToString());
     P(9700 + 41 * 90, 40.0, -75.0, "\"ground\"");
     var json = $"{{\"icao\":\"a1b2c3\",\"r\":\"N123DL\",\"t\":\"B739\",\"timestamp\":{t0},\"trace\":[{string.Join(",", pts)}]}}";
     var legs = TraceLegs.Extract(System.Text.Encoding.UTF8.GetBytes(json), Near);
