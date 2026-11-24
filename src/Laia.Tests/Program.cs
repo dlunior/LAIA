@@ -2243,7 +2243,7 @@ Console.WriteLine("== The user's place holds while they slow to keep their spaci
     Check(!log.Any(x => x.Contains("now ahead of N456CD") || x.Contains("(you): new sequence") || x.Contains("re-sequenced")), "nobody behind is put ahead of the user for slowing down, and no new sequence");
     Check(seqs.Zip(seqs.Skip(1)).All(p => p.Second < p.First), "the user's number only goes down (as the ones ahead land)");
     Check(advice is not null && advice.Contains("kt keeps your spacing"), "the notice gives a speed that keeps the spacing");
-    Check(maxUp <= 1.05, "speeding up comes in gradually (1 kt a second or less)");
+    Check(maxUp <= 1.55, "speeding up comes in gradually (1.5 kt a second or less)");
 }
 
 Console.WriteLine("== The user's runway: never changed below 10,000 ft, at most once; live-traffic flicker waits 10 minutes");

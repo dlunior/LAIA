@@ -38,6 +38,7 @@ public sealed partial class TrafficWorld
     private double _userSlot = double.NaN, _userOffSince = double.NaN, _userSlotAt, _etaScale = 1;
     private readonly List<(double t, double eta)> _etaSamples = new();
     private bool _userReplanned;
+    private double _userSlotRaw, _userResAt = double.NegativeInfinity;
     private int _userRwyChanges;
     private string _seqSig = "";
     private double _seqSince, _seqNewUntil = double.MinValue;
@@ -317,12 +318,14 @@ public sealed partial class TrafficWorld
         // 45 s), so the aircraft around them adjust with speed while there's time — instead of the slot holding still
         // until the user was 90 s off it and then jumping (the old way).
         var eta = Time + f.EtaSec;
-        if (double.IsNaN(_userSlot)) { _userSlot = eta; _userReplanned = false; _userSlotAt = Time; _userOffSince = double.NaN; }
+        var rawAbs = Time + raw;
+        if (double.IsNaN(_userSlot)) { _userSlot = eta; _userSlotRaw = rawAbs; _userReplanned = false; _userSlotAt = Time; _userOffSince = double.NaN; }
         else if (nm > 150)
         {
             var diff = eta - _userSlot;
             var step = Math.Min(1, (Time - _userSlotAt) / 45);
             if (Math.Abs(diff) > 15) _userSlot += diff * step;
+            _userSlotRaw = rawAbs;
             _userReplanned = false; _userOffSince = double.NaN;
         }
         else
@@ -333,14 +336,17 @@ public sealed partial class TrafficWorld
             // is the user flying their slot, so nobody is re-sequenced for it. Only when the user is clearly off it —
             // more than 2 minutes (3 inside 30 nm: a 360, a wide turn) for over a minute — does the place move, once,
             // with a notice.
-            var diff = eta - _userSlot;
+            // Off by both the learned estimate and the plain one (the learned one scales a single slow-down up to 40 %
+            // more as if it were how they always fly: 3.4 min "late" for a 1-minute slow-down in the test).
+            var dScaled = eta - _userSlot; var dRaw = rawAbs - _userSlotRaw;
+            var diff = Math.Sign(dScaled) == Math.Sign(dRaw) ? Math.Sign(dScaled) * Math.Min(Math.Abs(dScaled), Math.Abs(dRaw)) : 0;
             var limit = nm > 30 ? 120 : 180;
             if (Math.Abs(diff) <= limit) _userOffSince = double.NaN;
             else if (double.IsNaN(_userOffSince)) _userOffSince = Time;
             else if (Time - _userOffSince >= 60)
             {
-                Log($"{f.Callsign} (you): {Math.Abs(diff) / 60:0.0} min {(diff > 0 ? "later" : "earlier")} than your place in the sequence for over a minute — re-sequenced");
-                _userSlot = eta; _userReplanned = true; _userOffSince = double.NaN;
+                if (Time - _userResAt > 300) Log($"{f.Callsign} (you): {Math.Abs(diff) / 60:0.0} min {(diff > 0 ? "later" : "earlier")} than your place in the sequence for over a minute — re-sequenced");
+                _userSlot = eta; _userSlotRaw = rawAbs; _userReplanned = true; _userOffSince = double.NaN; _userResAt = Time;
             }
         }
         _userSlotAt = Time;
