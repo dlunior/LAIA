@@ -3428,6 +3428,35 @@ public sealed partial class TrafficWorld
     }
 
     /// <summary>The arrival route: STAR, then the approach (or vectors to final), then the runway.</summary>
+    /// <summary>
+    /// The filed-route points still ahead of a position: those after the leg it is on (the leg nearest to it, the leg
+    /// into the first point counting from the position itself), and none within 3 nm. The old test (is the next point
+    /// nearer than the one before it?) kept every point once it was well past several (22–23 Nov, KBOS: a longer real
+    /// track for JBU734 rebuilt its route back to airway points 100+ nm behind — 155 nm to go became 488 — and it turned
+    /// round; the whole stream behind it was torn up).
+    /// </summary>
+    public static List<V2> ViaAhead(List<V2> fv, V2 pos)
+    {
+        if (fv.Count == 0) return new();
+        // The leg (k-1 → k) nearest the position; leg 0 is the one into the first point.
+        var bestK = 0; var bestD = double.MaxValue;
+        for (var k = 1; k < fv.Count; k++)
+        {
+            var d = SegDist(pos, fv[k - 1], fv[k]);
+            if (d < bestD - 1) { bestD = d; bestK = k; }
+        }
+        // Beyond the last point (closer to it, and past it along the last leg): nothing left.
+        if (fv.Count >= 2)
+        {
+            var last = fv[^1]; var legDir = (last - fv[^2]);
+            if (legDir.Length > 1 && V2.Dot(pos - last, legDir) > 0 && (pos - last).Length < bestD + 1) return new();
+        }
+        if (fv.Count == 1 || (bestK == 1 && (pos - fv[0]).Length <= bestD + 1 && V2.Dot(pos - fv[0], fv[1] - fv[0]) < 0)) bestK = 0;
+        var res = fv.Skip(bestK).ToList();
+        while (res.Count > 0 && (res[0] - pos).Length < 3 * Geo2.MPerNm) res.RemoveAt(0);
+        return res;
+    }
+
     private void BuildArrivalPath(Flight f, V2? from, V2? entry = null)
     {
         f.VectorRejoinS = double.NegativeInfinity;
@@ -3511,10 +3540,7 @@ public sealed partial class TrafficWorld
             var via = new List<V2>();
             if (entry is { } env && f.Via is { Count: > 0 } fv)
             {
-                var k0 = 0;
-                while (k0 < fv.Count && ((fv[k0] - env).Length < 3 * Geo2.MPerNm
-                    || (k0 + 1 < fv.Count && (fv[k0 + 1] - env).Length < (fv[k0 + 1] - fv[k0]).Length))) k0++;
-                via = fv.Skip(k0).ToList();
+                via = ViaAhead(fv, env);
                 f.Via = via.Count > 0 ? via : null;
             }
             if ((via.Count > 0 ? via[^1] : entry) is { } en0)
@@ -5042,9 +5068,24 @@ public sealed partial class TrafficWorld
         // Its turn-off must still be ahead.
         if (best == f.FanIdx || (f.Pos - fan[best].pts[0]).Length < 3 * Geo2.MPerNm || toGo < FromLeave(fan[best].pts) + 3) return (wantNm - cur) * 3600 / gs;
         var was = f.FanIdx;
+        var (oldPath, oldS, oldThr, oldVia, oldFan) = (f.Path, f.S, f.ThrS, f.Via, f.Fan);
+        var (oldLeave, oldKey, oldRoute, oldStarNm, oldAppNm, oldRejoin, oldDetour) = (f.FanLeave, f.FanKey, f.Route, f.StarNm, f.AppNm, f.VectorRejoinS, f.DetourSec);
         f.FanIdx = best;
         BuildArrivalPath(f, null, f.Pos);
-        f.S = 0; f.EtaAt = -99; f.LastTrombone = Time; f.FanAt = Time;
+        f.S = 0;
+        // A rebuild that makes its way in much longer than the track change asked for, or that starts by turning
+        // back, is thrown away (the old way is kept).
+        var grown = (f.ThrS - f.S) / Geo2.MPerNm - toGo - (fan[best].lenNm - cur);
+        double firstTurn = 0, firstLeg = 0;
+        if (f.Path is { Points.Count: > 1 } np) { var d0 = np.Points[1] - np.Points[0]; firstTurn = Math.Abs(Geo2.Diff(d0.Bearing, f.Heading)); firstLeg = d0.Length; }
+        if (grown > 20 || (firstTurn > 100 && firstLeg > 2 * Geo2.MPerNm))
+        {
+            Log($"{f.Callsign}: real track change not made — the new way would have been {grown:0} nm longer than asked for{(firstTurn > 100 ? $", turning back {firstTurn:0}°" : "")}");
+            f.FanIdx = was; f.Path = oldPath; f.S = oldS; f.ThrS = oldThr; f.Via = oldVia; f.Fan = oldFan; f.FanAt = Time;
+            (f.FanLeave, f.FanKey, f.Route, f.StarNm, f.AppNm, f.VectorRejoinS, f.DetourSec) = (oldLeave, oldKey, oldRoute, oldStarNm, oldAppNm, oldRejoin, oldDetour);
+            return double.NaN;
+        }
+        f.EtaAt = -99; f.LastTrombone = Time; f.FanAt = Time;
         _fanMoves++;
         f.Mgr = fan[best].lenNm > fan[was].lenNm ? "longer real track" : "shorter real track";
         Log($"{f.Callsign}: {(fan[best].lenNm > cur ? "a longer" : "a shorter")} real track off its STAR ({fan[best].lenNm:0} nm instead of {cur:0}) — {why}");

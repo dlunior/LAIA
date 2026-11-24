@@ -7,7 +7,7 @@ public sealed record Notice(string Id, string Text, bool Warning, bool Clear = f
 
 /// <summary>The user's place in the arrival sequence as the traffic manager plans it.</summary>
 public sealed record UserSequence(string Runway, int Number, string? AheadCallsign, string? AheadType, string? AheadWhere,
-    string? BehindCallsign, string? BehindType, bool Replanned, double EtaSec);
+    string? BehindCallsign, string? BehindType, bool Replanned, double EtaSec, string? SpeedAdvice = null);
 
 /// <summary>
 /// M8 — Smart traffic mode for the user (user, 12 Nov): no directives, only notices that matter. On the ground: traffic on
@@ -38,6 +38,7 @@ public sealed partial class TrafficWorld
     private double _userSlot = double.NaN, _userOffSince = double.NaN, _userSlotAt, _etaScale = 1;
     private readonly List<(double t, double eta)> _etaSamples = new();
     private bool _userReplanned;
+    private double _userSlotRaw, _userResAt = double.NegativeInfinity;
     private int _userRwyChanges;
     private string _seqSig = "";
     private double _seqSince, _seqNewUntil = double.MinValue;
@@ -317,13 +318,36 @@ public sealed partial class TrafficWorld
         // 45 s), so the aircraft around them adjust with speed while there's time — instead of the slot holding still
         // until the user was 90 s off it and then jumping (the old way).
         var eta = Time + f.EtaSec;
-        if (double.IsNaN(_userSlot)) { _userSlot = eta; _userReplanned = false; _userSlotAt = Time; }
-        else
+        var rawAbs = Time + raw;
+        if (double.IsNaN(_userSlot)) { _userSlot = eta; _userSlotRaw = rawAbs; _userReplanned = false; _userSlotAt = Time; _userOffSince = double.NaN; }
+        else if (nm > 150)
         {
             var diff = eta - _userSlot;
             var step = Math.Min(1, (Time - _userSlotAt) / 45);
             if (Math.Abs(diff) > 15) _userSlot += diff * step;
-            _userReplanned = Math.Abs(diff) > 90;
+            _userSlotRaw = rawAbs;
+            _userReplanned = false; _userOffSince = double.NaN;
+        }
+        else
+        {
+            // Within 150 nm the user's place holds while they fly it (user, 23 Nov, KBOS: "I did try to keep the
+            // sequence, slowing myself to keep adequate spacing behind the JBU. But when I slowed down it changed my
+            // sequence to the SWA behind me and the SWA sped up super fast"): slowing or speeding up to keep spacing
+            // is the user flying their slot, so nobody is re-sequenced for it. Only when the user is clearly off it —
+            // more than 2 minutes (3 inside 30 nm: a 360, a wide turn) for over a minute — does the place move, once,
+            // with a notice.
+            // Off by both the learned estimate and the plain one (the learned one scales a single slow-down up to 40 %
+            // more as if it were how they always fly: 3.4 min "late" for a 1-minute slow-down in the test).
+            var dScaled = eta - _userSlot; var dRaw = rawAbs - _userSlotRaw;
+            var diff = Math.Sign(dScaled) == Math.Sign(dRaw) ? Math.Sign(dScaled) * Math.Min(Math.Abs(dScaled), Math.Abs(dRaw)) : 0;
+            var limit = nm > 30 ? 120 : 180;
+            if (Math.Abs(diff) <= limit) _userOffSince = double.NaN;
+            else if (double.IsNaN(_userOffSince)) _userOffSince = Time;
+            else if (Time - _userOffSince >= 60)
+            {
+                if (Time - _userResAt > 300) Log($"{f.Callsign} (you): {Math.Abs(diff) / 60:0.0} min {(diff > 0 ? "later" : "earlier")} than your place in the sequence for over a minute — re-sequenced");
+                _userSlot = eta; _userSlotRaw = rawAbs; _userReplanned = true; _userOffSince = double.NaN; _userResAt = Time;
+            }
         }
         _userSlotAt = Time;
         f.EtaNominal = _userSlot;
@@ -376,8 +400,21 @@ public sealed partial class TrafficWorld
         var logNow = changed && Time >= _seqNewUntil;
         if (changed) _seqNewUntil = Time + 30;
         changed |= Time < _seqNewUntil;
+        // Something to fly to (user, 23 Nov): the speed that keeps the gap behind the one ahead — its speed now, less
+        // (or more) by what the gap is short (or long) of what's needed over the time left; beyond 8 nm, in 10 kt steps.
+        string? advice = null;
+        var toGoNm = me.ThrS / Geo2.MPerNm;
+        if (ahead is not null && !double.IsNaN(ahead.EtaSec) && !double.IsNaN(me.EtaSec) && toGoNm > 8 && me.EtaSec > 120)
+        {
+            var need = ThresholdGapNeeded(ahead, me, forDepartures: false);
+            var err = need - (me.EtaSec - ahead.EtaSec);          // > 0: too close
+            var kt = ahead.Ias * (1 - Math.Clamp(err / me.EtaSec, -0.2, 0.2));
+            kt = Math.Clamp(kt, me.P.Vapp + 10, UserAltFt < 10500 ? 250 : 320);
+            kt = Math.Round(Math.Clamp(kt, ahead.Ias - 40, ahead.Ias + 40) / 10) * 10;
+            advice = $"about {kt:0} kt keeps your spacing behind {ahead.Callsign} ({(ahead.Pos - u).Length / Geo2.MPerNm:0} nm ahead)";
+        }
         Sequence = new UserSequence(me.Rwy!.Ident, me.Seq, ahead?.Callsign, ahead?.Type, ahead is null ? null : Where(ahead),
-            behind?.Callsign, behind?.Type, changed, me.EtaSec);
+            behind?.Callsign, behind?.Type, changed, me.EtaSec, advice);
         if (logNow) Log($"{me.Callsign} (you): new sequence — number {me.Seq} for {me.Rwy.Ident}, between {ahead?.Callsign ?? "nobody"} and {behind?.Callsign ?? "nobody"}");
     }
 
@@ -427,7 +464,8 @@ public sealed partial class TrafficWorld
                 var between = sq.AheadCallsign is null && sq.BehindCallsign is null ? "no traffic either side"
                     : $"between {sq.AheadCallsign ?? "—"}{(sq.AheadType is null ? "" : " (" + sq.AheadType + ")")} and {sq.BehindCallsign ?? "—"}{(sq.BehindType is null ? "" : " (" + sq.BehindType + ")")}";
                 list.Add(new Notice("seq", $"{(sq.Replanned ? "New sequence: " : "")}Number {sq.Number} for {sq.Runway}, {between}" +
-                    (sq.AheadWhere is null ? "" : $" — {sq.AheadCallsign} is at your {sq.AheadWhere}"), sq.Replanned));
+                    (sq.AheadWhere is null ? "" : $" — {sq.AheadCallsign} is at your {sq.AheadWhere}") +
+                    (sq.SpeedAdvice is null ? "" : $". {char.ToUpper(sq.SpeedAdvice[0])}{sq.SpeedAdvice[1..]}"), sq.Replanned));
             }
             Notices = list; return;
         }
