@@ -38,6 +38,14 @@ public sealed class Collector(TrackDb db, CollectorOptions opt, ILogger<Collecto
                 if (todo.Count > 0) log.LogInformation("{n} day(s) to collect: {days}", todo.Count, string.Join(", ", todo.Select(t => t.Day)));
                 for (var i = 0; i < todo.Count && !ct.IsCancellationRequested; i++)
                     await CollectDay(http, todo[i], i + 1, todo.Count, ct);
+                // The real flights (for LAIA's timetable) for the newest 28 days collected before they were kept: read
+                // again for their flights only (tracks unchanged), newest first.
+                var withLegs = db.LegDays().Select(d => d.day).ToHashSet();
+                var back = (await Releases(http, opt.FirstDays, ct)).Where(r => have.Contains(r.Day) && !withLegs.Contains(r.Day))
+                    .OrderByDescending(r => r.Day, StringComparer.Ordinal).Take(28).ToList();
+                if (back.Count > 0) log.LogInformation("{n} day(s) to read again for their flights: {days}", back.Count, string.Join(", ", back.Select(t => t.Day)));
+                for (var i = 0; i < back.Count && !ct.IsCancellationRequested; i++)
+                    await CollectDay(http, back[i], i + 1, back.Count, ct, legsOnly: true);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
             catch (Exception ex)
@@ -163,7 +171,7 @@ public sealed class Collector(TrackDb db, CollectorOptions opt, ILogger<Collecto
         public void Dispose() { W.Dispose(); Gz.Dispose(); Ms.Dispose(); }
     }
 
-    private async Task CollectDay(HttpClient http, Release rl, int n, int of, CancellationToken ct)
+    private async Task CollectDay(HttpClient http, Release rl, int n, int of, CancellationToken ct, bool legsOnly = false)
     {
         var started = DateTime.UtcNow;
         var total = rl.Parts.Sum(p => p.size);
@@ -184,6 +192,14 @@ public sealed class Collector(TrackDb db, CollectorOptions opt, ILogger<Collecto
         var maxAlt = (_airports.Count == 0 ? 0 : _airports.Max(a => a.ElevFt)) + TrackStore.AboveFt;
         var outs = new Dictionary<string, Out>();
         long aircraft = 0, kept = 0;
+        // The day's real flights: each aircraft's take-offs and landings at the airports watched (TraceLegs).
+        var legMs = new MemoryStream();
+        var legGz = new GZipStream(legMs, CompressionLevel.Optimal, leaveOpen: true);
+        var legW = new Utf8JsonWriter(legGz);
+        legW.WriteStartArray();
+        var legCount = 0;
+        IEnumerable<TraceLegs.Apt> Near(double la, double lo) =>
+            cells.TryGetValue(((int)Math.Floor(la), (int)Math.Floor(lo)), out var cl) ? cl.Select(a => new TraceLegs.Apt(a.Icao, a.Lat, a.Lon, a.ElevFt)) : Enumerable.Empty<TraceLegs.Apt>();
         try
         {
             await using var stream = new PartsStream(http, rl.Parts.Select(p => p.url).ToList(),
@@ -208,6 +224,9 @@ public sealed class Collector(TrackDb db, CollectorOptions opt, ILogger<Collecto
                 List<TrackPoint>? pts;
                 try { pts = AdsbTrace.Parse(bytes, passengerJetsOnly: true); } catch { continue; }
                 if (pts is null || pts.Count < 5) continue;
+                try { foreach (var lg in TraceLegs.Extract(bytes, Near)) { TraceLegs.Write(legW, lg); legCount++; } } catch { }
+                if (legW.BytesPending > 1 << 16) legW.Flush();
+                if (legsOnly) { Now = $"reading {rl.Day} again for its flights (day {n} of {of}): {legCount:N0} flights"; continue; }
                 near.Clear();
                 foreach (var p in pts)
                 {
@@ -233,6 +252,10 @@ public sealed class Collector(TrackDb db, CollectorOptions opt, ILogger<Collecto
                 }
             }
             Now = $"saving {rl.Day}";
+            legW.WriteEndArray(); legW.Flush(); legW.Dispose(); legGz.Dispose();
+            db.SaveLegs(rl.Day, legCount, legMs.ToArray());
+            log.LogInformation("Flights on {day}: {n:N0} take-offs and landings kept for the timetable", rl.Day, legCount);
+            if (legsOnly) return;
             var rows = outs.Select(kv => new TrackDb.Row(kv.Key, kv.Value.Tracks, kv.Value.Landings, kv.Value.Finish())).ToList();
             var secs = (DateTime.UtcNow - started).TotalSeconds;
             db.SaveDay(rl.Day, rows, aircraft, secs);

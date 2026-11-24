@@ -7,7 +7,7 @@ namespace Laia.Sim;
 /// <summary>AIG aircraft models installed in the Community folder, by airline and type.</summary>
 internal sealed class AigCatalog
 {
-    public sealed record Model(string Title, string Airline, string Type);
+    public sealed record Model(string Title, string Airline, string Type, bool Fsltl = false);
     public List<Model> Models { get; } = new();
     /// <summary>The Community folder the models were found in (the AIG flight plans live there too).</summary>
     public string? Community { get; private set; }
@@ -31,16 +31,45 @@ internal sealed class AigCatalog
             if (cat.Models.Count > 0) { cat.Community = c; break; } // the first Community folder that has AIG models
         }
         Log.Write($"AIG catalog: {cat.Models.Count} liveries found");
+        // FSLTL's liveries too, after AIG's (user, 24 Nov: "AIG first"): for real flights AIG has no livery for.
+        var aig = cat.Models.Count;
+        foreach (var c in community)
+        {
+            try
+            {
+                foreach (var pkg in Directory.GetDirectories(c!, "fsltl-*"))
+                {
+                    var planes = Path.Combine(pkg, "SimObjects", "Airplanes");
+                    if (!Directory.Exists(planes)) continue;
+                    foreach (var dir in Directory.GetDirectories(planes, "FSLTL_*"))
+                    {
+                        var cfg = Path.Combine(dir, "aircraft.cfg");
+                        if (!File.Exists(cfg)) continue;
+                        var before = cat.Models.Count;
+                        cat.Parse(cfg, fsltl: true);
+                        // The folder names the airline (FSLTL_A320_AAY) where the cfg doesn't; ZZZZ is FSLTL's plain white.
+                        var parts = Path.GetFileName(dir).Split('_');
+                        var code = parts.Length >= 3 ? parts[2].ToUpperInvariant() : "";
+                        for (var k = before; k < cat.Models.Count; k++)
+                            if (cat.Models[k].Airline.Length == 0 && code.Length == 3) cat.Models[k] = cat.Models[k] with { Airline = code };
+                        cat.Models.RemoveAll(m => m.Fsltl && (m.Airline.Length != 3 || m.Airline == "ZZZ" || m.Airline == "ZZZZ"));
+                    }
+                }
+            }
+            catch (Exception ex) { Log.Write("FSLTL scan error: " + ex.Message); }
+            if (cat.Models.Count > aig) break;
+        }
+        if (cat.Models.Count > aig) Log.Write($"FSLTL catalog: {cat.Models.Count - aig} liveries found (used after AIG's)");
         return cat;
     }
 
-    private void Parse(string path)
+    private void Parse(string path, bool fsltl = false)
     {
         string section = "", type = "";
         string? title = null, airline = null;
         void Flush()
         {
-            if (title is not null) Models.Add(new Model(title, (airline ?? "").ToUpperInvariant(), type.ToUpperInvariant()));
+            if (title is not null) Models.Add(new Model(title, (airline ?? "").ToUpperInvariant(), type.ToUpperInvariant(), fsltl));
             title = null; airline = null;
         }
         foreach (var raw in File.ReadLines(path))
@@ -87,12 +116,16 @@ internal sealed class AigCatalog
     {
         if (Models.Count == 0) return Fallback;
         var fam = Family(type == "A220" ? "BCS3" : type);
+        // AIG first, then FSLTL, at each of the close matches; the loose ones (another type, another airline) AIG only.
         var tiers = new Func<Model, bool>[]
         {
-            m => m.Airline == airline && m.Type == type,
-            m => m.Airline == airline && Family(m.Type) == fam,
-            m => m.Airline == airline,
-            m => Family(m.Type) == fam,
+            m => !m.Fsltl && m.Airline == airline && m.Type == type,
+            m => !m.Fsltl && m.Airline == airline && Family(m.Type) == fam,
+            m => m.Fsltl && m.Airline == airline && m.Type == type,
+            m => m.Fsltl && m.Airline == airline && Family(m.Type) == fam,
+            m => !m.Fsltl && m.Airline == airline,
+            m => !m.Fsltl && Family(m.Type) == fam,
+            m => !m.Fsltl,
             _ => true,
         };
         foreach (var t in tiers)
@@ -180,7 +213,10 @@ internal sealed class TrafficRenderer : IAsyncDisposable
         await _sc.AddToDataDefinitionAsync(DefGear, "GEAR RIGHT POSITION", "percent over 100", SimDataType.Float64);
         await _sc.AddToDataDefinitionAsync(DefWaypoints, "AI WAYPOINT LIST", "number", SimDataType.Waypoint);
         // The lights as the sim shows them, in the order of LightEvents — read back now and then to check they took.
+        // First the switches, then whether each is actually lit (powered) — "LIGHT … ON" (user, 23 Nov: add the check).
         foreach (var n in new[] { "LIGHT NAV", "LIGHT BEACON", "LIGHT STROBE", "LIGHT LANDING", "LIGHT TAXI", "LIGHT LOGO", "LIGHT WING", "LIGHT CABIN" })
+            await _sc.AddToDataDefinitionAsync(DefLights, n, "bool", SimDataType.Float64);
+        foreach (var n in new[] { "LIGHT NAV ON", "LIGHT BEACON ON", "LIGHT STROBE ON", "LIGHT LANDING ON", "LIGHT TAXI ON", "LIGHT LOGO ON", "LIGHT WING ON", "LIGHT CABIN ON" })
             await _sc.AddToDataDefinitionAsync(DefLights, n, "bool", SimDataType.Float64);
         await _sc.MapClientEventToSimEventAsync(EvFreezeLatLon, "FREEZE_LATITUDE_LONGITUDE_SET");
         await _sc.MapClientEventToSimEventAsync(EvFreezeAlt, "FREEZE_ALTITUDE_SET");
@@ -342,7 +378,7 @@ internal sealed class TrafficRenderer : IAsyncDisposable
     // six drawn aircraft (airborne first) have their lights read from the sim and compared with what LAIA sent; every
     // 5 minutes a summary per light, and once per model any light it was sent but doesn't show.
     private double _lightCheckAt = -100, _lightLogAt;
-    private readonly int[] _lightSent = new int[8], _lightShown = new int[8];
+    private readonly int[] _lightSent = new int[8], _lightShown = new int[8], _lightLit = new int[8];
     private int _lightChecks;
     private readonly HashSet<string> _lightModelLogged = new();
 
@@ -358,16 +394,17 @@ internal sealed class TrafficRenderer : IAsyncDisposable
         if (now - _lightLogAt >= 300 && _lightChecks > 0)
         {
             _lightLogAt = now;
-            var parts = Enumerable.Range(0, 8).Where(i => _lightSent[i] > 0).Select(i => $"{LightEvents[i].Replace("_LIGHTS_SET", "").Replace("_SET", "").ToLowerInvariant()} {_lightShown[i]}/{_lightSent[i]}");
-            Log.Write($"Lights read back from the sim ({_lightChecks} aircraft checked; shown/sent on): {string.Join(", ", parts)}");
-            Array.Clear(_lightSent); Array.Clear(_lightShown); _lightChecks = 0;
+            var parts = Enumerable.Range(0, 8).Where(i => _lightSent[i] > 0).Select(i => $"{LightEvents[i].Replace("_LIGHTS_SET", "").Replace("_SET", "").ToLowerInvariant()} {_lightShown[i]}/{_lightLit[i]}/{_lightSent[i]}");
+            Log.Write($"Lights read back from the sim ({_lightChecks} aircraft checked; switched on / actually lit / sent on): {string.Join(", ", parts)}");
+            Array.Clear(_lightSent); Array.Clear(_lightShown); Array.Clear(_lightLit); _lightChecks = 0;
         }
     }
 
     private void OnLights(Obj o, SimObjectData d)
     {
-        var shown = 0;
+        int shown = 0, lit = 0;
         for (var i = 0; i < 8; i++) if (d.ReadFloat64() > 0.5) shown |= 1 << i;
+        for (var i = 0; i < 8; i++) if (d.ReadFloat64() > 0.5) lit |= 1 << i;
         var asked = o.LightAsked;
         if (asked < 0) return;
         _lightChecks++;
@@ -378,6 +415,8 @@ internal sealed class TrafficRenderer : IAsyncDisposable
             _lightSent[i]++;
             if (((shown >> i) & 1) != 0) _lightShown[i]++;
             else missing.Add(LightEvents[i]);
+            if (((lit >> i) & 1) != 0) _lightLit[i]++;
+            else if (((shown >> i) & 1) != 0) missing.Add(LightEvents[i] + " (switched on, not lit)");
         }
         if (missing.Count > 0 && _lightModelLogged.Add(o.Title + "|" + string.Join(",", missing)))
             Log.Write($"Lights: {o.Latest.Callsign} (\"{o.Title}\", {(o.Latest.OnGround ? "on the ground" : $"airborne at {o.Latest.AltFt:0} ft")}) was sent {string.Join(", ", missing)} on but the sim shows it off");

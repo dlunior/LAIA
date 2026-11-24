@@ -479,6 +479,15 @@ async function drawAllPaths() {
   for (const p of results) if (p) L.polyline(p.points, { color: COLORS.path, weight: 1.5, opacity: .45, dashArray: p.ground ? null : "6 6" }).addTo(layers.paths);
 }
 
+// Against its landing slot (the constant traffic manager): green within 30 s, amber to 90 s, red beyond.
+function slotTag(f) {
+  if (f.slotdev == null) return "";
+  const d = f.slotdev, a = Math.abs(d);
+  const col = a <= 30 ? "#4caf50" : a <= 90 ? "#ffb300" : "#e53935";
+  const txt = a <= 30 ? "on slot" : `${a >= 90 ? Math.round(a / 60) + " min" : a + " s"} ${d > 0 ? "late" : "early"}`;
+  return ` · <span style="color:${col}">${txt}</span>`;
+}
+
 function renderSeq() {
   const arr = (data?.flights || []).filter(f => f.kind === "arrival" && f.eta != null && f.seq);
   const by = {};
@@ -487,7 +496,7 @@ function renderSeq() {
   $("seq").innerHTML = rw.length === 0 ? '<div class="ph">No arrivals yet</div>' : rw.map(r => `<div class="tag" style="margin:6px 0 2px">Runway ${r}</div>` +
     by[r].sort((a, b) => a.seq - b.seq).slice(0, 12).map(f => `<div class="row${f.id === selected ? " on" : ""}" data-id="${f.id}">
       <span class="cs">${f.seq}. ${f.cs}</span>
-      <span class="ph">${Math.round(f.eta / 60)} min${f.gapnm != null ? ` · ${f.gapnm} nm behind` : ""}${f.mgr ? ` · ${f.mgr}` : ""}</span>
+      <span class="ph">${Math.round(f.eta / 60)} min${f.gapnm != null ? ` · ${f.gapnm} nm behind` : ""}${f.mgr ? ` · ${f.mgr}` : ""}${slotTag(f)}</span>
       <span class="num">${Math.round(f.alt / 100).toString().padStart(3, "0")}</span></div>`).join("")).join("");
   for (const row of $("seq").querySelectorAll(".row")) row.onclick = () => { select(row.dataset.id); const f = data.flights.find(x => x.id === row.dataset.id); if (f) map.panTo([f.lat, f.lon]); };
 }

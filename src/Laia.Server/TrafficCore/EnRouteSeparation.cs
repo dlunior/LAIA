@@ -41,12 +41,26 @@ public sealed class EnRouteSeparation
     /// <summary>Why it's limited (the other aircraft), or null.</summary>
     public string? Why(NetLeg l) => _st.TryGetValue(l.Id, out var s) ? s.Why : null;
 
-    public List<Event> Update(double clock, double lat0, double lon0, IReadOnlyList<NetLeg> legs, IReadOnlyList<Obstacle> obstacles)
+    /// <summary>Takes over another instance's state for a flight (moving between the near-user set and the rest of the
+    /// sky), so its altitude carries on rather than jumping back to its schedule's.</summary>
+    public void Adopt(NetLeg l, EnRouteSeparation from)
+    {
+        if (_st.ContainsKey(l.Id) || !from._st.TryGetValue(l.Id, out var s)) return;
+        _st[l.Id] = new State { Shown = s.Shown, Rate = s.Rate, At = s.At, Cap = s.Cap, Floor = s.Floor, Lvl = s.Lvl, Why = s.Why };
+        from._st.Remove(l.Id);
+    }
+
+    public bool Has(NetLeg l) => _st.ContainsKey(l.Id);
+
+    /// <summary>Forgets every flight not in this set (for an instance updated region by region).</summary>
+    public void Prune(HashSet<string> live) { foreach (var k in _st.Keys.Where(k => !live.Contains(k)).ToList()) _st.Remove(k); }
+
+    public List<Event> Update(double clock, double lat0, double lon0, IReadOnlyList<NetLeg> legs, IReadOnlyList<Obstacle> obstacles, bool prune = true)
     {
         var events = new List<Event>();
         var nm = Geo2.MPerNm;
         var live = legs.Select(l => l.Id).ToHashSet();
-        foreach (var k in _st.Keys.Where(k => !live.Contains(k)).ToList()) _st.Remove(k);
+        if (prune) foreach (var k in _st.Keys.Where(k => !live.Contains(k)).ToList()) _st.Remove(k);
         var map = new LocalMap(lat0, lon0);
         const int N = 16; const double Step = 20;
         var n = legs.Count;

@@ -121,6 +121,22 @@ public sealed class FlightSource(SettingsStore settings, ILogger<FlightSource> l
         catch { }
     }
 
+    /// <summary>An installed livery (AIG or FSLTL, from LAIA Sim's catalog) for this airline and type, or the type's
+    /// family (a 737-800 livery for a 737 MAX 8). False until a catalog is known.</summary>
+    public bool HasLivery(string airline, string type)
+    {
+        lock (_gate)
+        {
+            LoadCatalog();
+            if (_catalog.Count == 0) return false;
+            var fam = RealTimetable.Family(type);
+            return _catalog.Any(e => e.Airline.Equals(airline, StringComparison.OrdinalIgnoreCase) && (e.Type == type || RealTimetable.Family(e.Type) == fam));
+        }
+    }
+
+    /// <summary>Changes when a new catalog arrives.</summary>
+    public int CatalogSignature { get { lock (_gate) { LoadCatalog(); return _catalog.Count * 31 + _catalog.Sum(e => e.Count); } } }
+
     /// <summary>Installed models are known (from LAIA Sim, or from the last session).</summary>
     public bool CatalogKnown { get { lock (_gate) { LoadCatalog(); return _catalog.Count > 0; } } }
 
@@ -522,7 +538,11 @@ public sealed class FlightSource(SettingsStore settings, ILogger<FlightSource> l
                 {
                     idx++;
                     string S(string n) => f.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
-                    if (!skipGate.Contains(idx)) LearnGates(airport, dep, f, S);
+                    // A flight AirLabs itself marks as a codeshare (cs_… fields name the operating flight) never teaches a
+                    // gate: only the operator's own listing does (23 Nov, KMSP: Virgin, KLM, Air France and WestJet were
+                    // still learned at Delta's A2/D5/C24/B10 — the check above only looked at unmarked duplicates).
+                    var marked = S("cs_airline_iata").Length > 0 || S("cs_flight_iata").Length > 0 || S("cs_flight_number").Length > 0;
+                    if (!skipGate.Contains(idx) && !marked) LearnGates(airport, dep, f, S);
                     var airline = S("airline_icao");
                     var cs = S("flight_icao");
                     var other = dep ? S("arr_icao") : S("dep_icao");

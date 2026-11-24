@@ -12,6 +12,11 @@ public sealed class MetarReader(ILogger<MetarReader> log)
     private static readonly HttpClient Http = MakeClient();
     private readonly Dictionary<string, (DateTime at, double? dir, double kt)> _cache = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, bool> _low = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, (double baseFt, double tempC)> _cloud = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The lowest broken or overcast layer's base (ft above the field, NaN: none) and the temperature (°C, NaN:
+    /// unknown), from the latest METAR — for wing (ice-inspection) lights in cloud near freezing.</summary>
+    public (double baseFt, double tempC) Cloud(string icao) { lock (_cache) return _cloud.TryGetValue(icao, out var c) ? c : (double.NaN, double.NaN); }
 
     /// <summary>
     /// Ceiling below 800 ft (the lowest broken, overcast or obscured layer) or visibility below 2 statute miles, from the
@@ -82,6 +87,7 @@ public sealed class MetarReader(ILogger<MetarReader> log)
                 {
                     _cache[icao] = (DateTime.UtcNow, dir, kt);
                     _low[icao] = (ceiling is { } ce && ce < 800) || (vis is { } vi && vi < 2);
+                    _cloud[icao] = (ceiling ?? double.NaN, m.TryGetProperty("temp", out var tp) && tp.ValueKind == JsonValueKind.Number ? tp.GetDouble() : double.NaN);
                 }
             }
             else lock (_cache) _cache[icao] = (DateTime.UtcNow, null, 0);

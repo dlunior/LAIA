@@ -9,7 +9,7 @@ namespace Laia.Server;
 /// Without a layout (or for the test buttons at an airport not read yet) a simple runway-only world is used.
 /// </summary>
 public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportStore airports, FlightSource source, SettingsStore settings,
-    SimBriefService simbrief, ServerState state, ScheduleStore schedules, NetworkStore network, WorldAirports worldAirports, RoutesDb routesDb, NasrDb nasrDb, AdsbHistory history, MetarReader metar, WindsAloftReader winds, LiveRunways liveRunways, SimBriefService simBrief, PerfMonitor perf, ILogger<TrafficEngine> log) : BackgroundService
+    SimBriefService simbrief, ServerState state, ScheduleStore schedules, RealTimetableService timetable, NetworkStore network, WorldAirports worldAirports, RoutesDb routesDb, NasrDb nasrDb, AdsbHistory history, MetarReader metar, WindsAloftReader winds, LiveRunways liveRunways, SimBriefService simBrief, PerfMonitor perf, ILogger<TrafficEngine> log) : BackgroundService
 {
     private readonly object _gate = new();
     private readonly List<TrafficWorld> _neighbours = new();
@@ -107,7 +107,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     /// <summary>Whether a field has airline passenger service: 14 or more passenger airline flights a week in its real
     /// schedule (not cargo); null until its schedule is known.</summary>
     private bool? PassengerService(string icao) =>
-        schedules.Get(icao) is { } sd ? sd.Legs.Count(l => !TrafficWorld.IsCargo(l.Airline)) >= 14 : null;
+        (timetable.For(icao) ?? schedules.Get(icao)) is { } sd ? sd.Legs.Count(l => !TrafficWorld.IsCargo(l.Airline)) >= 14 : null;
 
 
     private void UpdatePrep(TrafficWorld w, Prep? p, IReadOnlyList<TrafficWorld> neighbours)
@@ -408,6 +408,8 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     /// </summary>
     private TrafficWorld? _shadow;
     private string? _shadowDoneFor, _shadowKey;
+    private readonly HashSet<string> _shadowDone = new();
+    private readonly List<string> _shadowSummary = new();
     private readonly List<string> _shadowLog = new();
     private double _shadowStartWeek, _shadowStartedAt;
     private const double ShadowSecs = 3600;
@@ -425,15 +427,21 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         return (false, "Not found (it may already be gone).");
     }
 
-    public void RestartSelfTest() { lock (_gate) { _shadowDoneFor = null; _shadow = null; } }
+    public void RestartSelfTest() { lock (_gate) { _shadowDoneFor = null; _shadow = null; _shadowDone.Clear(); _shadowSummary.Clear(); } }
 
     private void SelfTestStep()
     {
-        var w = _world;
         if (_shadow is null)
         {
-            if (w is null || w.RunwayOnly || _prep is not { Ready: true } || w.Learned is null || w.Schedule is null) return;
-            _shadowKey = $"{typeof(TrafficEngine).Assembly.GetName().Version?.ToString(3)}|{w.Apt.Icao}";
+            // Every airport in play, one after another (plan: "a self-test across several airports"): the traffic
+            // airport first, then the destination prepared ahead and the neighbouring fields — each replayed as a full
+            // airport at Peak — so a change is judged at airports of different shapes, not one.
+            if (_world is null || _prep is not { Ready: true }) return;
+            var ver = typeof(TrafficEngine).Assembly.GetName().Version?.ToString(3);
+            var w = new[] { _world }.Concat(_ahead is null ? Array.Empty<TrafficWorld>() : new[] { _ahead }).Concat(_neighbours)
+                .FirstOrDefault(x => x.Learned is not null && x.Schedule is { Legs.Count: > 0 } && !_shadowDone.Contains($"{ver}|{x.Apt.Icao}"));
+            if (w is null) return;
+            _shadowKey = $"{ver}|{w.Apt.Icao}";
             if (_shadowDoneFor == _shadowKey) return;
             _shadowLog.Clear();
             TrafficWorld? s = null;
@@ -462,8 +470,15 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         if (sh.Time < ShadowSecs) return;
         _shadow = null;
         _shadowDoneFor = _shadowKey;
+        if (_shadowKey is not null) _shadowDone.Add(_shadowKey);
         var mins = (DateTime.UtcNow.Ticks - _shadowStartedAt) / TimeSpan.TicksPerMinute;
-        foreach (var line in Scorecard(_shadowLog, sh, mins)) log.LogInformation("{line}", line);
+        var card = Scorecard(_shadowLog, sh, mins);
+        foreach (var line in card) log.LogInformation("{line}", line);
+        // One line across the airports tested so far.
+        var landed = _shadowLog.Count(l => l.Contains(": landed runway"));
+        int C(string k) => _shadowLog.Count(l => l.Contains(k));
+        _shadowSummary.Add($"{sh.Apt.Icao} {landed} landings, break-offs {C("breaking off")}, go-arounds {C("going around")}, separation {C("SEPARATION")}, removed {C("removed after")}{(sh.SlotSummary is { } ss ? ", " + ss : "")}");
+        if (_shadowSummary.Count > 1) log.LogInformation("Self-test, all airports so far ({n}): {s}", _shadowSummary.Count, string.Join(" | ", _shadowSummary));
     }
 
     /// <summary>The self-test's scorecard: what happened in the hour, per 10 landings, and the worst moments.</summary>
@@ -496,7 +511,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
             $"trombones {Per(C("downwind extended"))}; holds {C("holding for")}, 360s {C("making a 360")}; separation warnings {C("SEPARATION")}; " +
             $"restrictions {met} of {tot} met; landings short of the gap needed {shortGaps}" + (extra.Count > 0 ? $", median {extra[extra.Count / 2]} s beyond it" : "") +
             $"; take-overs {takeovers.Count} ({(takeovers.Count > 0 ? 100 * real / takeovers.Count : 0)}% on real tracks, {C("sequenced: starts")} moved back, {tooHigh} too high); " +
-            $"failures {C("failed")}, removed {C("removed after")}",
+            $"failures {C("failed")}, removed {C("removed after")}" + (sh.SlotSummary is { } slotS ? $"; {slotS}" : ""),
         };
         foreach (var l in lines.Where(l => l.Contains("breaking off") || l.Contains("going around") || l.Contains("SEPARATION") || l.Contains("failed")).Take(8))
             res.Add("Self-test   " + l);
@@ -612,7 +627,42 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     }
 
     /// <summary>A whole-sky flight's altitude as drawn (its schedule's altitude, unless separation changed it).</summary>
-    private double NetAlt(Laia.Server.TrafficCore.NetLeg l, double clock, double baseAlt) => _sep.Alt(l, clock, baseAlt);
+    private double NetAlt(Laia.Server.TrafficCore.NetLeg l, double clock, double baseAlt) => _sep.Has(l) ? _sep.Alt(l, clock, baseAlt) : _sepFar.Alt(l, clock, baseAlt);
+    private double? NetRate(Laia.Server.TrafficCore.NetLeg l) => _sep.Rate(l) ?? _sepFar.Rate(l);
+
+    /// <summary>
+    /// Separation for the rest of the whole sky (plan: "separation everywhere in the whole sky, outside LAIA's own
+    /// airports"): every 10 s, every airborne whole-sky flight not near the user nor an airport's, region by region
+    /// (4° squares), by the same rules — 5 nm and 1,000 ft, one levelling off or moving 2,000 ft. Logged as a count.
+    /// </summary>
+    private void SeparateFarSky(AircraftState sim)
+    {
+        var worlds = Worlds().ToList();
+        var exclude = new HashSet<string>(worlds.SelectMany(x => x.Flights).Select(f => f.Reg).Where(r => r.Length > 0), StringComparer.OrdinalIgnoreCase);
+        var near = _enroute.Select(l => l.Id).ToHashSet();
+        var all = network.Around(NetClock, sim.Lat, sim.Lon, 4000, exclude, 8000)
+            .Where(p => p.AltFt >= 3000 && !near.Contains(p.Leg.Id) && !worlds.Any(w => Geo2.DistanceNm(p.Lat, p.Lon, w.Apt.Data.Lat, w.Apt.Data.Lon) < 30))
+            .ToList();
+        foreach (var p in all) _sepFar.Adopt(p.Leg, _sep);
+        foreach (var l in _enroute) _sep.Adopt(l, _sepFar);
+        var before = _sepFar.Limits;
+        foreach (var tile in all.GroupBy(p => (Math.Floor(p.Lat / 4), Math.Floor(p.Lon / 4))))
+        {
+            var legs = tile.Select(p => p.Leg).ToList();
+            if (legs.Count < 2) continue;
+            _sepFar.Update(NetClock, tile.Key.Item1 * 4 + 2, tile.Key.Item2 * 4 + 2, legs, Array.Empty<EnRouteSeparation.Obstacle>(), prune: false);
+        }
+        _sepFar.Prune(all.Select(p => p.Leg.Id).ToHashSet());
+        _farGiven += _sepFar.Limits - before;
+        if (Environment.TickCount64 / 1000.0 - _farLogAt > 900)
+        {
+            _farLogAt = Environment.TickCount64 / 1000.0;
+            log.LogInformation("Whole sky: {n} flights in the air away from you and the airports; {g} given a level to keep 5 nm / 1,000 ft apart in the last 15 minutes", all.Count, _farGiven);
+            _farGiven = 0;
+        }
+    }
+    private readonly EnRouteSeparation _sepFar = new();
+    private int _farGiven; private double _farLogAt = -9999, _farAt = -99;
 
     /// <summary>Separation for the whole-sky flights near the user (see EnRouteSeparation): against each other, the
     /// user and the airports' aircraft.</summary>
@@ -640,7 +690,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     {
         if (NetworkModel.At(l, clock) is not { } p) return null;
         var vs = NetworkModel.At(l, clock + 0.25) is { } q ? (q.AltFt - p.AltFt) * 4 : 0;
-        if (_sep.Rate(l) is { } r) { vs = r; p = p with { AltFt = _sep.Alt(l, clock, p.AltFt) }; }
+        if (NetRate(l) is { } r) { vs = r; p = p with { AltFt = NetAlt(l, clock, p.AltFt) }; }
         var gs = p.GsKt;
         return new TrafficAircraft
         {
@@ -686,10 +736,24 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 if (NetworkModel.At(l, clock) is not { } p) continue;
                 if (Geo2.DistanceNm(p.Lat, p.Lon, w.Apt.Data.Lat, w.Apt.Data.Lon) > 80) continue;
                 var a = NetAlt(l, clock, p.AltFt);
-                var vs = _sep.Rate(l) ?? (NetworkModel.At(l, clock + 0.25) is { } q ? (q.AltFt - p.AltFt) * 4 : 0);
+                var vs = NetRate(l) ?? (NetworkModel.At(l, clock + 0.25) is { } q ? (q.AltFt - p.AltFt) * 4 : 0);
                 list.Add(new TrafficWorld.Foreign(l.Callsign, "en route", vs < -300 ? "arrival" : "departure", w.Apt.Map.ToXY(p.Lat, p.Lon), a, vs, p.GsKt, p.Heading, p.Phase, true));
             }
             w.Others = list;
+            // The other airports' landing runways in use (in this airport's frame), within 40 nm: the approach here is
+            // picked to keep clear of their finals when the ATIS doesn't name one (LGA's RNAV X or Y 31 by JFK's flow).
+            var finals = new List<(V2 thr, double hdg, string who)>();
+            foreach (var o in worlds)
+            {
+                if (o == w || o.ArrRwys.Count == 0) continue;
+                if (Geo2.DistanceNm(o.Apt.Data.Lat, o.Apt.Data.Lon, w.Apt.Data.Lat, w.Apt.Data.Lon) > 40) continue;
+                foreach (var r in o.ArrRwys)
+                {
+                    var (la, lo) = o.Apt.Map.ToLatLon(r.Threshold);
+                    finals.Add((w.Apt.Map.ToXY(la, lo), r.Heading, $"{o.Apt.Icao} {r.Ident}"));
+                }
+            }
+            w.NeighbourFinals = finals;
         }
     }
 
@@ -719,7 +783,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         {
             Id = f.Id, Callsign = f.Callsign, Airline = f.Airline, Type = f.Type, Model = f.Title, Lat = lat, Lon = lon, AltFt = f.AltFt,
             AglFt = f.OnGround ? 0 : Math.Max(0, f.AltFt - ground), OnGround = f.OnGround, TimeMs = _stampMs, Heading = f.Heading,
-            Pitch = f.Pitch, Bank = f.Bank, GroundSpeed = f.Gs, VerticalSpeed = f.Vs, GearDown = f.Gear, Phase = f.Phase, Lights = f.Lights,
+            Pitch = f.Pitch, Bank = f.Bank, GroundSpeed = f.Gs, VerticalSpeed = f.Vs, GearDown = f.Gear, Phase = f.Phase, Lights = w.ShownLights(f),
         };
     }
 
@@ -752,6 +816,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                         seq = f.Kind == "arrival" && !f.OnGround ? f.Seq : 0,
                         depSeq = f.Kind == "departure" && f.OnGround ? f.DepSeq : 0,
                         mgr = f.Kind == "arrival" && !f.OnGround && f.Mgr.Length > 0 ? f.Mgr : null,
+                        slotdev = f.Kind == "arrival" && !f.OnGround && !double.IsNaN(f.SlotDev) ? Math.Round(f.SlotDev) : (double?)null,
                         gapnm = f.Kind == "arrival" && !f.OnGround && !double.IsNaN(f.GapNm) ? Math.Round(f.GapNm, 1) : (double?)null,
                         dth = f.Kind == "arrival" && !f.OnGround ? Math.Round((f.ThrS - f.S) / Geo2.MPerNm, 1) : (double?)null,
                         fixes = f.Kind == "arrival" && !f.OnGround && f.FixEtas.Count > 0
@@ -1048,6 +1113,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 })).Where(f => f.Kind != "parked").ToList(),
                 parked = Worlds().Sum(x => x.Flights.Count(f => f.Kind == "parked")),
                 windsAloft = "Winds aloft: " + winds.Status,
+                timetable = char.ToUpper(timetable.Status[0]) + timetable.Status[1..],
                 learned = history.Status + (w is not null && history.Profile(w.Apt.Icao) is { } lp ? "; " + lp.Describe() : ""),
                 neighbours = _neighbours.Count == 0 ? null : $"({_neighbourHow}) " + string.Join(", ", _neighbours.Select(n => $"{n.Apt.Icao} ({n.Flights.Count} flying{(n.PredictionSummary is { } ps ? "; predictions: " + ps : "")})")),
                 sky = network.Count == 0 ? network.Status : $"{network.AirborneNow(w?.ScheduleClock ?? WeekMinuteNow()):N0} flights in the air worldwide · {network.Status}",
@@ -1384,6 +1450,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                     if (now - _othersAt > 1) { _othersAt = now; ShareTraffic(); Part("sharing between airports"); }
                     if (live) UpdateFlCorrection(sim!);
                     if (live && now - _enrouteAt > 2) { _enrouteAt = now; _enroute = EnRoute(sim!); Part("en route"); }
+                    if (live && now - _farAt > 10 && Level != TrafficLevel.Off) { _farAt = now; try { SeparateFarSky(sim!); } catch (Exception ex) { log.LogWarning("Whole-sky separation failed: {msg}", ex.Message); } Part("whole sky"); }
                     if (live) UpdateWinds(sim!, now);
                     if (now - _routesAt >= 60 && routesDb.Routes is { } prr && nasrDb.Nav is { } navr) { _routesAt = now; try { network.ApplyRoutes(prr, navr); } catch (Exception ex) { log.LogInformation("Whole-sky routes failed: {msg}", ex.Message); } }
                     if (now - _meterAt >= 30) { _meterAt = now; try { MeterArrivals(); } catch (Exception ex) { log.LogInformation("Metering failed: {msg}", ex.Message); } Part("metering"); }
@@ -1399,6 +1466,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                             if (metar.Wind(w.Apt.Icao) is { } mw) w.Wind = new Wind(mw.dir ?? w.Wind.FromDeg, mw.kt);
                             else if (dNm < 15 && sim.AltitudeFt < w.Apt.ElevationFt + 5000) w.Wind = new Wind(sim.WindDirection, sim.WindSpeed);
                             w.LowWeather = metar.LowWeather(w.Apt.Icao);
+                            (w.CloudBaseFt, w.SurfaceTempC) = metar.Cloud(w.Apt.Icao);
                             w.SafetyLogic = SafetyLogicAirports.Contains(w.Apt.Icao);
                             w.UserPos = w.Apt.Map.ToXY(sim.Lat, sim.Lon);
                             w.UserOnGround = sim.OnGround;
@@ -1416,7 +1484,8 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                         {
                             w.Level = Level;
                             // The installed AIG schedule is the real one to follow (exact models and registrations).
-                            if (w.Schedule is null) w.Schedule = schedules.Get(w.Apt.Icao);
+                            // Or the real timetable from ADS-B, where it's good (user, 24 Nov).
+                            if (w.Schedule is null) w.Schedule = timetable.For(w.Apt.Icao) ?? schedules.Get(w.Apt.Icao);
                             if (w == _world || w == _ahead) w.Gates = source.Gates(w.Apt.Icao);
                             w.Atis = Atis.Get(w.Apt.Icao);
                             if (w.Rules is null && Aaup.Get(w.Apt.Icao) is { } aaup)

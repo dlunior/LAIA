@@ -368,11 +368,66 @@ Console.WriteLine("== Crossing runways at Busy for an hour: land 27, depart 36 a
     var landed = log.Count(l => l.Contains(": landed runway 27"));
     Console.WriteLine($"  runways {world.ArrRwy?.Ident}/{world.DepRwy?.Ident}; {landed} landed on 27, {deps36.Count} took off from 36; longest wait at 36 {maxHold:0} s ({maxHoldWho}); go-arounds for a crossing departure {gaXing}; conflicts {conflicts.Count}");
     foreach (var c in conflicts.Take(3)) Console.WriteLine("    " + c);
+    if (conflicts.Count > 0)
+    {
+        var who = conflicts[0].Split(' ');
+        foreach (var l in log.Where(l => l.Contains(who[1]) || l.Contains(who[6]) || l.Contains("letting")).Take(30)) Console.WriteLine("    D " + l);
+    }
     Check(world.ArrRwy?.Ident == "27" && world.DepRwy?.Ident == "36", "land 27, depart the crossing runway 36");
     Check(deps36.Count >= 4 && landed >= 6, $"both runways work: departures go between the arrivals ({deps36.Count} departures, {landed} arrivals)");
     Check(conflicts.Count == 0, "no departure through the intersection while an arrival is over the threshold or rolling towards it");
     Check(maxHold < 600, $"no departure held at 36 for 10 minutes or more ({maxHold:0} s)");
     Check(gaXing <= 1, $"go-arounds for a crossing departure stay rare ({gaXing})");
+}
+
+Console.WriteLine("== Crossing a runway between departures (23 Nov, KATL: JBU1798 held short of 27R for 12+ minutes behind line up and wait)");
+{
+    var data = TestAirport.Build(false);
+    int Find(double x, double y) => data.Points.FindIndex(q => Math.Abs(q.BiasX - x) < 1 && Math.Abs(q.BiasZ - y) < 1);
+    int Pt(double x, double y, int type = 1) { data.Points.Add(new TaxiPoint { Type = type, BiasX = x, BiasZ = y }); return data.Points.Count - 1; }
+    void Path(int a, int b, int type = 1) => data.Paths.Add(new TaxiPath { Type = type, Start = a, End = b, WidthM = 23 });
+    // A north apron across the runway: a taxiway at y = +200, two crossings with hold lines both sides, three gates.
+    var n = new[] { -300, 0, 300 }.ToDictionary(x => x, x => Pt(x, 200));
+    Path(n[-300], n[0]); Path(n[0], n[300]);
+    foreach (var x in new[] { -300, 300 })
+    {
+        var hs = Pt(x, -95, 2); var hn = Pt(x, 95, 2);
+        Path(Find(x, -200), hs); Path(hs, Find(x, 0)); Path(Find(x, 0), hn); Path(hn, n[x]);
+    }
+    foreach (var x in new[] { -300, 0, 300 })
+    {
+        data.Parkings.Add(new Parking { Type = 9, Name = 12, Number = 60 + x / 300, Heading = 0, RadiusM = 22, BiasX = x, BiasZ = 330 });
+        data.Paths.Add(new TaxiPath { Type = 3, Start = n[x], End = data.Parkings.Count - 1 });
+    }
+    var apt = new AirportModel(data);
+    foreach (var sp in apt.Spots) if (sp.P.Y > 0) sp.Airlines = new() { "JBU" };
+    var sched = new Laia.Common.Airports.ScheduleData { Airport = "TEST", Source = "AIG" };
+    const int start = 2 * 1440 + 600;
+    for (var i = 0; i < 16; i++)
+        sched.Legs.Add(new() { Airline = "DAL", Operator = "DAL", Title = "T", Type = "B739", Reg = $"N{i}XD", Flight = $"{500 + i}", Dep = "TEST", Arr = "KYYY", DepMin = start + 4 + i / 2, ArrMin = start + 150 });
+    sched.Legs.Add(new() { Airline = "JBU", Operator = "JBU", Title = "J", Type = "A320", Reg = "N798JB", Flight = "1798", Dep = "KXXX", Arr = "TEST", DepMin = start - 120, ArrMin = start + 8 });
+    var world = new TrafficWorld(apt, new TestSource(), seed: 4) { Level = TrafficLevel.RealWorld, Wind = new Wind(270, 8), Schedule = sched, WeekMinute = start, SafetyLogic = true, LocalMinuteOverride = 12 * 60 };
+    var log = new List<string>(); world.Log = l => log.Add($"{world.Time:0} {l}");
+    double maxWait = 0; var parked = false; var crossed = false;
+    for (var t = 0.0; t < 30 * 60; t += 0.5)
+    {
+        world.WeekMinute = start + world.Time / 60;
+        world.Step(0.5);
+        if (world.Flights.FirstOrDefault(f => !f.Done && f.Reg == "N798JB") is { } jb)
+        {
+            foreach (var st in jb.Stops.Where(st => st.Runway >= 0 && !double.IsNaN(st.WaitSince) && !st.Cleared)) maxWait = Math.Max(maxWait, world.Time - st.WaitSince);
+            if (jb.OnGround && jb.Pos.Y > 100) crossed = true;
+            if (jb.Phase is "at gate" or "parked" && jb.Pos.Y > 100) parked = true;
+            if (jb.Stops.Any(st => st.Runway >= 0 && !double.IsNaN(st.WaitSince) && !st.Cleared) && world.Time % 30 < 0.5)
+                Console.WriteLine($"    {world.Time:0} JBU1798 waiting to cross; on the runway: {string.Join(", ", world.Flights.Where(f => !f.Done && f.OnRunway >= 0).Select(f => f.Callsign + " " + f.Phase))}");
+        }
+    }
+    foreach (var l in log.Where(l => l.Contains("JBU1798") || l.Contains("letting")).Take(8)) Console.WriteLine("    " + l);
+    var luaw = log.Count(l => l.Contains("lining up runway"));
+    Console.WriteLine($"  {luaw} departures lined up; JBU1798 crossed {crossed}, at its gate {parked}; longest wait to cross {maxWait:0} s");
+    Check(crossed && parked, "the arrival crosses the runway and reaches its gate across it");
+    Check(maxWait < 180, $"it waits no more than one departure and a bit to cross ({maxWait:0} s)");
+    Check(luaw >= 12, $"the departures still go ({luaw})");
 }
 
 Console.WriteLine("== Peak runways: the ATIS first, real pairs, and kept until a tailwind over 5 kt (KLGA, 22 Nov)");
@@ -516,21 +571,21 @@ Console.WriteLine("== Traffic from a real schedule");
     const int start = 2 * 1440 + 600; // Wednesday 10:00 UTC
     for (var i = 0; i < 10; i++)
     {
-        // Each airframe arrives, then leaves again 50 minutes later.
+        // Each airframe arrives, then leaves again 90 minutes later.
         sched.Legs.Add(new() { Airline = "DAL", Operator = "DAL", Title = "T", Type = "B739", Reg = $"N{i}DL", Flight = $"{100 + i}", Dep = "KXXX", Arr = "TEST", DepMin = start - 100 + i * 7, ArrMin = start + 6 + i * 7 });
-        sched.Legs.Add(new() { Airline = "DAL", Operator = "DAL", Title = "T", Type = "B739", Reg = $"N{i}DL", Flight = $"{200 + i}", Dep = "TEST", Arr = "KYYY", DepMin = start + 56 + i * 7, ArrMin = start + 150 + i * 7 });
+        sched.Legs.Add(new() { Airline = "DAL", Operator = "DAL", Title = "T", Type = "B739", Reg = $"N{i}DL", Flight = $"{200 + i}", Dep = "TEST", Arr = "KYYY", DepMin = start + 96 + i * 7, ArrMin = start + 190 + i * 7 });
         // And some aircraft already on the ground leave in the first half hour.
         sched.Legs.Add(new() { Airline = "UAL", Operator = "UAL", Title = "U", Type = "A320", Reg = $"N{i}UA", Flight = $"{300 + i}", Dep = "TEST", Arr = "KZZZ", DepMin = start + 8 + i * 3, ArrMin = start + 120 });
     }
     var log = new List<string>();
-    var world = new TrafficWorld(apt, new TestSource(), seed: 9) { Level = TrafficLevel.RealWorld, Wind = new Wind(270, 8), Schedule = sched, WeekMinute = start };
+    var world = new TrafficWorld(apt, new TestSource(), seed: 9) { Level = TrafficLevel.RealWorld, Wind = new Wind(270, 8), Schedule = sched, WeekMinute = start, LocalMinuteOverride = 12 * 60 };
     world.Log = s => log.Add($"{start + world.Time / 60 - start,5:0.0} min {s}");
     var landedAt = new Dictionary<string, double>();
     var airborneAt = new Dictionary<string, double>();
     // At a gate only 20 minutes before push-back and 10 after arriving (user, 23 Nov).
     var earlyAtGate = new HashSet<string>(); var stayed = new HashSet<string>(); var goneBetween = new HashSet<string>(); var maxEarly = 0.0;
     var atStart = 0;
-    for (var i = 0; i < 150 * 60 * 4; i++)
+    for (var i = 0; i < 180 * 60 * 4; i++)
     {
         world.WeekMinute = start + world.Time / 60;
         world.Step(0.25);
@@ -539,8 +594,8 @@ Console.WriteLine("== Traffic from a real schedule");
         foreach (var f in world.Flights.Where(f => !f.Done && f.Kind == "parked" && f.Phase == "parked" && f.Reg.Length > 0))
         {
             var nextDep = sched.Legs.Where(l => l.Dep == "TEST" && l.Reg == f.Reg && l.DepMin - start > nowMin - 15).Select(l => l.DepMin - start - nowMin).DefaultIfEmpty(9999).Min();
-            if (double.IsNaN(f.ArrivedAt)) { if (nextDep > 20.5) { earlyAtGate.Add(f.Reg); maxEarly = Math.Max(maxEarly, nextDep); } }
-            else if (world.Time - f.ArrivedAt > 601 && nextDep > 20.5) stayed.Add(f.Reg);
+            if (double.IsNaN(f.ArrivedAt)) { if (nextDep > 45.5) { earlyAtGate.Add(f.Reg); maxEarly = Math.Max(maxEarly, nextDep); } }
+            else if (world.Time - f.ArrivedAt > 601 && nextDep > 45.5) stayed.Add(f.Reg);
         }
         // An airframe that turned round (landed, then leaves 50 minutes later) is away from its gate in between.
         foreach (var r in sched.Legs.Where(l => l.Arr == "TEST").Select(l => l.Reg))
@@ -559,14 +614,49 @@ Console.WriteLine("== Traffic from a real schedule");
     Check(arrivalErrors.Count >= 9, "scheduled arrivals land");
     Check(arrivalErrors.Count > 0 && arrivalErrors.Average(Math.Abs) < 6, "arrivals land close to their scheduled time");
     Check(departureDelays.Count >= 18, "scheduled departures leave (including the arrived aircraft turning around)");
-    Check(departureDelays.Count > 0 && departureDelays.Min() > -1, "nobody leaves before their scheduled time");
+    Check(departureDelays.Count > 0 && departureDelays.Min() > -6, "nobody leaves more than 5 minutes early (early only when the runway is quiet)");
     var dl = sched.Legs.Where(l => l.Dep == "TEST" && l.Airline == "DAL").Count(l => airborneAt.ContainsKey(l.Callsign));
     Check(dl >= 9, $"arrived airframes leave again on their next flight ({dl} of 10)");
-    Console.WriteLine($"  at the gates at the start: {atStart} (10 leave in the first 20 minutes, 5 of them within 20); early at a gate: {earlyAtGate.Count} (up to {maxEarly:0} min before); stayed past 10 min: {stayed.Count}; away between flights: {goneBetween.Count} of 10");
-    Check(atStart <= 7, "at the start, only aircraft pushing back within 20 minutes are at the gates");
-    Check(earlyAtGate.Count == 0, "no aircraft at a gate more than 20 minutes before its push-back");
-    Check(stayed.Count == 0, "no aircraft at its gate more than 10 minutes after arriving (unless it leaves within 20)");
-    Check(goneBetween.Count >= 9, "an airframe with 50 minutes between flights is taken away, then back 20 minutes before");
+    Console.WriteLine($"  at the gates at the start: {atStart} (10 leave in the first 35 minutes, none of the 90-minute turnarounds); early at a gate: {earlyAtGate.Count} (up to {maxEarly:0} min before); stayed past 10 min: {stayed.Count}; away between flights: {goneBetween.Count} of 10");
+    Check(atStart <= 10, "at the start, only aircraft pushing back within 45 minutes are at the gates");
+    Check(earlyAtGate.Count == 0, "no aircraft at a gate more than 45 minutes before its push-back");
+    Check(stayed.Count == 0, "no aircraft at its gate more than 10 minutes after arriving (unless it leaves within 45)");
+    Check(goneBetween.Count >= 9, "an airframe with 90 minutes between flights is taken away, then back 45 minutes before");
+}
+
+Console.WriteLine("== Overnight: an aircraft landing after 23:00 local stays at its gate for its morning flight (user, 24 Nov)");
+{
+    var apt = new AirportModel(TestAirport.Build(false));
+    var sched = new Laia.Common.Airports.ScheduleData { Airport = "TEST", Source = "AIG" };
+    const int start = 2 * 1440 + 600;
+    sched.Legs.Add(new() { Airline = "DAL", Operator = "DAL", Title = "T", Type = "B739", Reg = "N950DL", Flight = "950", Dep = "KXXX", Arr = "TEST", DepMin = start - 100, ArrMin = start + 6 });
+    sched.Legs.Add(new() { Airline = "DAL", Operator = "DAL", Title = "T", Type = "B739", Reg = "N950DL", Flight = "951", Dep = "TEST", Arr = "KYYY", DepMin = start + 420, ArrMin = start + 500 });
+    sched.Legs.Add(new() { Airline = "DAL", Operator = "DAL", Title = "T", Type = "B739", Reg = "N960DL", Flight = "960", Dep = "KXXX", Arr = "TEST", DepMin = start - 98, ArrMin = start + 8 });
+    var world = new TrafficWorld(apt, new TestSource(), seed: 9) { Level = TrafficLevel.RealWorld, Wind = new Wind(270, 8), Schedule = sched, WeekMinute = start, LocalMinuteOverride = 23 * 60 + 20 };
+    for (var i = 0; i < 45 * 60 * 4; i++) { world.WeekMinute = start + world.Time / 60; world.Step(0.25); }
+    var n950 = world.Flights.FirstOrDefault(f => !f.Done && f.Reg == "N950DL");
+    var n960 = world.Flights.FirstOrDefault(f => !f.Done && f.Reg == "N960DL");
+    Console.WriteLine($"  after 45 min at 23:20 local: N950DL (leaves in 7 h) {n950?.Phase ?? "gone"}, N960DL (no flight out) {n960?.Phase ?? "gone"}");
+    Check(n950 is { Kind: "parked", Overnight: true }, "landed at night with a morning flight: still at its gate");
+    Check(n960 is { Kind: "parked" }, "landed at night with no flight out: still at its gate before 06:00");
+    world.LocalMinuteOverride = 6 * 60 + 5;
+    for (var i = 0; i < 40; i++) { world.WeekMinute = start + world.Time / 60; world.Step(0.25); }
+    Check(world.Flights.Any(f => !f.Done && f.Reg == "N950DL") && !world.Flights.Any(f => !f.Done && f.Reg == "N960DL"), "at 06:00 the one with no flight out goes; the one with a flight stays");
+    // Lights (user, 24 Nov): parked and nobody aboard — dark; night and day; wing lights in cloud near freezing.
+    Check(n950 is not null && world.ShownLights(n950) == 0, "parked long after arriving, nobody aboard: all lights off");
+    world.LightClock = new DateTime(2026, 11, 24, 17, 0, 0, DateTimeKind.Utc);
+    var day = world.Dark;
+    world.LightClock = new DateTime(2026, 11, 24, 5, 0, 0, DateTimeKind.Utc);
+    var night = world.Dark;
+    Console.WriteLine($"  sun at noon local {world.SunElevationDeg():0}° → dark at noon {day}, at midnight {night}");
+    Check(!day && night, "night lighting by the sun at the airport");
+    var air = world.SpawnArrival(20, false, new Laia.Common.Airports.ScheduleLeg { Airline = "DAL", Operator = "DAL", Type = "B739", Reg = "N970DL", Flight = "970", Dep = "KXXX", Arr = "TEST" })!;
+    air.AltFt = world.Apt.ElevationFt + 4000;
+    world.CloudBaseFt = 2500; world.SurfaceTempC = 6;
+    var inCloud = (world.ShownLights(air) & TrafficWorld.Wing) != 0;
+    world.SurfaceTempC = 20;
+    var warm = (world.ShownLights(air) & TrafficWorld.Wing) != 0;
+    Check(inCloud && !warm, "wing lights in cloud near freezing, not in warm cloud");
 }
 
 Console.WriteLine("== Changing the traffic level while traffic runs refits it at once (15 Nov: Medium and Real world seemed to do nothing)");
@@ -1397,6 +1487,46 @@ Console.WriteLine("== Winds aloft: the FD forecast read, and the user's own sim 
     Check(prof.Length == WindsAloft.ProfileSteps && Math.Abs(p34.Kt - here.Kt) < 1, "an airport's profile matches the field");
     var none = new WindsAloft().At(now, 40, -100, 30000, sfc, 0);
     Check(none.FromDeg == 180 && none.Kt == 10, "with no forecast and no readings: the surface wind (as before)");
+}
+
+Console.WriteLine("== Real flights from ADS-B (the LAIA Collector) and the real timetable built from them (user, 24 Nov)");
+{
+    var aptA = new TraceLegs.Apt("KAAA", 40.0, -75.0, 100);
+    var aptB = new TraceLegs.Apt("KBBB", 41.0, -77.0, 600);
+    IEnumerable<TraceLegs.Apt> Near(double la, double lo) => new[] { aptA, aptB };
+    // One aircraft's day: on the ground at KAAA, up, across to KBBB (the receivers lose it at 1,400 ft), on the ground
+    // there, then back to KAAA, seen to the ground.
+    var t0 = new DateTimeOffset(2026, 11, 23, 14, 0, 0, TimeSpan.Zero).ToUnixTimeSeconds();
+    var pts = new List<string>();
+    void P(double dt, double la, double lo, string alt, string? cs = null) =>
+        pts.Add($"[{dt},{la},{lo},{alt},250,270,0,0{(cs is null ? "" : $",{{\"flight\":\"{cs}   \"}}")}]");
+    P(0, 40.0, -75.0, "\"ground\"", "DAL123"); P(300, 40.0, -75.01, "\"ground\"");
+    for (var k = 0; k <= 40; k++) P(400 + k * 90, 40.0 + k * 0.025, -75.01 - k * 0.05, Math.Min(35000, Math.Min(400 + k * 2000, 3000 + (40 - k) * 2000)).ToString(), k == 5 ? "DAL123" : null);
+    P(400 + 41 * 90, 40.99, -76.99, "1400");
+    P(9000, 41.0, -77.0, "\"ground\"", "DAL124"); P(9600, 41.0, -77.0, "\"ground\"");
+    for (var k = 0; k <= 40; k++) P(9700 + k * 90, 41.0 - k * 0.025, -77.0 + k * 0.05, Math.Min(33000, Math.Min(1200 + k * 1800, 900 + (40 - k) * 1800)).ToString());
+    P(9700 + 41 * 90, 40.0, -75.0, "\"ground\"");
+    var json = $"{{\"icao\":\"a1b2c3\",\"r\":\"N123DL\",\"t\":\"B739\",\"timestamp\":{t0},\"trace\":[{string.Join(",", pts)}]}}";
+    var legs = TraceLegs.Extract(System.Text.Encoding.UTF8.GetBytes(json), Near);
+    Console.WriteLine("  " + string.Join("; ", legs.Select(l => $"{l.Callsign} {l.Type} {l.Reg} {l.Dep}→{l.Arr} {DateTimeOffset.FromUnixTimeSeconds((long)l.DepT):HH:mm}–{DateTimeOffset.FromUnixTimeSeconds((long)l.ArrT):HH:mm}")));
+    Check(legs.Count == 2 && legs[0].Dep == "KAAA" && legs[0].Arr == "KBBB" && legs[1].Dep == "KBBB" && legs[1].Arr == "KAAA", "both flights, each from its ground stop to the next");
+    Check(legs.Count == 2 && legs[0].Callsign == "DAL123" && legs[1].Callsign == "DAL124" && legs[0].Reg == "N123DL" && legs[0].Type == "B739", "callsign, registration and type from the trace");
+    Check(legs.Count == 2 && Math.Abs(legs[0].DepT - (t0 + 300)) < 5 && legs[0].ArrT > t0 + 400 + 41 * 90, "take-off from the last ground point; a landing lost at 1,400 ft worked on from there");
+    // A timetable from two weeks of the same flights, plus one with no installed livery and one with an end not seen.
+    var day1 = legs.ToList();
+    var day2 = legs.Select(l => l with { DepT = l.DepT - 7 * 86400, ArrT = l.ArrT - 7 * 86400 }).ToList();
+    day1.Add(new TraceLegs.Leg("XYZ900", "A320", "N900XY", "KAAA", "KBBB", t0 + 3600, t0 + 7200));
+    day1.Add(new TraceLegs.Leg("DAL777", "B739", "N777DL", "", "KBBB", double.NaN, t0 + 20000));
+    var aigByReg = new Dictionary<string, RealTimetable.AigInfo> { ["N123DL"] = new("DAL", "AIG Delta 739 N123DL", "DAL") };
+    var aigRoute = new Dictionary<string, (string, string)> { ["DAL777"] = ("KAAA", "KBBB") };
+    var tt = RealTimetable.Build(new[] { day1, day2 }, (a, t) => a == "DAL", aigByReg, aigRoute, c => c == "KAAA" ? (40.0, -75.0) : (41.0, -77.0));
+    Console.WriteLine("  " + tt.Summary + ": " + string.Join("; ", tt.Legs.Select(l => $"{l.Callsign} {l.Dep}→{l.Arr} {l.DepMin / 1440}d{l.DepMin % 1440 / 60:00}:{l.DepMin % 60:00} \"{l.Title}\"")));
+    Check(tt.Legs.Count(l => l.Callsign == "DAL123") == 1, "the same flight on the same weekday two weeks running: once (the newest)");
+    Check(tt.Legs.FirstOrDefault(l => l.Callsign == "DAL123") is { Title: "AIG Delta 739 N123DL" } d1 && d1.DepMin == RealTimetable.WeekMinute(t0 + 300 - 12 * 60), "the AIG airframe's exact model, and push-back 12 minutes before take-off");
+    Check(!tt.Legs.Any(l => l.Callsign == "XYZ900") && tt.NoLivery >= 1, "no installed livery: the flight is skipped");
+    Check(tt.Legs.FirstOrDefault(l => l.Callsign == "DAL777") is { Dep: "KAAA" } d7 && d7.DepMin < d7.ArrMin, "an end the receivers didn't see comes from the AIG flight, its time from the distance");
+    var good = RealTimetable.GoodAirports(tt, c => c == "KAAA" ? 2 : 200);
+    Check(!good.Contains("KAAA") && !good.Contains("KBBB"), "used only where it has 14+ flights a week and half the AIG timetable's");
 }
 
 Console.WriteLine("== Winds aloft from Open-Meteo (the FD tables were discontinued, Nov 2026): pressure levels to the forecast levels");

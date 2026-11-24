@@ -63,6 +63,11 @@ public sealed class Flight
     public double Timer, PhaseTime, Age;
     /// <summary>When it parked at its gate after landing here (NaN: it didn't).</summary>
     public double ArrivedAt = double.NaN;
+    /// <summary>Parked after landing between 23:00 and 06:00 airport local time: stays for its next flight (user, 24 Nov).</summary>
+    public bool Overnight;
+    public bool NoTurnLogged;
+    /// <summary>When its departure pushes back (world time), for one placed at its gate ahead of it.</summary>
+    public double PushAt = double.NaN;
     public double LiftoffTime = -1;
     public int OnRunway = -1;
     public int Reserve = -1;
@@ -189,6 +194,9 @@ public sealed class Flight
     /// <summary>Arrival manager: seconds this arrival must lose to land at its slot behind the one ahead (0 = none),
     /// and whether it's flying slower to lose it.</summary>
     public double Delay; public bool Slowed;
+    /// <summary>Constant traffic manager: how far its predicted landing (at the speeds and route it's flying) is from its
+    /// slot (s; + late, − early), and what it was at 100, 40 and 20 nm to go (NaN until passed).</summary>
+    public double SlotDev = double.NaN, Dev100 = double.NaN, Dev40 = double.NaN, Dev20 = double.NaN;
     /// <summary>Arrival manager: the speed reduction assigned for the sequence (kt below the normal speeds, far out),
     /// whether its landing order is fixed (frozen, inside ~15 minutes), the slot it was frozen with, what the manager
     /// is doing with it (for the map), the gap to the one ahead, and when it was last vectored.</summary>
@@ -839,6 +847,7 @@ public sealed partial class TrafficWorld
                     if (f.Rwy != was0) { f.RwyCheckAt = Time; continue; }   // placed on its new runway next pass
                 }
                 f.Frozen = true; f.FrozenSlot = slot;
+                TrackSlot(f, slot);
                 if (Time - f.RwyCheckAt >= 30 && !(Planner && ArrRwys.Count >= 2)) { f.RwyCheckAt = Time; try { BalanceRunway(f); } catch { } }
                 if (Time - f.SlowAt >= 5) { f.SlowAt = Time; try { AssignSequenceSpeed(f); } catch (Exception ex) { Log($"{f.Callsign}: speed planning failed: {ex.Message}"); } }
                 f.Slowed = f.SlowDv > 0;
@@ -901,8 +910,8 @@ public sealed partial class TrafficWorld
     // ------------------------------------------------------------------ real schedule
 
     private readonly HashSet<string> _done = new();
-    /// <summary>Minutes an aircraft is at its gate before push-back, and after arriving (user, 23 Nov).</summary>
-    public const int GateBeforeMin = 20, GateAfterMin = 10;
+    /// <summary>Minutes an aircraft is at its gate before push-back (user, 24 Nov: 45, was 20), and after arriving (user, 23 Nov).</summary>
+    public const int GateBeforeMin = 45, GateAfterMin = 10;
     private int _gateGone; private double _gateLogAt = -1;
     private bool _schedStarted;
 
@@ -927,6 +936,26 @@ public sealed partial class TrafficWorld
             return (int)(((utcMin + offMin) % 1440 + 1440) % 1440);
         }
     }
+
+    /// <summary>The airport's local time on the schedule's clock (minutes of the day): the real clock live, the replayed
+    /// one at Peak, the test's in tests.</summary>
+    public int LocalSchedMinute
+    {
+        get
+        {
+            if (LocalMinuteOverride is { } o) return o;
+            var lon = Apt.Data.Lon;
+            var id = lon > -87.6 ? "America/New_York" : lon > -101 ? "America/Chicago" : lon > -114.5 ? "America/Denver" : lon > -130 ? "America/Los_Angeles" : lon > -150 ? "America/Anchorage" : "Pacific/Honolulu";
+            double offMin;
+            try { offMin = TimeZoneInfo.FindSystemTimeZoneById(id).GetUtcOffset(DateTime.UtcNow).TotalMinutes; }
+            catch { offMin = Math.Round(lon / 15) * 60; }
+            var utcMin = WeekMinute >= 0 ? ((SchedNow % 1440) + 1440) % 1440 : DateTime.UtcNow.Hour * 60 + DateTime.UtcNow.Minute;
+            return (int)(((utcMin + offMin) % 1440 + 1440) % 1440);
+        }
+    }
+
+    /// <summary>Between 23:00 and 06:00 at the airport.</summary>
+    public bool NightNow => LocalSchedMinute is >= 23 * 60 or < 6 * 60;
 
     /// <summary>How far out arrivals are taken over from the whole sky (nm).</summary>
     /// <summary>How far out arrivals are taken over from the whole sky (user, 19 Nov: "Let's push the bar... 400 —
@@ -1530,9 +1559,12 @@ public sealed partial class TrafficWorld
         {
             if (f.Done || f.Test || f.Kind != "parked" || f.Phase != "parked" || f == UserArr) continue;
             if (!double.IsNaN(f.ArrivedAt) && Time - f.ArrivedAt < GateAfterMin * 60) continue;
-            var next = deps.Any(l => !_done.Contains(Key(l, 'D')) && Until(l.DepMin) is > -15 and <= GateBeforeMin
+            // Parked for the night (landed after 23:00 local, user 24 Nov: "after 11PM local time of the airport change
+            // arriving aircraft to not despawn"): it stays for its next flight; with none in the next 12 hours, until 06:00.
+            var within = f.Overnight ? 720 : GateBeforeMin;
+            var next = deps.Any(l => !_done.Contains(Key(l, 'D')) && Until(l.DepMin) is var ud && ud > -15 && ud <= within
                 && (f.Reg.Length > 0 ? l.Reg == f.Reg : l.Callsign == f.Callsign));
-            if (next) continue;
+            if (next || (f.Overnight && NightNow)) continue;
             f.Done = true; _gateGone++;
         }
         if (Time - _gateLogAt >= 900 && (_gateGone > 0 || _gateLogAt < 0))
@@ -1544,7 +1576,7 @@ public sealed partial class TrafficWorld
         foreach (var l in deps)
         {
             var u = Until(l.DepMin);
-            if (u > 3 || u < -15) continue;
+            if (u > 8 || u < -15) continue;   // boarding from 8 minutes before (it may push up to 5 early)
             if (_done.Contains(Key(l, 'D'))) continue;
             if (CallsignBusy(l.Callsign)) continue;   // the same flight number still flying: this one waits
             _done.Add(Key(l, 'D'));
@@ -1733,7 +1765,8 @@ public sealed partial class TrafficWorld
             Reg = leg?.Reg ?? "", Title = leg?.Title ?? "", Brand = leg?.Airline,
         };
         f.SetPhase("parked", Time);
-        f.Lights = Rng.NextDouble() < 0.5 ? 0 : Nav | Logo;
+        f.Lights = 0;
+        if (leg is not null && WeekMinute >= 0) f.PushAt = Time + Until(leg.DepMin) * 60;
         Flights.Add(f);
         return f;
     }
@@ -2054,7 +2087,16 @@ public sealed partial class TrafficWorld
         var toFirst = Apt.Nodes[route[0]] - f.Pos;
         if (lead.Count > 0) { }
         else if (V2.Dot(toFirst, fwd) < 0)
-        { pts.Add(f.Pos + fwd * 20); pts.Add(f.Pos + fwd * 50 + fwd.Perp * 40); }   // turn around in a wide teardrop, never on the spot
+        {
+            // No 180s on a taxiway (plan, Phase 3: "aircraft turn around only on a ramp, a holding pad or a wide apron"):
+            // turning back needs the apron round the stands; on a taxiway it waits instead.
+            if (!Apt.Spots.Any(sp => (sp.P - f.Pos).Length < 150))
+            {
+                if (!f.NoTurnLogged) { f.NoTurnLogged = true; Log($"{f.Callsign}: no room to turn round on the taxiway — waits for {otherName}"); }
+                return false;
+            }
+            pts.Add(f.Pos + fwd * 20); pts.Add(f.Pos + fwd * 50 + fwd.Perp * 40);   // turn around in a wide teardrop, never on the spot
+        }
         else if (toFirst.Length > 1 && V2.Dot(toFirst.Unit, fwd) < 0.85)
             pts.Add(f.Pos + fwd * 20);                  // roll ahead a little and turn in an arc, not on the spot
         var offset = pts.Count;
@@ -2451,6 +2493,51 @@ public sealed partial class TrafficWorld
     public bool SafetyLogic;
     /// <summary>Ceiling below 800 ft or visibility below 2 miles (the METAR): no line up and wait with landing traffic.</summary>
     public bool LowWeather;
+    /// <summary>The METAR's lowest broken/overcast base (ft above the field) and temperature (°C); NaN when unknown.</summary>
+    public double CloudBaseFt = double.NaN, SurfaceTempC = double.NaN;
+    /// <summary>For tests: the time of day used for night lighting (else the real clock, as the sim's sky).</summary>
+    public DateTime? LightClock { get; set; }
+
+    /// <summary>The sun's elevation at the airport now (degrees).</summary>
+    public double SunElevationDeg()
+    {
+        var t = LightClock ?? DateTime.UtcNow;
+        var d = t.DayOfYear + (t.Hour + t.Minute / 60.0) / 24.0;
+        var decl = -23.44 * Math.Cos(2 * Math.PI / 365 * (d + 10));
+        var hourAngle = ((t.Hour + t.Minute / 60.0) * 15 + Apt.Data.Lon - 180);
+        double R(double x) => x * Math.PI / 180;
+        var sin = Math.Sin(R(Apt.Data.Lat)) * Math.Sin(R(decl)) + Math.Cos(R(Apt.Data.Lat)) * Math.Cos(R(decl)) * Math.Cos(R(hourAngle));
+        return Math.Asin(Math.Clamp(sin, -1, 1)) * 180 / Math.PI;
+    }
+
+    private double _sunAt = double.NegativeInfinity; private bool _dark;
+    /// <summary>Dark enough for night lighting (the sun more than 3° below the horizon), checked once a minute.</summary>
+    public bool Dark { get { if (Time - _sunAt > 60 || LightClock is not null) { _sunAt = Time; _dark = SunElevationDeg() < -3; } return _dark; } }
+
+    /// <summary>
+    /// The lights shown in the sim (user, 24 Nov): parked aircraft are dark unless crewed — for 10 minutes after arriving,
+    /// and from 30 minutes before push-back; all exterior lights while crossing a runway (AIM 4-3-23); wing (ice
+    /// inspection) lights taxiing at night, and in the air in cloud near freezing (from the METAR's lowest broken or
+    /// overcast base to 5,000 ft above it, colder than +5 °C there at 2 °C a thousand feet).
+    /// </summary>
+    public int ShownLights(Flight f)
+    {
+        var l = f.Lights;
+        if (f.Phase == "parked")
+        {
+            var crewed = (!double.IsNaN(f.ArrivedAt) && Time - f.ArrivedAt < 600) || (!double.IsNaN(f.PushAt) && f.PushAt - Time < 1800);
+            return crewed ? Nav | Logo | Cabin : 0;
+        }
+        if (f.OnGround && f.OnRunway >= 0 && f.Phase is "taxi" or "taxi in" or "holding short") l |= Strobes | Landing | Taxi;
+        if (f.OnGround && Dark && f.Phase is "taxi" or "taxi in" or "pushback" or "holding short" or "lining up" or "lined up" or "takeoff roll" or "landing roll") l |= Wing;
+        if (!f.OnGround && !double.IsNaN(CloudBaseFt) && !double.IsNaN(SurfaceTempC))
+        {
+            var agl = f.AltFt - Apt.ElevationFt;
+            var temp = SurfaceTempC - 2 * agl / 1000;
+            if (agl >= CloudBaseFt && agl <= CloudBaseFt + 5000 && temp <= 5) l |= Wing;
+        }
+        return l;
+    }
 
     /// <summary>
     /// An aircraft on the runway a departure may line up and wait behind (7110.65 3-9-4; user, 16 Nov: "any method to help
@@ -2507,6 +2594,10 @@ public sealed partial class TrafficWorld
         if (UserOnRunway(r)) { f.HoldWhy = "your aircraft on the runway"; return false; }
         if (GoAroundAhead(f) is { } ga) { f.HoldWhy = $"{ga.Callsign} going around over the runway"; return false; }
         if (behind.FirstOrDefault(o => !MayLineUpBehind(o, f)) is { } bo) { f.HoldWhy = $"{bo.Callsign} on the runway"; return false; }
+        // Aircraft held short to cross get the runway after at most one more departure, or after 2 minutes (user, 23 Nov,
+        // KATL: JBU1798 held short of 27R for 12+ minutes while ten departures went with line up and wait — "it's okay to
+        // allow at least one aircraft to depart between departures if they are holding short of the runway").
+        if (CrosserWaiting(r) is { } cw) { f.HoldWhy = $"letting {cw.Callsign} cross"; return false; }
         // During a runway change, no departures the new way while arrivals still come in the old way (the opposite
         // direction) within 30 nm: the airport turns round once the last of them has landed.
         // Only the opposite way on this runway or a parallel (within 30° of the reciprocal): a crossing runway's
@@ -2527,7 +2618,35 @@ public sealed partial class TrafficWorld
         // only line up when the takeoff can follow the line-up (about 30 s later).
         if (!CrossingRunwayClearForTakeoff(f, extraSec: 30)) { f.HoldWhy = "arrivals to a crossing runway"; return false; }
         Log($"{f.Callsign}: lining up runway {f.Rwy.Ident} (next arrival {(double.IsInfinity(eta) ? "none" : eta.ToString("0") + " s")})");
+        _lastLineUp[r] = Time;
         return true;
+    }
+
+    private readonly Dictionary<int, double> _lastLineUp = new();
+
+    /// <summary>An aircraft held short of this runway to cross it, that has already let one departure go (or waited 2
+    /// minutes): the next departure waits for it.</summary>
+    private Flight? CrosserWaiting(int runway)
+    {
+        var lastLu = _lastLineUp.TryGetValue(runway, out var v) ? v : double.NegativeInfinity;
+        if (ArrivalEta(runway) < 90) return null;          // an arrival keeps it from crossing anyway: the departure may go
+        foreach (var o in Flights)
+        {
+            if (o.Done || !o.OnGround || (o.Kind == "departure" && o.Rwy?.Runway == runway)) continue;
+            foreach (var st in o.Stops)
+                if (st.Runway == runway && !st.Cleared && !double.IsNaN(st.WaitSince) && (lastLu > st.WaitSince || Time - st.WaitSince > 120))
+                    return o;
+        }
+        return null;
+    }
+
+    /// <summary>A departure already rolling past where this crossing is (300 m or more beyond it): the crossing can go
+    /// behind it ("cross behind the departing traffic").</summary>
+    private bool PassedCrossing(Flight dep, Flight f, Stop st)
+    {
+        if (dep.Phase != "takeoff roll" || dep.Rwy is not { } rw || f.Path is not { } path) return false;
+        var at = rw.Along(path.At(st.S).p);
+        return rw.Along(dep.Pos) > at + 300;
     }
 
     /// <summary>
@@ -2613,7 +2732,9 @@ public sealed partial class TrafficWorld
                 }
                 continue;
             }
-            var tPass = RollTime(f, x.Value.alongA - d.Along(f.Pos)) + 15 + extraSec;
+            // 25 s to spare: the roll can start a few seconds late, and the arrival shouldn't be on a half-mile final
+            // as the departure goes through (24 Nov, test: UAL2717 through the intersection with AAL2736 1,250 m out).
+            var tPass = RollTime(f, x.Value.alongA - d.Along(f.Pos)) + 25 + extraSec;
             foreach (var o in Flights)
             {
                 if (o == f || o.Done || o.Rwy is null || o.Rwy.Runway != end.Runway) continue;
@@ -2948,6 +3069,15 @@ public sealed partial class TrafficWorld
         f.GateHoldDone = true;
         Log($"{f.Callsign}: released from the gate hold after {(Time - f.GateHeldSince) / 60:0.0} min (wait now {Math.Max(0, wait) / 60:0.0} min)");
         return false;
+    }
+
+    /// <summary>No other departure on its way to this one's runway, and no wait predicted there.</summary>
+    private bool RunwayQuiet(Flight f)
+    {
+        if (RunwayOnly || f.Rwy is not { } r) return false;
+        if (Flights.Any(o => o != f && !o.Done && o.Kind == "departure" && o.Rwy?.Runway == r.Runway
+                && (o.Phase is "pushback" or "engine start" or "taxi" or "holding short" or "lining up" or "lined up" || (o.Phase == "boarding" && o.Timer < 420)))) return false;   // nor others about to push for it
+        return double.IsNaN(f.TakeoffAt) || double.IsNaN(f.ReadyAt) || f.TakeoffAt - (f.ReadyAt + 35) < 60;
     }
 
     private double _lastDepPredict = -999;
@@ -4210,7 +4340,7 @@ public sealed partial class TrafficWorld
     /// </summary>
     private Approach? ApproachFor(RunwayEnd rwy)
     {
-        var key = string.Join(";", AtisApproaches.Select(x => $"{x.kind}|{x.suffix}|{x.runway}"));
+        var key = string.Join(";", AtisApproaches.Select(x => $"{x.kind}|{x.suffix}|{x.runway}")) + "#" + string.Join(";", NeighbourFinals.Select(n => n.who));
         if (_apps.TryGetValue(rwy, out var had) && had.key == key) return had.app;
         var apps = Apt.Data.Approaches.Where(a => a.Runway == rwy.Ident && a.FinalLegs.Count > 0 && Flyable(a, rwy)).ToList();
         Approach? pick = null;
@@ -4226,6 +4356,18 @@ public sealed partial class TrafficWorld
         {
             pick = apps.OrderBy(a => ApproachPref(a.Type)).ThenByDescending(a => a.Transitions.Count).ThenBy(a => a.Suffix).FirstOrDefault();
             why = AtisApproaches.Count > 0 ? "the ATIS names none LAIA can fly here, so the standard choice" : "no ATIS approach known, so the standard choice";
+            // Tied to the neighbours' flow (plan, Phase 4): where the standard choice runs through a neighbouring
+            // airport's final in use (a mile or more of it within 2 nm of that centreline), the approach that keeps
+            // clearest of them is used instead.
+            if (pick is not null && NeighbourConflict(pick, rwy, out var whoStd) is var cStd && cStd > Geo2.MPerNm)
+            {
+                var alt = apps.Select(a => (a, c: NeighbourConflict(a, rwy, out _))).OrderBy(x => x.c).ThenBy(x => ApproachPref(x.a.Type)).First();
+                if (alt.a != pick && alt.c < cStd * 0.5)
+                {
+                    why = $"the standard {ApproachLabel(pick)} runs through {whoStd}'s final in use ({cStd / Geo2.MPerNm:0.0} nm of it), this one {alt.c / Geo2.MPerNm:0.0} nm";
+                    pick = alt.a;
+                }
+            }
         }
         var label = pick is null ? null : ApproachLabel(pick);
         if (!_apps.ContainsKey(rwy) || had.label != label) Log($"Approach in use at {Apt.Icao}: {label ?? "none (vectors to final)"} for runway {rwy.Ident} ({why})");
@@ -5123,6 +5265,38 @@ public sealed partial class TrafficWorld
         return (wantNm - fan[best].lenNm) * 3600 / gs;
     }
 
+    /// <summary>
+    /// Constant traffic manager (plan: "target times at points along each route with small early corrections"): every
+    /// pass, each arrival's predicted landing against its slot — the target time — and that difference kept as it passes
+    /// 100, 40 and 20 nm to go, so the landing line, the map and the self-test show how early the flow was set up: a
+    /// small difference far out, nothing left by 20 nm, rather than a big one fixed late with vectors.
+    /// </summary>
+    private void TrackSlot(Flight f, double slot)
+    {
+        if (double.IsNaN(f.EtaSec)) return;
+        f.SlotDev = Time + f.EtaSec - slot;
+        var togo = (f.ThrS - f.S) / Geo2.MPerNm;
+        if (togo <= 100 && double.IsNaN(f.Dev100) && togo > 90) f.Dev100 = f.SlotDev;
+        if (togo <= 40 && double.IsNaN(f.Dev40) && togo > 35) f.Dev40 = f.SlotDev;
+        if (togo <= 20 && double.IsNaN(f.Dev20) && togo > 17) f.Dev20 = f.SlotDev;
+    }
+
+    private readonly List<double> _dev40 = new(), _dev20 = new();
+
+    /// <summary>For the landing line: against its slot at 100, 40 and 20 nm.</summary>
+    private string SlotReport(Flight f)
+    {
+        if (double.IsNaN(f.Dev100) && double.IsNaN(f.Dev40) && double.IsNaN(f.Dev20)) return "";
+        if (!double.IsNaN(f.Dev40)) { _dev40.Add(Math.Abs(f.Dev40)); if (_dev40.Count > 200) _dev40.RemoveAt(0); }
+        if (!double.IsNaN(f.Dev20)) { _dev20.Add(Math.Abs(f.Dev20)); if (_dev20.Count > 200) _dev20.RemoveAt(0); }
+        string D(double d) => double.IsNaN(d) ? "–" : d.ToString("+0;-0;0");
+        return $"; against its slot at 100/40/20 nm: {D(f.Dev100)}/{D(f.Dev40)}/{D(f.Dev20)} s";
+    }
+
+    /// <summary>For the control page and self-test: share of arrivals within 30 s of their slot at 40 and 20 nm.</summary>
+    public string? SlotSummary => _dev40.Count == 0 && _dev20.Count == 0 ? null
+        : $"on their slot (±30 s) at 40 nm {(_dev40.Count == 0 ? 0 : 100.0 * _dev40.Count(d => d <= 30) / _dev40.Count):0}%, at 20 nm {(_dev20.Count == 0 ? 0 : 100.0 * _dev20.Count(d => d <= 30) / _dev20.Count):0}% (last {Math.Max(_dev40.Count, _dev20.Count)} landings)";
+
     private void AssignSequenceSpeed(Flight f)
     {
         if (f.Rwy is null || f.Path is null) return;
@@ -5427,7 +5601,18 @@ public sealed partial class TrafficWorld
             }
         }
         Log($"Runway change at {Apt.Icao}: landing {string.Join(", ", ArrRwys.Select(e => e.Ident))}, departing {string.Join(", ", DepRwys.Select(e => e.Ident))} — {arr} arrival{(arr == 1 ? "" : "s")} and {dep} departure{(dep == 1 ? "" : "s")} given the new runways{(replan > 0 && ArrRwys.Count > 1 ? $", {replan} planned again across the runways now in use" : "")}; arrivals within 25 nm finish on their runway");
+        // The planned changeover (plan, Phase 4): the last arrival to the old runways and the first to the new.
+        var lastOld = Flights.Where(f => !f.Done && f.Kind == "arrival" && !f.OnGround && f.Rwy is not null && !ArrRwys.Contains(f.Rwy) && f != UserArr)
+            .OrderByDescending(f => f.ThrS - f.S).FirstOrDefault();
+        var firstNew = Flights.Where(f => !f.Done && f.Kind == "arrival" && !f.OnGround && f.Rwy is not null && ArrRwys.Contains(f.Rwy) && f != UserArr)
+            .OrderBy(f => f.ThrS - f.S).FirstOrDefault();
+        if (lastOld is not null || firstNew is not null)
+            Log($"Runway change at {Apt.Icao}: the last arrival to the old runway{(lastOld is null ? " — none, it's clear" : $" is {lastOld.Callsign} on {lastOld.Rwy!.Ident} ({(lastOld.ThrS - lastOld.S) / Geo2.MPerNm:0} nm out)")}; the first to the new {(firstNew is null ? "— none yet" : $"is {firstNew.Callsign} on {firstNew.Rwy!.Ident} ({(firstNew.ThrS - firstNew.S) / Geo2.MPerNm:0} nm out)")}");
+        _changeNote = (Time, string.Join("/", ArrRwys.Select(e => e.Ident)), string.Join("/", DepRwys.Select(e => e.Ident)), lastOld?.Callsign);
     }
+
+    /// <summary>The last runway change, for the user's notice: when, landing, departing, the last arrival the old way.</summary>
+    private (double at, string land, string dep, string? lastOld)? _changeNote;
 
     /// <summary>For the control page: what the arrival manager has done and how well the landings were spaced.</summary>
     public string? ArrivalManagerSummary
@@ -5436,7 +5621,7 @@ public sealed partial class TrafficWorld
         {
             var gaps = _gapExcess.Count == 0 ? "" : $"landings {_gapExcess.Average():+0;-0} s on average beyond the gap needed ({_gapsShort} short)";
             var acts = $"{_speedAssigns} speed reductions, {_trombones} downwind changes, {_rwySwitches} runway moves, {_vectors} vectors, {_breakoffs} break-offs";
-            return gaps.Length == 0 && _speedAssigns + _vectors + _trombones + _rwySwitches + _breakoffs == 0 ? null : (gaps.Length > 0 ? gaps + "; " : "") + acts;
+            return gaps.Length == 0 && _speedAssigns + _vectors + _trombones + _rwySwitches + _breakoffs == 0 ? null : (gaps.Length > 0 ? gaps + "; " : "") + acts + (SlotSummary is { } ss ? "; " + ss : "");
         }
     }
 
@@ -5684,17 +5869,24 @@ public sealed partial class TrafficWorld
         {
             case "parked":
                 if (f.Kind == "arrival") f.Kind = "parked";
-                if (Time - f.PhaseTime > 180 && f.Lights != 0 && f.Age > 600) f.Lights = Rng.NextDouble() < 0.002 ? 0 : f.Lights;
                 break;
             case "at gate":
                 f.Lights = Nav | Beacon | Logo;
-                if (Time - f.PhaseTime > 25) { f.Kind = "parked"; f.SetPhase("parked", Time); f.Lights = Nav | Logo | Cabin; f.ArrivedAt = Time; }
+                if (Time - f.PhaseTime > 25) { f.Kind = "parked"; f.SetPhase("parked", Time); f.Lights = Nav | Logo | Cabin; f.ArrivedAt = Time; f.Overnight = NightNow; }
                 break;
             case "boarding":
                 f.Lights = Nav | Logo | Cabin;
                 f.Timer -= dt;
                 if (f.Timer <= 0 && GateHold(f)) break;
                 if (f.Timer <= 0 && PushbackClear(f)) StartPushback(f);
+                // Up to 5 minutes early when its runway is quiet (user, 23 Nov: traffic "doesn't have to be beholden to
+                // strict schedules" — departures as efficient as possible): nobody else on the way to it, no wait there.
+                else if (f.Timer > 0 && f.Timer <= 300 && RunwayQuiet(f) && PushbackClear(f))
+                {
+                    Log($"{f.Callsign}: pushing back {f.Timer / 60:0.0} min early — runway {f.Rwy?.Ident} is quiet");
+                    f.Timer = 0; f.GateHoldDone = true;
+                    StartPushback(f);
+                }
                 break;
             case "pushback":
                 f.Lights = Nav | Beacon | Logo;
@@ -6101,12 +6293,12 @@ public sealed partial class TrafficWorld
         var runway = st.Runway;
         if (UserOnRunway(runway)) return "your aircraft on the runway";
         foreach (var o in Flights)
-            if (o != f && !o.Done && (o.Reserve == runway || (o.OnRunway == runway && !(o.Kind == "departure" && !o.OnGround))))
+            if (o != f && !o.Done && (o.Reserve == runway || (o.OnRunway == runway && !(o.Kind == "departure" && !o.OnGround))) && !PassedCrossing(o, f, st))
                 return $"{o.Callsign} {(o.Reserve == runway && o.OnRunway != runway ? "crossing" : "on the runway")}";
         // Time to be across and clear of it (taxi speed about 15 kt from here to 60 m past the far side), plus 30 s.
         var crossSec = f.Path is not null ? Math.Max(0, st.ExitS + 60 - f.S) / Math.Max(4, f.Gs * Kt) + 15 : 45;
         if (ArrivalEta(runway) is var eta && eta < Math.Max(60, crossSec + 30)) return $"an arrival {eta:0} s out";
-        if (Flights.FirstOrDefault(o => o.Rwy?.Runway == runway && o.Phase is "lined up" or "takeoff roll") is { } dep) return $"{dep.Callsign} departing";
+        if (Flights.FirstOrDefault(o => o.Rwy?.Runway == runway && o.Phase is "lined up" or "takeoff roll" && !PassedCrossing(o, f, st)) is { } dep) return $"{dep.Callsign} departing";
         // Room on the far side: nobody on its way between the runway and 60 m past where it's clear of it.
         if (f.Path is { } path && st.ExitS > st.S)
         {
@@ -6627,6 +6819,42 @@ public sealed partial class TrafficWorld
     /// airport's for a neighbour, a neighbour's for the main airport. Projected on a straight line.</summary>
     public sealed record Foreign(string Callsign, string Airport, string Kind, V2 Pos, double AltFt, double Vs, double GsKt, double Track, string Phase, bool Main);
     public List<Foreign> Others { get; set; } = new();
+    /// <summary>Neighbouring airports' landing runways in use (threshold in this frame, heading), for the approach choice.</summary>
+    public List<(V2 thr, double hdg, string who)> NeighbourFinals { get; set; } = new();
+
+    /// <summary>
+    /// How much of an approach (its transitions and final, below 6,000 ft) runs through a neighbour's final in use —
+    /// within 2 nm of its extended centreline from 1 to 15 nm out: metres of the approach in there. 0: clear of them.
+    /// </summary>
+    private double NeighbourConflict(Approach a, RunwayEnd rwy, out string who)
+    {
+        who = "";
+        if (NeighbourFinals.Count == 0) return 0;
+        var legs = a.Transitions.SelectMany(t => t.Legs).Concat(a.FinalLegs).ToList();
+        var pts = Apt.LegsToPoints(a.FinalLegs, rwy.Threshold - rwy.Dir * (15 * Geo2.MPerNm), 4000, out _).Select(q => q.P).ToList();
+        foreach (var t in a.Transitions)
+            pts.AddRange(Apt.LegsToPoints(t.Legs, rwy.Threshold - rwy.Dir * (20 * Geo2.MPerNm), 6000, out _).Select(q => q.P));
+        double total = 0; var worst = 0.0;
+        foreach (var (thr, hdg, name) in NeighbourFinals)
+        {
+            var dir = V2.FromBearing(hdg);
+            double m = 0;
+            for (var i = 1; i < pts.Count; i++)
+            {
+                var seg = pts[i] - pts[i - 1]; var len = seg.Length;
+                for (var d = 0.0; d < len; d += 200)
+                {
+                    var p = pts[i - 1] + seg * (d / Math.Max(1, len));
+                    var along = -V2.Dot(p - thr, dir);                      // miles out on its final
+                    var off = Math.Abs(V2.Dot(p - thr, dir.Perp));
+                    if (along > 1 * Geo2.MPerNm && along < 15 * Geo2.MPerNm && off < 2 * Geo2.MPerNm) m += Math.Min(200, len - d);
+                }
+            }
+            total += m;
+            if (m > worst) { worst = m; who = name; }
+        }
+        return total;
+    }
     private static V2 Ahead(Foreign o, double t) => o.Pos + V2.FromBearing(o.Track) * (o.GsKt * 0.5144 * t);
 
     /// <summary>
@@ -7097,7 +7325,7 @@ public sealed partial class TrafficWorld
                 f.MaxKt = 30;
                 MoveAir(f, dt);
                 StartRollout(f);
-                Log($"{f.Callsign}: landed runway {rwy.Ident}{(f.Spot is not null ? ", taxiing to " + f.Spot.Label : "")}{PredictionReport(f)}{ChecksReport(f)}{LandingGapReport(f)}{f.ExitNote}");
+                Log($"{f.Callsign}: landed runway {rwy.Ident}{(f.Spot is not null ? ", taxiing to " + f.Spot.Label : "")}{PredictionReport(f)}{ChecksReport(f)}{LandingGapReport(f)}{SlotReport(f)}{f.ExitNote}");
                 return;
             }
         }
