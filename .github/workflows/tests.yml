@@ -24,6 +24,13 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
+      - name: Build the server and LAIA Sim (catches compile errors before a merge)
+        shell: pwsh
+        run: |
+          dotnet build src/Laia.Server -c Release -v q
+          if ($LASTEXITCODE) { throw "server build failed" }
+          dotnet build src/Laia.Sim -c Release -v q
+          if ($LASTEXITCODE) { throw "LAIA Sim build failed" }
       - name: Check traffic logic (offline simulation)
         shell: pwsh
         run: |

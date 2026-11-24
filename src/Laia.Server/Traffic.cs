@@ -612,7 +612,42 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     }
 
     /// <summary>A whole-sky flight's altitude as drawn (its schedule's altitude, unless separation changed it).</summary>
-    private double NetAlt(Laia.Server.TrafficCore.NetLeg l, double clock, double baseAlt) => _sep.Alt(l, clock, baseAlt);
+    private double NetAlt(Laia.Server.TrafficCore.NetLeg l, double clock, double baseAlt) => _sep.Has(l) ? _sep.Alt(l, clock, baseAlt) : _sepFar.Alt(l, clock, baseAlt);
+    private double? NetRate(Laia.Server.TrafficCore.NetLeg l) => _sep.Rate(l) ?? _sepFar.Rate(l);
+
+    /// <summary>
+    /// Separation for the rest of the whole sky (plan: "separation everywhere in the whole sky, outside LAIA's own
+    /// airports"): every 10 s, every airborne whole-sky flight not near the user nor an airport's, region by region
+    /// (4° squares), by the same rules — 5 nm and 1,000 ft, one levelling off or moving 2,000 ft. Logged as a count.
+    /// </summary>
+    private void SeparateFarSky(AircraftState sim)
+    {
+        var worlds = Worlds().ToList();
+        var exclude = new HashSet<string>(worlds.SelectMany(x => x.Flights).Select(f => f.Reg).Where(r => r.Length > 0), StringComparer.OrdinalIgnoreCase);
+        var near = _enroute.Select(l => l.Id).ToHashSet();
+        var all = network.Around(NetClock, sim.Lat, sim.Lon, 4000, exclude, 8000)
+            .Where(p => p.AltFt >= 3000 && !near.Contains(p.Leg.Id) && !worlds.Any(w => Geo2.DistanceNm(p.Lat, p.Lon, w.Apt.Data.Lat, w.Apt.Data.Lon) < 30))
+            .ToList();
+        foreach (var p in all) _sepFar.Adopt(p.Leg, _sep);
+        foreach (var l in _enroute) _sep.Adopt(l, _sepFar);
+        var before = _sepFar.Limits;
+        foreach (var tile in all.GroupBy(p => (Math.Floor(p.Lat / 4), Math.Floor(p.Lon / 4))))
+        {
+            var legs = tile.Select(p => p.Leg).ToList();
+            if (legs.Count < 2) continue;
+            _sepFar.Update(NetClock, tile.Key.Item1 * 4 + 2, tile.Key.Item2 * 4 + 2, legs, Array.Empty<EnRouteSeparation.Obstacle>(), prune: false);
+        }
+        _sepFar.Prune(all.Select(p => p.Leg.Id).ToHashSet());
+        _farGiven += _sepFar.Limits - before;
+        if (Environment.TickCount64 / 1000.0 - _farLogAt > 900)
+        {
+            _farLogAt = Environment.TickCount64 / 1000.0;
+            log.LogInformation("Whole sky: {n} flights in the air away from you and the airports; {g} given a level to keep 5 nm / 1,000 ft apart in the last 15 minutes", all.Count, _farGiven);
+            _farGiven = 0;
+        }
+    }
+    private readonly EnRouteSeparation _sepFar = new();
+    private int _farGiven; private double _farLogAt = -9999, _farAt = -99;
 
     /// <summary>Separation for the whole-sky flights near the user (see EnRouteSeparation): against each other, the
     /// user and the airports' aircraft.</summary>
@@ -640,7 +675,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     {
         if (NetworkModel.At(l, clock) is not { } p) return null;
         var vs = NetworkModel.At(l, clock + 0.25) is { } q ? (q.AltFt - p.AltFt) * 4 : 0;
-        if (_sep.Rate(l) is { } r) { vs = r; p = p with { AltFt = _sep.Alt(l, clock, p.AltFt) }; }
+        if (NetRate(l) is { } r) { vs = r; p = p with { AltFt = NetAlt(l, clock, p.AltFt) }; }
         var gs = p.GsKt;
         return new TrafficAircraft
         {
@@ -686,7 +721,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 if (NetworkModel.At(l, clock) is not { } p) continue;
                 if (Geo2.DistanceNm(p.Lat, p.Lon, w.Apt.Data.Lat, w.Apt.Data.Lon) > 80) continue;
                 var a = NetAlt(l, clock, p.AltFt);
-                var vs = _sep.Rate(l) ?? (NetworkModel.At(l, clock + 0.25) is { } q ? (q.AltFt - p.AltFt) * 4 : 0);
+                var vs = NetRate(l) ?? (NetworkModel.At(l, clock + 0.25) is { } q ? (q.AltFt - p.AltFt) * 4 : 0);
                 list.Add(new TrafficWorld.Foreign(l.Callsign, "en route", vs < -300 ? "arrival" : "departure", w.Apt.Map.ToXY(p.Lat, p.Lon), a, vs, p.GsKt, p.Heading, p.Phase, true));
             }
             w.Others = list;
@@ -1398,6 +1433,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                     if (now - _othersAt > 1) { _othersAt = now; ShareTraffic(); Part("sharing between airports"); }
                     if (live) UpdateFlCorrection(sim!);
                     if (live && now - _enrouteAt > 2) { _enrouteAt = now; _enroute = EnRoute(sim!); Part("en route"); }
+                    if (live && now - _farAt > 10 && Level != TrafficLevel.Off) { _farAt = now; try { SeparateFarSky(sim!); } catch (Exception ex) { log.LogWarning("Whole-sky separation failed: {msg}", ex.Message); } Part("whole sky"); }
                     if (live) UpdateWinds(sim!, now);
                     if (now - _routesAt >= 60 && routesDb.Routes is { } prr && nasrDb.Nav is { } navr) { _routesAt = now; try { network.ApplyRoutes(prr, navr); } catch (Exception ex) { log.LogInformation("Whole-sky routes failed: {msg}", ex.Message); } }
                     if (now - _meterAt >= 30) { _meterAt = now; try { MeterArrivals(); } catch (Exception ex) { log.LogInformation("Metering failed: {msg}", ex.Message); } Part("metering"); }

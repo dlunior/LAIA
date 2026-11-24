@@ -3071,7 +3071,8 @@ public sealed partial class TrafficWorld
     private bool RunwayQuiet(Flight f)
     {
         if (RunwayOnly || f.Rwy is not { } r) return false;
-        if (Flights.Any(o => o != f && !o.Done && o.Kind == "departure" && o.Rwy?.Runway == r.Runway && o.Phase is "pushback" or "engine start" or "taxi" or "holding short" or "lining up" or "lined up")) return false;
+        if (Flights.Any(o => o != f && !o.Done && o.Kind == "departure" && o.Rwy?.Runway == r.Runway
+                && (o.Phase is "pushback" or "engine start" or "taxi" or "holding short" or "lining up" or "lined up" || (o.Phase == "boarding" && o.Timer < 420)))) return false;   // nor others about to push for it
         return double.IsNaN(f.TakeoffAt) || double.IsNaN(f.ReadyAt) || f.TakeoffAt - (f.ReadyAt + 35) < 60;
     }
 
