@@ -3451,7 +3451,7 @@ public sealed partial class TrafficWorld
             var last = fv[^1]; var legDir = (last - fv[^2]);
             if (legDir.Length > 1 && V2.Dot(pos - last, legDir) > 0 && (pos - last).Length < bestD + 1) return new();
         }
-        if ((pos - fv[0]).Length < bestD && bestK == 1 && V2.Dot(pos - fv[0], fv[1] - fv[0]) < 0) bestK = 0;
+        if (fv.Count == 1 || (bestK == 1 && (pos - fv[0]).Length <= bestD + 1 && V2.Dot(pos - fv[0], fv[1] - fv[0]) < 0)) bestK = 0;
         var res = fv.Skip(bestK).ToList();
         while (res.Count > 0 && (res[0] - pos).Length < 3 * Geo2.MPerNm) res.RemoveAt(0);
         return res;
