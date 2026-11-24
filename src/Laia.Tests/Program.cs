@@ -403,9 +403,9 @@ Console.WriteLine("== Crossing a runway between departures (23 Nov, KATL: JBU179
     foreach (var sp in apt.Spots) if (sp.P.Y > 0) sp.Airlines = new() { "JBU" };
     var sched = new Laia.Common.Airports.ScheduleData { Airport = "TEST", Source = "AIG" };
     const int start = 2 * 1440 + 600;
-    for (var i = 0; i < 14; i++)
-        sched.Legs.Add(new() { Airline = "DAL", Operator = "DAL", Title = "T", Type = "B739", Reg = $"N{i}XD", Flight = $"{500 + i}", Dep = "TEST", Arr = "KYYY", DepMin = start + 5 + i, ArrMin = start + 150 });
-    sched.Legs.Add(new() { Airline = "JBU", Operator = "JBU", Title = "J", Type = "A320", Reg = "N798JB", Flight = "1798", Dep = "KXXX", Arr = "TEST", DepMin = start - 120, ArrMin = start + 12 });
+    for (var i = 0; i < 16; i++)
+        sched.Legs.Add(new() { Airline = "DAL", Operator = "DAL", Title = "T", Type = "B739", Reg = $"N{i}XD", Flight = $"{500 + i}", Dep = "TEST", Arr = "KYYY", DepMin = start + 4 + i / 2, ArrMin = start + 150 });
+    sched.Legs.Add(new() { Airline = "JBU", Operator = "JBU", Title = "J", Type = "A320", Reg = "N798JB", Flight = "1798", Dep = "KXXX", Arr = "TEST", DepMin = start - 120, ArrMin = start + 8 });
     var world = new TrafficWorld(apt, new TestSource(), seed: 4) { Level = TrafficLevel.RealWorld, Wind = new Wind(270, 8), Schedule = sched, WeekMinute = start, SafetyLogic = true, LocalMinuteOverride = 12 * 60 };
     var log = new List<string>(); world.Log = l => log.Add($"{world.Time:0} {l}");
     double maxWait = 0; var parked = false; var crossed = false;
@@ -427,7 +427,7 @@ Console.WriteLine("== Crossing a runway between departures (23 Nov, KATL: JBU179
     Console.WriteLine($"  {luaw} departures lined up; JBU1798 crossed {crossed}, at its gate {parked}; longest wait to cross {maxWait:0} s");
     Check(crossed && parked, "the arrival crosses the runway and reaches its gate across it");
     Check(maxWait < 180, $"it waits no more than one departure and a bit to cross ({maxWait:0} s)");
-    Check(luaw >= 10, $"the departures still go ({luaw})");
+    Check(luaw >= 12, $"the departures still go ({luaw})");
 }
 
 Console.WriteLine("== Peak runways: the ATIS first, real pairs, and kept until a tailwind over 5 kt (KLGA, 22 Nov)");
