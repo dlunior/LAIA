@@ -111,7 +111,7 @@ internal sealed class AigCatalog
 /// </summary>
 internal sealed class TrafficRenderer : IAsyncDisposable
 {
-    private const uint DefPos = 10, DefGround = 11, DefGear = 12, DefWaypoints = 13;
+    private const uint DefPos = 10, DefGround = 11, DefGear = 12, DefWaypoints = 13, DefLights = 15;
     private const uint WpSpeedRequested = 0x04, WpComputeVerticalSpeed = 0x10, WpOnGround = 0x00100000;
     public string Motion { get; private set; } = "laia";
     private const uint EvFreezeLatLon = 100, EvFreezeAlt = 101, EvFreezeAtt = 102, EvFrame = 120;
@@ -144,7 +144,8 @@ internal sealed class TrafficRenderer : IAsyncDisposable
     {
         public required TrafficAircraft Latest;
         public readonly List<(double t, TrafficAircraft s)> Samples = new();
-        public uint CreateReq, GroundReq, ObjectId;
+        public uint CreateReq, GroundReq, LightReq, ObjectId;
+        public string Title = ""; public int LightAsked = -1;
         public bool Ready, Removed;
         public string Motion = "laia";
         public double GroundAlt = double.NaN, CgFt = double.NaN, SmoothGround = double.NaN, StaticPitch, RestPitch;
@@ -178,6 +179,9 @@ internal sealed class TrafficRenderer : IAsyncDisposable
         await _sc.AddToDataDefinitionAsync(DefGear, "GEAR LEFT POSITION", "percent over 100", SimDataType.Float64);
         await _sc.AddToDataDefinitionAsync(DefGear, "GEAR RIGHT POSITION", "percent over 100", SimDataType.Float64);
         await _sc.AddToDataDefinitionAsync(DefWaypoints, "AI WAYPOINT LIST", "number", SimDataType.Waypoint);
+        // The lights as the sim shows them, in the order of LightEvents — read back now and then to check they took.
+        foreach (var n in new[] { "LIGHT NAV", "LIGHT BEACON", "LIGHT STROBE", "LIGHT LANDING", "LIGHT TAXI", "LIGHT LOGO", "LIGHT WING", "LIGHT CABIN" })
+            await _sc.AddToDataDefinitionAsync(DefLights, n, "bool", SimDataType.Float64);
         await _sc.MapClientEventToSimEventAsync(EvFreezeLatLon, "FREEZE_LATITUDE_LONGITUDE_SET");
         await _sc.MapClientEventToSimEventAsync(EvFreezeAlt, "FREEZE_ALTITUDE_SET");
         await _sc.MapClientEventToSimEventAsync(EvFreezeAtt, "FREEZE_ATTITUDE_SET");
@@ -227,7 +231,7 @@ internal sealed class TrafficRenderer : IAsyncDisposable
                 var ts = t.TimeMs > 0 ? t.TimeMs / 1000.0 : serverTimeSec;
                 if (!_objs.TryGetValue(t.Id, out var o))
                 {
-                    o = new Obj { Latest = t, CreateReq = _nextReq++, GroundReq = _nextReq++, Motion = Motion };
+                    o = new Obj { Latest = t, CreateReq = _nextReq++, GroundReq = _nextReq++, LightReq = _nextReq++, Motion = Motion };
                     _objs[t.Id] = o;
                     toCreate.Add(o);
                 }
@@ -291,6 +295,7 @@ internal sealed class TrafficRenderer : IAsyncDisposable
         var t = o.Latest;
         // A scheduled flight names its exact model; use it if it's installed.
         var title = t.Model.Length > 0 && _catalog.Models.Any(m => m.Title == t.Model) ? t.Model : _catalog.Pick(t.Airline, t.Type, t.Id.GetHashCode());
+        o.Title = title;
         Log.Write($"Traffic: creating {t.Callsign} ({t.Type}) as \"{title}\"");
         try
         {
@@ -333,9 +338,61 @@ internal sealed class TrafficRenderer : IAsyncDisposable
         catch (Exception ex) { Log.Write("Traffic setup failed: " + ex.Message); }
     }
 
+    // Light read-back (user, 23 Nov: "I don't think I am seeing nav+strobes on aircraft in the air"): every minute up to
+    // six drawn aircraft (airborne first) have their lights read from the sim and compared with what LAIA sent; every
+    // 5 minutes a summary per light, and once per model any light it was sent but doesn't show.
+    private double _lightCheckAt = -100, _lightLogAt;
+    private readonly int[] _lightSent = new int[8], _lightShown = new int[8];
+    private int _lightChecks;
+    private readonly HashSet<string> _lightModelLogged = new();
+
+    private async Task CheckLightsAsync(List<Obj> objs, double now)
+    {
+        if (now - _lightCheckAt < 60) return;
+        _lightCheckAt = now;
+        foreach (var o in objs.Where(o => o.ObjectId != 0 && o.SentLights >= 0).OrderBy(o => o.Latest.OnGround).ThenBy(_ => Random.Shared.Next()).Take(6))
+        {
+            o.LightAsked = o.SentLights;
+            try { await _sc.RequestDataOnSimObjectAsync(o.LightReq, DefLights, o.ObjectId, SimPeriod.Once); } catch { }
+        }
+        if (now - _lightLogAt >= 300 && _lightChecks > 0)
+        {
+            _lightLogAt = now;
+            var parts = Enumerable.Range(0, 8).Where(i => _lightSent[i] > 0).Select(i => $"{LightEvents[i].Replace("_LIGHTS_SET", "").Replace("_SET", "").ToLowerInvariant()} {_lightShown[i]}/{_lightSent[i]}");
+            Log.Write($"Lights read back from the sim ({_lightChecks} aircraft checked; shown/sent on): {string.Join(", ", parts)}");
+            Array.Clear(_lightSent); Array.Clear(_lightShown); _lightChecks = 0;
+        }
+    }
+
+    private void OnLights(Obj o, SimObjectData d)
+    {
+        var shown = 0;
+        for (var i = 0; i < 8; i++) if (d.ReadFloat64() > 0.5) shown |= 1 << i;
+        var asked = o.LightAsked;
+        if (asked < 0) return;
+        _lightChecks++;
+        var missing = new List<string>();
+        for (var i = 0; i < 8; i++)
+        {
+            if (((asked >> i) & 1) == 0) continue;
+            _lightSent[i]++;
+            if (((shown >> i) & 1) != 0) _lightShown[i]++;
+            else missing.Add(LightEvents[i]);
+        }
+        if (missing.Count > 0 && _lightModelLogged.Add(o.Title + "|" + string.Join(",", missing)))
+            Log.Write($"Lights: {o.Latest.Callsign} (\"{o.Title}\", {(o.Latest.OnGround ? "on the ground" : $"airborne at {o.Latest.AltFt:0} ft")}) was sent {string.Join(", ", missing)} on but the sim shows it off");
+    }
+
     private void OnData(SimObjectData d)
     {
         if (d.RequestId < 5000) return;
+        if (d.DefineId == DefLights)
+        {
+            Obj? lo;
+            lock (_gate) lo = _objs.Values.FirstOrDefault(x => x.LightReq == d.RequestId);
+            if (lo is not null) OnLights(lo, d);
+            return;
+        }
         Obj? o;
         lock (_gate) o = _objs.Values.FirstOrDefault(x => x.GroundReq == d.RequestId);
         if (o is null) return;
@@ -460,7 +517,7 @@ internal sealed class TrafficRenderer : IAsyncDisposable
                 List<Obj> objs;
                 lock (_gate) objs = _objs.Values.Where(o => o.Ready && !o.Removed && o.Samples.Count > 0).ToList();
                 var workStart = Now;
-                try { await MoveAll(objs, now, rt, frameDt, buf, gear); }
+                try { await MoveAll(objs, now, rt, frameDt, buf, gear); await CheckLightsAsync(objs, now); }
                 finally { var w = Now - workStart; _stats.Busy += w; _stats.MaxBusy = Math.Max(_stats.MaxBusy, w); }
             }
         }
