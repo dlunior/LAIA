@@ -462,6 +462,20 @@ Console.WriteLine("== LAIA's own track recording: a frame and an instruction, re
     Environment.SetEnvironmentVariable("LAIA_DATA", null);
 }
 
+Console.WriteLine("== Filed-route points still ahead (KBOS, 22–23 Nov: JBU734's route rebuilt back to points 100+ nm behind)");
+{
+    var nmM = Geo2.MPerNm;
+    // Airways west to east, a point every 30 nm, then a dogleg north.
+    var fv = new List<V2> { new(-300 * nmM, 0), new(-270 * nmM, 0), new(-240 * nmM, 0), new(-210 * nmM, 0), new(-180 * nmM, 0), new(-150 * nmM, 20 * nmM), new(-120 * nmM, 20 * nmM) };
+    var a1 = TrafficWorld.ViaAhead(fv, new V2(-195 * nmM, 0.5 * nmM));     // past four points, on the 4th leg
+    var a2 = TrafficWorld.ViaAhead(fv, new V2(-310 * nmM, 0));             // before the first
+    var a3 = TrafficWorld.ViaAhead(fv, new V2(-110 * nmM, 21 * nmM));      // beyond the last
+    var a4 = TrafficWorld.ViaAhead(fv, new V2(-165 * nmM, 12 * nmM));      // on the dogleg, off its line by a little
+    Console.WriteLine($"  ahead: past four {a1.Count} (first {a1.FirstOrDefault().X / nmM:0} nm), before the first {a2.Count}, beyond the last {a3.Count}, on the dogleg {a4.Count}");
+    Check(a1.Count == 3 && Math.Abs(a1[0].X / nmM + 180) < 1, "well past several points: only the ones after the leg it's on (none behind it)");
+    Check(a2.Count == fv.Count && a3.Count == 0 && a4.Count == 2, "before the route all of it; beyond its end none; part-way along a dogleg the rest");
+}
+
 Console.WriteLine("== Runway-only airport (test buttons without a layout)");
 {
     var model = AirportModel.RunwayOnly("KTST", 40, -75, 20, 40, 7000, "04", 40, -75);
