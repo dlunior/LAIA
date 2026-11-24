@@ -368,6 +368,11 @@ Console.WriteLine("== Crossing runways at Busy for an hour: land 27, depart 36 a
     var landed = log.Count(l => l.Contains(": landed runway 27"));
     Console.WriteLine($"  runways {world.ArrRwy?.Ident}/{world.DepRwy?.Ident}; {landed} landed on 27, {deps36.Count} took off from 36; longest wait at 36 {maxHold:0} s ({maxHoldWho}); go-arounds for a crossing departure {gaXing}; conflicts {conflicts.Count}");
     foreach (var c in conflicts.Take(3)) Console.WriteLine("    " + c);
+    if (conflicts.Count > 0)
+    {
+        var who = conflicts[0].Split(' ');
+        foreach (var l in log.Where(l => l.Contains(who[1]) || l.Contains(who[6]) || l.Contains("letting")).Take(30)) Console.WriteLine("    D " + l);
+    }
     Check(world.ArrRwy?.Ident == "27" && world.DepRwy?.Ident == "36", "land 27, depart the crossing runway 36");
     Check(deps36.Count >= 4 && landed >= 6, $"both runways work: departures go between the arrivals ({deps36.Count} departures, {landed} arrivals)");
     Check(conflicts.Count == 0, "no departure through the intersection while an arrival is over the threshold or rolling towards it");
@@ -400,11 +405,11 @@ Console.WriteLine("== Crossing a runway between departures (23 Nov, KATL: JBU179
     const int start = 2 * 1440 + 600;
     for (var i = 0; i < 14; i++)
         sched.Legs.Add(new() { Airline = "DAL", Operator = "DAL", Title = "T", Type = "B739", Reg = $"N{i}XD", Flight = $"{500 + i}", Dep = "TEST", Arr = "KYYY", DepMin = start + 5 + i, ArrMin = start + 150 });
-    sched.Legs.Add(new() { Airline = "JBU", Operator = "JBU", Title = "J", Type = "A320", Reg = "N798JB", Flight = "1798", Dep = "KXXX", Arr = "TEST", DepMin = start - 120, ArrMin = start + 9 });
+    sched.Legs.Add(new() { Airline = "JBU", Operator = "JBU", Title = "J", Type = "A320", Reg = "N798JB", Flight = "1798", Dep = "KXXX", Arr = "TEST", DepMin = start - 120, ArrMin = start + 12 });
     var world = new TrafficWorld(apt, new TestSource(), seed: 4) { Level = TrafficLevel.RealWorld, Wind = new Wind(270, 8), Schedule = sched, WeekMinute = start, SafetyLogic = true, LocalMinuteOverride = 12 * 60 };
     var log = new List<string>(); world.Log = l => log.Add($"{world.Time:0} {l}");
     double maxWait = 0; var parked = false; var crossed = false;
-    for (var t = 0.0; t < 40 * 60 && !parked; t += 0.5)
+    for (var t = 0.0; t < 30 * 60; t += 0.5)
     {
         world.WeekMinute = start + world.Time / 60;
         world.Step(0.5);
@@ -413,6 +418,8 @@ Console.WriteLine("== Crossing a runway between departures (23 Nov, KATL: JBU179
             foreach (var st in jb.Stops.Where(st => st.Runway >= 0 && !double.IsNaN(st.WaitSince) && !st.Cleared)) maxWait = Math.Max(maxWait, world.Time - st.WaitSince);
             if (jb.OnGround && jb.Pos.Y > 100) crossed = true;
             if (jb.Phase is "at gate" or "parked" && jb.Pos.Y > 100) parked = true;
+            if (jb.Stops.Any(st => st.Runway >= 0 && !double.IsNaN(st.WaitSince) && !st.Cleared) && world.Time % 30 < 0.5)
+                Console.WriteLine($"    {world.Time:0} JBU1798 waiting to cross; on the runway: {string.Join(", ", world.Flights.Where(f => !f.Done && f.OnRunway >= 0).Select(f => f.Callsign + " " + f.Phase))}");
         }
     }
     foreach (var l in log.Where(l => l.Contains("JBU1798") || l.Contains("letting")).Take(8)) Console.WriteLine("    " + l);
