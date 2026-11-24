@@ -408,6 +408,8 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     /// </summary>
     private TrafficWorld? _shadow;
     private string? _shadowDoneFor, _shadowKey;
+    private readonly HashSet<string> _shadowDone = new();
+    private readonly List<string> _shadowSummary = new();
     private readonly List<string> _shadowLog = new();
     private double _shadowStartWeek, _shadowStartedAt;
     private const double ShadowSecs = 3600;
@@ -425,15 +427,21 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         return (false, "Not found (it may already be gone).");
     }
 
-    public void RestartSelfTest() { lock (_gate) { _shadowDoneFor = null; _shadow = null; } }
+    public void RestartSelfTest() { lock (_gate) { _shadowDoneFor = null; _shadow = null; _shadowDone.Clear(); _shadowSummary.Clear(); } }
 
     private void SelfTestStep()
     {
-        var w = _world;
         if (_shadow is null)
         {
-            if (w is null || w.RunwayOnly || _prep is not { Ready: true } || w.Learned is null || w.Schedule is null) return;
-            _shadowKey = $"{typeof(TrafficEngine).Assembly.GetName().Version?.ToString(3)}|{w.Apt.Icao}";
+            // Every airport in play, one after another (plan: "a self-test across several airports"): the traffic
+            // airport first, then the destination prepared ahead and the neighbouring fields — each replayed as a full
+            // airport at Peak — so a change is judged at airports of different shapes, not one.
+            if (_world is null || _prep is not { Ready: true }) return;
+            var ver = typeof(TrafficEngine).Assembly.GetName().Version?.ToString(3);
+            var w = new[] { _world }.Concat(_ahead is null ? Array.Empty<TrafficWorld>() : new[] { _ahead }).Concat(_neighbours)
+                .FirstOrDefault(x => x.Learned is not null && x.Schedule is { Legs.Count: > 0 } && !_shadowDone.Contains($"{ver}|{x.Apt.Icao}"));
+            if (w is null) return;
+            _shadowKey = $"{ver}|{w.Apt.Icao}";
             if (_shadowDoneFor == _shadowKey) return;
             _shadowLog.Clear();
             TrafficWorld? s = null;
@@ -462,8 +470,15 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         if (sh.Time < ShadowSecs) return;
         _shadow = null;
         _shadowDoneFor = _shadowKey;
+        if (_shadowKey is not null) _shadowDone.Add(_shadowKey);
         var mins = (DateTime.UtcNow.Ticks - _shadowStartedAt) / TimeSpan.TicksPerMinute;
-        foreach (var line in Scorecard(_shadowLog, sh, mins)) log.LogInformation("{line}", line);
+        var card = Scorecard(_shadowLog, sh, mins);
+        foreach (var line in card) log.LogInformation("{line}", line);
+        // One line across the airports tested so far.
+        var landed = _shadowLog.Count(l => l.Contains(": landed runway"));
+        int C(string k) => _shadowLog.Count(l => l.Contains(k));
+        _shadowSummary.Add($"{sh.Apt.Icao} {landed} landings, break-offs {C("breaking off")}, go-arounds {C("going around")}, separation {C("SEPARATION")}, removed {C("removed after")}{(sh.SlotSummary is { } ss ? ", " + ss : "")}");
+        if (_shadowSummary.Count > 1) log.LogInformation("Self-test, all airports so far ({n}): {s}", _shadowSummary.Count, string.Join(" | ", _shadowSummary));
     }
 
     /// <summary>The self-test's scorecard: what happened in the hour, per 10 landings, and the worst moments.</summary>
@@ -496,7 +511,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
             $"trombones {Per(C("downwind extended"))}; holds {C("holding for")}, 360s {C("making a 360")}; separation warnings {C("SEPARATION")}; " +
             $"restrictions {met} of {tot} met; landings short of the gap needed {shortGaps}" + (extra.Count > 0 ? $", median {extra[extra.Count / 2]} s beyond it" : "") +
             $"; take-overs {takeovers.Count} ({(takeovers.Count > 0 ? 100 * real / takeovers.Count : 0)}% on real tracks, {C("sequenced: starts")} moved back, {tooHigh} too high); " +
-            $"failures {C("failed")}, removed {C("removed after")}",
+            $"failures {C("failed")}, removed {C("removed after")}" + (sh.SlotSummary is { } slotS ? $"; {slotS}" : ""),
         };
         foreach (var l in lines.Where(l => l.Contains("breaking off") || l.Contains("going around") || l.Contains("SEPARATION") || l.Contains("failed")).Take(8))
             res.Add("Self-test   " + l);
@@ -801,6 +816,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                         seq = f.Kind == "arrival" && !f.OnGround ? f.Seq : 0,
                         depSeq = f.Kind == "departure" && f.OnGround ? f.DepSeq : 0,
                         mgr = f.Kind == "arrival" && !f.OnGround && f.Mgr.Length > 0 ? f.Mgr : null,
+                        slotdev = f.Kind == "arrival" && !f.OnGround && !double.IsNaN(f.SlotDev) ? Math.Round(f.SlotDev) : (double?)null,
                         gapnm = f.Kind == "arrival" && !f.OnGround && !double.IsNaN(f.GapNm) ? Math.Round(f.GapNm, 1) : (double?)null,
                         dth = f.Kind == "arrival" && !f.OnGround ? Math.Round((f.ThrS - f.S) / Geo2.MPerNm, 1) : (double?)null,
                         fixes = f.Kind == "arrival" && !f.OnGround && f.FixEtas.Count > 0

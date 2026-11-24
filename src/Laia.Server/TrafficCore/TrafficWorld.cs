@@ -194,6 +194,9 @@ public sealed class Flight
     /// <summary>Arrival manager: seconds this arrival must lose to land at its slot behind the one ahead (0 = none),
     /// and whether it's flying slower to lose it.</summary>
     public double Delay; public bool Slowed;
+    /// <summary>Constant traffic manager: how far its predicted landing (at the speeds and route it's flying) is from its
+    /// slot (s; + late, − early), and what it was at 100, 40 and 20 nm to go (NaN until passed).</summary>
+    public double SlotDev = double.NaN, Dev100 = double.NaN, Dev40 = double.NaN, Dev20 = double.NaN;
     /// <summary>Arrival manager: the speed reduction assigned for the sequence (kt below the normal speeds, far out),
     /// whether its landing order is fixed (frozen, inside ~15 minutes), the slot it was frozen with, what the manager
     /// is doing with it (for the map), the gap to the one ahead, and when it was last vectored.</summary>
@@ -844,6 +847,7 @@ public sealed partial class TrafficWorld
                     if (f.Rwy != was0) { f.RwyCheckAt = Time; continue; }   // placed on its new runway next pass
                 }
                 f.Frozen = true; f.FrozenSlot = slot;
+                TrackSlot(f, slot);
                 if (Time - f.RwyCheckAt >= 30 && !(Planner && ArrRwys.Count >= 2)) { f.RwyCheckAt = Time; try { BalanceRunway(f); } catch { } }
                 if (Time - f.SlowAt >= 5) { f.SlowAt = Time; try { AssignSequenceSpeed(f); } catch (Exception ex) { Log($"{f.Callsign}: speed planning failed: {ex.Message}"); } }
                 f.Slowed = f.SlowDv > 0;
@@ -5261,6 +5265,38 @@ public sealed partial class TrafficWorld
         return (wantNm - fan[best].lenNm) * 3600 / gs;
     }
 
+    /// <summary>
+    /// Constant traffic manager (plan: "target times at points along each route with small early corrections"): every
+    /// pass, each arrival's predicted landing against its slot — the target time — and that difference kept as it passes
+    /// 100, 40 and 20 nm to go, so the landing line, the map and the self-test show how early the flow was set up: a
+    /// small difference far out, nothing left by 20 nm, rather than a big one fixed late with vectors.
+    /// </summary>
+    private void TrackSlot(Flight f, double slot)
+    {
+        if (double.IsNaN(f.EtaSec)) return;
+        f.SlotDev = Time + f.EtaSec - slot;
+        var togo = (f.ThrS - f.S) / Geo2.MPerNm;
+        if (togo <= 100 && double.IsNaN(f.Dev100) && togo > 90) f.Dev100 = f.SlotDev;
+        if (togo <= 40 && double.IsNaN(f.Dev40) && togo > 35) f.Dev40 = f.SlotDev;
+        if (togo <= 20 && double.IsNaN(f.Dev20) && togo > 17) f.Dev20 = f.SlotDev;
+    }
+
+    private readonly List<double> _dev40 = new(), _dev20 = new();
+
+    /// <summary>For the landing line: against its slot at 100, 40 and 20 nm.</summary>
+    private string SlotReport(Flight f)
+    {
+        if (double.IsNaN(f.Dev100) && double.IsNaN(f.Dev40) && double.IsNaN(f.Dev20)) return "";
+        if (!double.IsNaN(f.Dev40)) { _dev40.Add(Math.Abs(f.Dev40)); if (_dev40.Count > 200) _dev40.RemoveAt(0); }
+        if (!double.IsNaN(f.Dev20)) { _dev20.Add(Math.Abs(f.Dev20)); if (_dev20.Count > 200) _dev20.RemoveAt(0); }
+        string D(double d) => double.IsNaN(d) ? "–" : d.ToString("+0;-0;0");
+        return $"; against its slot at 100/40/20 nm: {D(f.Dev100)}/{D(f.Dev40)}/{D(f.Dev20)} s";
+    }
+
+    /// <summary>For the control page and self-test: share of arrivals within 30 s of their slot at 40 and 20 nm.</summary>
+    public string? SlotSummary => _dev40.Count == 0 && _dev20.Count == 0 ? null
+        : $"on their slot (±30 s) at 40 nm {(_dev40.Count == 0 ? 0 : 100.0 * _dev40.Count(d => d <= 30) / _dev40.Count):0}%, at 20 nm {(_dev20.Count == 0 ? 0 : 100.0 * _dev20.Count(d => d <= 30) / _dev20.Count):0}% (last {Math.Max(_dev40.Count, _dev20.Count)} landings)";
+
     private void AssignSequenceSpeed(Flight f)
     {
         if (f.Rwy is null || f.Path is null) return;
@@ -5585,7 +5621,7 @@ public sealed partial class TrafficWorld
         {
             var gaps = _gapExcess.Count == 0 ? "" : $"landings {_gapExcess.Average():+0;-0} s on average beyond the gap needed ({_gapsShort} short)";
             var acts = $"{_speedAssigns} speed reductions, {_trombones} downwind changes, {_rwySwitches} runway moves, {_vectors} vectors, {_breakoffs} break-offs";
-            return gaps.Length == 0 && _speedAssigns + _vectors + _trombones + _rwySwitches + _breakoffs == 0 ? null : (gaps.Length > 0 ? gaps + "; " : "") + acts;
+            return gaps.Length == 0 && _speedAssigns + _vectors + _trombones + _rwySwitches + _breakoffs == 0 ? null : (gaps.Length > 0 ? gaps + "; " : "") + acts + (SlotSummary is { } ss ? "; " + ss : "");
         }
     }
 
@@ -7289,7 +7325,7 @@ public sealed partial class TrafficWorld
                 f.MaxKt = 30;
                 MoveAir(f, dt);
                 StartRollout(f);
-                Log($"{f.Callsign}: landed runway {rwy.Ident}{(f.Spot is not null ? ", taxiing to " + f.Spot.Label : "")}{PredictionReport(f)}{ChecksReport(f)}{LandingGapReport(f)}{f.ExitNote}");
+                Log($"{f.Callsign}: landed runway {rwy.Ident}{(f.Spot is not null ? ", taxiing to " + f.Spot.Label : "")}{PredictionReport(f)}{ChecksReport(f)}{LandingGapReport(f)}{SlotReport(f)}{f.ExitNote}");
                 return;
             }
         }
