@@ -61,6 +61,8 @@ public sealed class Flight
     public AirportModel.ParkingSpot? Spot;
     public RunwayEnd? Rwy;
     public double Timer, PhaseTime, Age;
+    /// <summary>When it parked at its gate after landing here (NaN: it didn't).</summary>
+    public double ArrivedAt = double.NaN;
     public double LiftoffTime = -1;
     public int OnRunway = -1;
     public int Reserve = -1;
@@ -899,6 +901,9 @@ public sealed partial class TrafficWorld
     // ------------------------------------------------------------------ real schedule
 
     private readonly HashSet<string> _done = new();
+    /// <summary>Minutes an aircraft is at its gate before push-back, and after arriving (user, 23 Nov).</summary>
+    public const int GateBeforeMin = 20, GateAfterMin = 10;
+    private int _gateGone; private double _gateLogAt = -1;
     private bool _schedStarted;
 
     /// <summary>Signed minutes from now until a time of the week (-5040..5040).</summary>
@@ -1458,21 +1463,17 @@ public sealed partial class TrafficWorld
             _filled = true;
             // Made-up aircraft from before the schedule arrived make way for the real ones.
             foreach (var f in Flights.Where(f => f.Kind == "parked" && f.Phase == "parked" && f.Reg.Length == 0)) f.Done = true;
-            // Aircraft at the gates now: every airframe whose last flight landed here and whose next one leaves
-            // from here (overnight too — at night the gates fill up with the morning's first departures), plus
-            // aircraft leaving in the next few hours. Soonest departures first if there isn't room for all.
+            // Aircraft at the gates now: only those pushing back in the next 20 minutes (user, 23 Nov: "Scheduled traffic
+            // should only spawn at a gate 20 mins before push back and 10 minutes after arriving at a gate. No other gate
+            // fillers"). An airframe that lands first and then leaves isn't put at a gate: it comes in on its flight.
             var parked = Flights.Count(f => f.Kind == "parked");
             var upcoming = new List<ScheduleLeg>();
-            foreach (var g in deps.Where(l => l.Reg.Length > 0 && Until(l.DepMin) is > 4 and < 1080).GroupBy(l => l.Reg))
+            foreach (var g in deps.Where(l => Until(l.DepMin) is > 3 and <= GateBeforeMin).GroupBy(l => l.Reg.Length > 0 ? l.Reg : l.Callsign))
             {
                 var next = g.OrderBy(l => Until(l.DepMin)).First();
                 var untilDep = Until(next.DepMin);
-                var lastArr = arrs.Where(a => a.Reg == g.Key && Until(a.ArrMin) is < -2 and > -1440).Select(a => -Until(a.ArrMin)).DefaultIfEmpty(double.MaxValue).Min();
-                var lastDep = deps.Where(d => d.Reg == g.Key && Until(d.DepMin) is <= 4 and > -1440).Select(d => -Until(d.DepMin)).DefaultIfEmpty(double.MaxValue).Min();
-                var arrivedAndWaiting = lastArr < double.MaxValue && lastArr < lastDep;
-                var flyingIn = arrs.Any(a => a.Reg == g.Key && Until(a.ArrMin) is >= -2 && Until(a.ArrMin) < untilDep);
-                if (flyingIn) continue;                                  // it lands first, then leaves
-                if (arrivedAndWaiting || untilDep < 240) upcoming.Add(next);
+                if (next.Reg.Length > 0 && arrs.Any(a => a.Reg == g.Key && Until(a.ArrMin) is >= -2 && Until(a.ArrMin) < untilDep)) continue;
+                upcoming.Add(next);
             }
             upcoming = upcoming.OrderBy(l => Until(l.DepMin)).ToList();
             // Departures whose time passed more than 3 minutes ago have gone: not all started at once now (KORD, 15 Nov:
@@ -1484,6 +1485,7 @@ public sealed partial class TrafficWorld
             {
                 if (placed >= room) break;
                 if (Flights.Any(f => f.Reg == l.Reg && f.Reg.Length > 0)) continue;
+                if (CallsignBusy(l.Callsign)) continue;
                 var perf = Perf.For(l.Type);
                 var gate = FindGate(perf, l.Operator, l.Airline, l.Callsign);
                 if (gate is null) continue;
@@ -1501,7 +1503,7 @@ public sealed partial class TrafficWorld
                 _done.Add(Key(l, 'A'));
                 SpawnArrival(d, false, l, plan);
             }
-            Log($"{me}: following the real {Schedule.Source} schedule ({deps.Count} departures and {arrs.Count} arrivals a week at {Level}; {(maxObjects >= 400 ? "no cap" : $"up to {maxObjects} aircraft, {maxActive} moving, airport size x{SizeFactor:0.0}")}); {placed} aircraft at the gates waiting for their next flight");
+            Log($"{me}: following the real {Schedule.Source} schedule ({deps.Count} departures and {arrs.Count} arrivals a week at {Level}; {(maxObjects >= 400 ? "no cap" : $"up to {maxObjects} aircraft, {maxActive} moving, airport size x{SizeFactor:0.0}")}); {placed} aircraft at the gates pushing back in the next {GateBeforeMin} minutes");
         }
         // Arrivals still far out (handed over from the whole sky) don't count against the traffic level: only what's
         // near the airport does (and only that is ever drawn in the sim).
@@ -1510,6 +1512,34 @@ public sealed partial class TrafficWorld
         // "skipped (traffic limit)" in 20 minutes).
         var active = Flights.Count(f => f.Kind != "parked" && !f.Test && !Far(f) && !(f.Kind == "departure" && f.Phase == "boarding"));
         var objects = Flights.Count(f => !Far(f));
+        // At the gate only 20 minutes before push-back and 10 minutes after arriving (user, 23 Nov): a departure's aircraft
+        // appears at its gate 20 minutes before its time; an aircraft that has landed here stays 10 minutes at its gate,
+        // longer only when its next flight pushes back within 20 minutes (a quick turn), then it's taken away.
+        foreach (var l in deps)
+        {
+            var u = Until(l.DepMin);
+            if (u <= 3 || u > GateBeforeMin) continue;
+            if (_done.Contains(Key(l, 'D')) || CallsignBusy(l.Callsign)) continue;
+            if (l.Reg.Length > 0 && Flights.Any(f => !f.Done && f.Reg == l.Reg)) continue;   // still flying in, or already there
+            if (l.Reg.Length == 0 && Flights.Any(f => !f.Done && f.Kind == "parked" && f.Callsign == l.Callsign)) continue;
+            var gate = FindGate(Perf.For(l.Type), l.Operator, l.Airline, l.Callsign);
+            if (gate is null) continue;
+            try { var pf = SpawnParked(gate, l); pf.Callsign = l.Callsign; } catch (Exception ex) { Log($"Couldn't park {l.Callsign}: {ex.Message}"); }
+        }
+        foreach (var f in Flights)
+        {
+            if (f.Done || f.Test || f.Kind != "parked" || f.Phase != "parked" || f == UserArr) continue;
+            if (!double.IsNaN(f.ArrivedAt) && Time - f.ArrivedAt < GateAfterMin * 60) continue;
+            var next = deps.Any(l => !_done.Contains(Key(l, 'D')) && Until(l.DepMin) is > -15 and <= GateBeforeMin
+                && (f.Reg.Length > 0 ? l.Reg == f.Reg : l.Callsign == f.Callsign));
+            if (next) continue;
+            f.Done = true; _gateGone++;
+        }
+        if (Time - _gateLogAt >= 900 && (_gateGone > 0 || _gateLogAt < 0))
+        {
+            Log($"{me}: gates — {Flights.Count(f => !f.Done && f.Kind == "parked")} aircraft at the gates (only from {GateBeforeMin} min before push-back, and {GateAfterMin} min after arriving); {_gateGone} taken away after arriving in the last 15 minutes");
+            _gateGone = 0; _gateLogAt = Time;
+        }
         // Departures: board a few minutes before, push back on time.
         foreach (var l in deps)
         {
@@ -1519,7 +1549,8 @@ public sealed partial class TrafficWorld
             if (CallsignBusy(l.Callsign)) continue;   // the same flight number still flying: this one waits
             _done.Add(Key(l, 'D'));
             if (active >= maxActive && !UnderShare("departure", maxActive)) { Log($"{l.Callsign}: skipped (traffic limit)"); continue; }
-            var f = Flights.FirstOrDefault(x => x.Reg == l.Reg && x.Reg.Length > 0 && x.Kind == "parked" && x.Phase == "parked" && x.Spot is not null);
+            var f = Flights.FirstOrDefault(x => !x.Done && (l.Reg.Length > 0 ? x.Reg == l.Reg : x.Callsign == l.Callsign && double.IsNaN(x.ArrivedAt))
+                && x.Kind == "parked" && x.Phase == "parked" && x.Spot is not null);
             if (f is null)
             {
                 var gate = FindGate(Perf.For(l.Type), l.Operator, l.Airline, l.Callsign);
@@ -5657,7 +5688,7 @@ public sealed partial class TrafficWorld
                 break;
             case "at gate":
                 f.Lights = Nav | Beacon | Logo;
-                if (Time - f.PhaseTime > 25) { f.Kind = "parked"; f.SetPhase("parked", Time); f.Lights = Nav | Logo | Cabin; }
+                if (Time - f.PhaseTime > 25) { f.Kind = "parked"; f.SetPhase("parked", Time); f.Lights = Nav | Logo | Cabin; f.ArrivedAt = Time; }
                 break;
             case "boarding":
                 f.Lights = Nav | Logo | Cabin;

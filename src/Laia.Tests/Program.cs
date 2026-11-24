@@ -527,11 +527,24 @@ Console.WriteLine("== Traffic from a real schedule");
     world.Log = s => log.Add($"{start + world.Time / 60 - start,5:0.0} min {s}");
     var landedAt = new Dictionary<string, double>();
     var airborneAt = new Dictionary<string, double>();
+    // At a gate only 20 minutes before push-back and 10 after arriving (user, 23 Nov).
+    var earlyAtGate = new HashSet<string>(); var stayed = new HashSet<string>(); var goneBetween = new HashSet<string>(); var maxEarly = 0.0;
+    var atStart = 0;
     for (var i = 0; i < 150 * 60 * 4; i++)
     {
         world.WeekMinute = start + world.Time / 60;
         world.Step(0.25);
-        foreach (var l in log.Skip(0)) { }
+        if (i == 4) atStart = world.Flights.Count(f => !f.Done && f.Kind == "parked");
+        var nowMin = world.Time / 60;
+        foreach (var f in world.Flights.Where(f => !f.Done && f.Kind == "parked" && f.Phase == "parked" && f.Reg.Length > 0))
+        {
+            var nextDep = sched.Legs.Where(l => l.Dep == "TEST" && l.Reg == f.Reg && l.DepMin - start > nowMin - 15).Select(l => l.DepMin - start - nowMin).DefaultIfEmpty(9999).Min();
+            if (double.IsNaN(f.ArrivedAt)) { if (nextDep > 20.5) { earlyAtGate.Add(f.Reg); maxEarly = Math.Max(maxEarly, nextDep); } }
+            else if (world.Time - f.ArrivedAt > 601 && nextDep > 20.5) stayed.Add(f.Reg);
+        }
+        // An airframe that turned round (landed, then leaves 50 minutes later) is away from its gate in between.
+        foreach (var r in sched.Legs.Where(l => l.Arr == "TEST").Select(l => l.Reg))
+            if (landedAt.ContainsKey(sched.Legs.First(l => l.Arr == "TEST" && l.Reg == r).Callsign) && !world.Flights.Any(f => !f.Done && f.Reg == r)) goneBetween.Add(r);
         foreach (var f in world.Flights)
         {
             if (f.Kind == "arrival" && f.OnGround && !landedAt.ContainsKey(f.Callsign)) landedAt[f.Callsign] = world.Time / 60;
@@ -549,6 +562,11 @@ Console.WriteLine("== Traffic from a real schedule");
     Check(departureDelays.Count > 0 && departureDelays.Min() > -1, "nobody leaves before their scheduled time");
     var dl = sched.Legs.Where(l => l.Dep == "TEST" && l.Airline == "DAL").Count(l => airborneAt.ContainsKey(l.Callsign));
     Check(dl >= 9, $"arrived airframes leave again on their next flight ({dl} of 10)");
+    Console.WriteLine($"  at the gates at the start: {atStart} (10 leave in the first 20 minutes, 5 of them within 20); early at a gate: {earlyAtGate.Count} (up to {maxEarly:0} min before); stayed past 10 min: {stayed.Count}; away between flights: {goneBetween.Count} of 10");
+    Check(atStart <= 7, "at the start, only aircraft pushing back within 20 minutes are at the gates");
+    Check(earlyAtGate.Count == 0, "no aircraft at a gate more than 20 minutes before its push-back");
+    Check(stayed.Count == 0, "no aircraft at its gate more than 10 minutes after arriving (unless it leaves within 20)");
+    Check(goneBetween.Count >= 9, "an airframe with 50 minutes between flights is taken away, then back 20 minutes before");
 }
 
 Console.WriteLine("== Changing the traffic level while traffic runs refits it at once (15 Nov: Medium and Real world seemed to do nothing)");
@@ -557,7 +575,7 @@ Console.WriteLine("== Changing the traffic level while traffic runs refits it at
     var sched = new Laia.Common.Airports.ScheduleData { Airport = "TEST", Source = "AIG" };
     const int start = 2 * 1440 + 600;
     for (var i = 0; i < 16; i++)
-        sched.Legs.Add(new() { Airline = "DAL", Operator = "DAL", Title = "T", Type = "B739", Reg = $"N{i}LV", Flight = $"{400 + i}", Dep = "TEST", Arr = "KYYY", DepMin = start + 60 + i * 8, ArrMin = start + 200 });
+        sched.Legs.Add(new() { Airline = "DAL", Operator = "DAL", Title = "T", Type = "B739", Reg = $"N{i}LV", Flight = $"{400 + i}", Dep = "TEST", Arr = "KYYY", DepMin = start + 4 + i, ArrMin = start + 200 });
     var log = new List<string>();
     var world = new TrafficWorld(apt, new TestSource(), seed: 9) { Level = TrafficLevel.RealWorld, Wind = new Wind(270, 8), Schedule = sched, WeekMinute = start };
     world.Log = s2 => log.Add(s2);
