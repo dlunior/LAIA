@@ -522,7 +522,11 @@ public sealed class FlightSource(SettingsStore settings, ILogger<FlightSource> l
                 {
                     idx++;
                     string S(string n) => f.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
-                    if (!skipGate.Contains(idx)) LearnGates(airport, dep, f, S);
+                    // A flight AirLabs itself marks as a codeshare (cs_… fields name the operating flight) never teaches a
+                    // gate: only the operator's own listing does (23 Nov, KMSP: Virgin, KLM, Air France and WestJet were
+                    // still learned at Delta's A2/D5/C24/B10 — the check above only looked at unmarked duplicates).
+                    var marked = S("cs_airline_iata").Length > 0 || S("cs_flight_iata").Length > 0 || S("cs_flight_number").Length > 0;
+                    if (!skipGate.Contains(idx) && !marked) LearnGates(airport, dep, f, S);
                     var airline = S("airline_icao");
                     var cs = S("flight_icao");
                     var other = dep ? S("arr_icao") : S("dep_icao");
