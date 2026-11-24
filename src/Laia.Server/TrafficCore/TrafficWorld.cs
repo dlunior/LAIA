@@ -63,6 +63,10 @@ public sealed class Flight
     public double Timer, PhaseTime, Age;
     /// <summary>When it parked at its gate after landing here (NaN: it didn't).</summary>
     public double ArrivedAt = double.NaN;
+    /// <summary>Parked after landing between 23:00 and 06:00 airport local time: stays for its next flight (user, 24 Nov).</summary>
+    public bool Overnight;
+    /// <summary>When its departure pushes back (world time), for one placed at its gate ahead of it.</summary>
+    public double PushAt = double.NaN;
     public double LiftoffTime = -1;
     public int OnRunway = -1;
     public int Reserve = -1;
@@ -901,8 +905,8 @@ public sealed partial class TrafficWorld
     // ------------------------------------------------------------------ real schedule
 
     private readonly HashSet<string> _done = new();
-    /// <summary>Minutes an aircraft is at its gate before push-back, and after arriving (user, 23 Nov).</summary>
-    public const int GateBeforeMin = 20, GateAfterMin = 10;
+    /// <summary>Minutes an aircraft is at its gate before push-back (user, 24 Nov: 45, was 20), and after arriving (user, 23 Nov).</summary>
+    public const int GateBeforeMin = 45, GateAfterMin = 10;
     private int _gateGone; private double _gateLogAt = -1;
     private bool _schedStarted;
 
@@ -927,6 +931,26 @@ public sealed partial class TrafficWorld
             return (int)(((utcMin + offMin) % 1440 + 1440) % 1440);
         }
     }
+
+    /// <summary>The airport's local time on the schedule's clock (minutes of the day): the real clock live, the replayed
+    /// one at Peak, the test's in tests.</summary>
+    public int LocalSchedMinute
+    {
+        get
+        {
+            if (LocalMinuteOverride is { } o) return o;
+            var lon = Apt.Data.Lon;
+            var id = lon > -87.6 ? "America/New_York" : lon > -101 ? "America/Chicago" : lon > -114.5 ? "America/Denver" : lon > -130 ? "America/Los_Angeles" : lon > -150 ? "America/Anchorage" : "Pacific/Honolulu";
+            double offMin;
+            try { offMin = TimeZoneInfo.FindSystemTimeZoneById(id).GetUtcOffset(DateTime.UtcNow).TotalMinutes; }
+            catch { offMin = Math.Round(lon / 15) * 60; }
+            var utcMin = WeekMinute >= 0 ? ((SchedNow % 1440) + 1440) % 1440 : DateTime.UtcNow.Hour * 60 + DateTime.UtcNow.Minute;
+            return (int)(((utcMin + offMin) % 1440 + 1440) % 1440);
+        }
+    }
+
+    /// <summary>Between 23:00 and 06:00 at the airport.</summary>
+    public bool NightNow => LocalSchedMinute is >= 23 * 60 or < 6 * 60;
 
     /// <summary>How far out arrivals are taken over from the whole sky (nm).</summary>
     /// <summary>How far out arrivals are taken over from the whole sky (user, 19 Nov: "Let's push the bar... 400 —
@@ -1530,9 +1554,12 @@ public sealed partial class TrafficWorld
         {
             if (f.Done || f.Test || f.Kind != "parked" || f.Phase != "parked" || f == UserArr) continue;
             if (!double.IsNaN(f.ArrivedAt) && Time - f.ArrivedAt < GateAfterMin * 60) continue;
-            var next = deps.Any(l => !_done.Contains(Key(l, 'D')) && Until(l.DepMin) is > -15 and <= GateBeforeMin
+            // Parked for the night (landed after 23:00 local, user 24 Nov: "after 11PM local time of the airport change
+            // arriving aircraft to not despawn"): it stays for its next flight; with none in the next 12 hours, until 06:00.
+            var within = f.Overnight ? 720 : GateBeforeMin;
+            var next = deps.Any(l => !_done.Contains(Key(l, 'D')) && Until(l.DepMin) is var ud && ud > -15 && ud <= within
                 && (f.Reg.Length > 0 ? l.Reg == f.Reg : l.Callsign == f.Callsign));
-            if (next) continue;
+            if (next || (f.Overnight && NightNow)) continue;
             f.Done = true; _gateGone++;
         }
         if (Time - _gateLogAt >= 900 && (_gateGone > 0 || _gateLogAt < 0))
@@ -1733,7 +1760,8 @@ public sealed partial class TrafficWorld
             Reg = leg?.Reg ?? "", Title = leg?.Title ?? "", Brand = leg?.Airline,
         };
         f.SetPhase("parked", Time);
-        f.Lights = Rng.NextDouble() < 0.5 ? 0 : Nav | Logo;
+        f.Lights = 0;
+        if (leg is not null && WeekMinute >= 0) f.PushAt = Time + Until(leg.DepMin) * 60;
         Flights.Add(f);
         return f;
     }
@@ -2451,6 +2479,51 @@ public sealed partial class TrafficWorld
     public bool SafetyLogic;
     /// <summary>Ceiling below 800 ft or visibility below 2 miles (the METAR): no line up and wait with landing traffic.</summary>
     public bool LowWeather;
+    /// <summary>The METAR's lowest broken/overcast base (ft above the field) and temperature (°C); NaN when unknown.</summary>
+    public double CloudBaseFt = double.NaN, SurfaceTempC = double.NaN;
+    /// <summary>For tests: the time of day used for night lighting (else the real clock, as the sim's sky).</summary>
+    public DateTime? LightClock { get; set; }
+
+    /// <summary>The sun's elevation at the airport now (degrees).</summary>
+    public double SunElevationDeg()
+    {
+        var t = LightClock ?? DateTime.UtcNow;
+        var d = t.DayOfYear + (t.Hour + t.Minute / 60.0) / 24.0;
+        var decl = -23.44 * Math.Cos(2 * Math.PI / 365 * (d + 10));
+        var hourAngle = ((t.Hour + t.Minute / 60.0) * 15 + Apt.Data.Lon - 180);
+        double R(double x) => x * Math.PI / 180;
+        var sin = Math.Sin(R(Apt.Data.Lat)) * Math.Sin(R(decl)) + Math.Cos(R(Apt.Data.Lat)) * Math.Cos(R(decl)) * Math.Cos(R(hourAngle));
+        return Math.Asin(Math.Clamp(sin, -1, 1)) * 180 / Math.PI;
+    }
+
+    private double _sunAt = double.NegativeInfinity; private bool _dark;
+    /// <summary>Dark enough for night lighting (the sun more than 3° below the horizon), checked once a minute.</summary>
+    public bool Dark { get { if (Time - _sunAt > 60 || LightClock is not null) { _sunAt = Time; _dark = SunElevationDeg() < -3; } return _dark; } }
+
+    /// <summary>
+    /// The lights shown in the sim (user, 24 Nov): parked aircraft are dark unless crewed — for 10 minutes after arriving,
+    /// and from 30 minutes before push-back; all exterior lights while crossing a runway (AIM 4-3-23); wing (ice
+    /// inspection) lights taxiing at night, and in the air in cloud near freezing (from the METAR's lowest broken or
+    /// overcast base to 5,000 ft above it, colder than +5 °C there at 2 °C a thousand feet).
+    /// </summary>
+    public int ShownLights(Flight f)
+    {
+        var l = f.Lights;
+        if (f.Phase == "parked")
+        {
+            var crewed = (!double.IsNaN(f.ArrivedAt) && Time - f.ArrivedAt < 600) || (!double.IsNaN(f.PushAt) && f.PushAt - Time < 1800);
+            return crewed ? Nav | Logo | Cabin : 0;
+        }
+        if (f.OnGround && f.OnRunway >= 0 && f.Phase is "taxi" or "taxi in" or "holding short") l |= Strobes | Landing | Taxi;
+        if (f.OnGround && Dark && f.Phase is "taxi" or "taxi in" or "pushback" or "holding short" or "lining up" or "lined up" or "takeoff roll" or "landing roll") l |= Wing;
+        if (!f.OnGround && !double.IsNaN(CloudBaseFt) && !double.IsNaN(SurfaceTempC))
+        {
+            var agl = f.AltFt - Apt.ElevationFt;
+            var temp = SurfaceTempC - 2 * agl / 1000;
+            if (agl >= CloudBaseFt && agl <= CloudBaseFt + 5000 && temp <= 5) l |= Wing;
+        }
+        return l;
+    }
 
     /// <summary>
     /// An aircraft on the runway a departure may line up and wait behind (7110.65 3-9-4; user, 16 Nov: "any method to help
@@ -5684,11 +5757,10 @@ public sealed partial class TrafficWorld
         {
             case "parked":
                 if (f.Kind == "arrival") f.Kind = "parked";
-                if (Time - f.PhaseTime > 180 && f.Lights != 0 && f.Age > 600) f.Lights = Rng.NextDouble() < 0.002 ? 0 : f.Lights;
                 break;
             case "at gate":
                 f.Lights = Nav | Beacon | Logo;
-                if (Time - f.PhaseTime > 25) { f.Kind = "parked"; f.SetPhase("parked", Time); f.Lights = Nav | Logo | Cabin; f.ArrivedAt = Time; }
+                if (Time - f.PhaseTime > 25) { f.Kind = "parked"; f.SetPhase("parked", Time); f.Lights = Nav | Logo | Cabin; f.ArrivedAt = Time; f.Overnight = NightNow; }
                 break;
             case "boarding":
                 f.Lights = Nav | Logo | Cabin;

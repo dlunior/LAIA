@@ -719,7 +719,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         {
             Id = f.Id, Callsign = f.Callsign, Airline = f.Airline, Type = f.Type, Model = f.Title, Lat = lat, Lon = lon, AltFt = f.AltFt,
             AglFt = f.OnGround ? 0 : Math.Max(0, f.AltFt - ground), OnGround = f.OnGround, TimeMs = _stampMs, Heading = f.Heading,
-            Pitch = f.Pitch, Bank = f.Bank, GroundSpeed = f.Gs, VerticalSpeed = f.Vs, GearDown = f.Gear, Phase = f.Phase, Lights = f.Lights,
+            Pitch = f.Pitch, Bank = f.Bank, GroundSpeed = f.Gs, VerticalSpeed = f.Vs, GearDown = f.Gear, Phase = f.Phase, Lights = w.ShownLights(f),
         };
     }
 
@@ -1399,6 +1399,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                             if (metar.Wind(w.Apt.Icao) is { } mw) w.Wind = new Wind(mw.dir ?? w.Wind.FromDeg, mw.kt);
                             else if (dNm < 15 && sim.AltitudeFt < w.Apt.ElevationFt + 5000) w.Wind = new Wind(sim.WindDirection, sim.WindSpeed);
                             w.LowWeather = metar.LowWeather(w.Apt.Icao);
+                            (w.CloudBaseFt, w.SurfaceTempC) = metar.Cloud(w.Apt.Icao);
                             w.SafetyLogic = SafetyLogicAirports.Contains(w.Apt.Icao);
                             w.UserPos = w.Apt.Map.ToXY(sim.Lat, sim.Lon);
                             w.UserOnGround = sim.OnGround;
