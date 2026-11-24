@@ -1,3 +1,4 @@
+using Laia.Common.Airports;
 using System.Globalization;
 using Laia.Server.TrafficCore;
 
@@ -93,6 +94,46 @@ public sealed class NetworkStore(WorldAirports world, ILogger<NetworkStore> log)
     public string Status { get; private set; } = "waiting for the schedules from LAIA Sim";
     public int Count { get { lock (_gate) return _legs.Count; } }
 
+    // The AIG timetable as LAIA Sim sent it, and the real timetable (RealTimetableService) used at the airports where
+    // it's good: the whole sky is the AIG flights not touching those airports, plus the real flights that do.
+    private List<NetLeg> _aig = new();
+    private HashSet<string> _ttGood = new(StringComparer.OrdinalIgnoreCase);
+    private List<NetLeg> _ttLegs = new();
+    public int AigVersion { get; private set; }
+    public int AigCount { get { lock (_gate) return _aig.Count; } }
+    public List<NetLeg> AigLegs() { lock (_gate) return _aig.ToList(); }
+
+    private void SetAig(List<NetLeg> legs, DateTime read)
+    {
+        _aig = legs; AigVersion++;
+        _readUtc = read;
+        Merge();
+    }
+
+    private void Merge()
+    {
+        _legs = _ttGood.Count == 0 ? _aig
+            : _aig.Where(l => !_ttGood.Contains(l.Dep) && !_ttGood.Contains(l.Arr)).Concat(_ttLegs.Where(l => _ttGood.Contains(l.Dep) || _ttGood.Contains(l.Arr))).ToList();
+        _locatedWith = -1; _legsVersion++;
+    }
+
+    /// <summary>The real timetable, for the whole sky's flights to and from the airports where it's good.</summary>
+    public void ApplyTimetable(HashSet<string> good, List<ScheduleLeg> legs)
+    {
+        var net = legs.Select(l => new NetLeg
+        {
+            Airline = l.Airline, Operator = l.Operator, Type = l.Type, Reg = l.Reg.Length > 0 ? l.Reg : "X" + l.Callsign, Flight = l.Flight,
+            Dep = l.Dep, Arr = l.Arr, Title = l.Title, DepMin = l.DepMin, ArrMin = l.ArrMin,
+        }).ToList();
+        lock (_gate)
+        {
+            _ttGood = good; _ttLegs = net;
+            Merge();
+            log.LogInformation("Whole sky: {aig:N0} AIG flights a week, {tt:N0} of them replaced by the real timetable's {n:N0} at {g} airports — {all:N0} in all",
+                _aig.Count, _aig.Count(l => good.Contains(l.Dep) || good.Contains(l.Arr)), net.Count(l => good.Contains(l.Dep) || good.Contains(l.Arr)), good.Count, _legs.Count);
+        }
+    }
+
     public void LoadCache()
     {
         try
@@ -101,7 +142,7 @@ public sealed class NetworkStore(WorldAirports world, ILogger<NetworkStore> log)
             using var f = File.OpenRead(File_);
             var (legs, read) = NetworkModel.Parse(f);
             legs = legs.Where(l => !Laia.Server.TrafficCore.TrafficWorld.LeaveOut(l.Airline, l.Operator)).ToList();
-            lock (_gate) { _legs = legs; _readUtc = read == DateTime.MinValue ? File.GetLastWriteTimeUtc(File_) : read; _locatedWith = -1; _legsVersion++; }
+            lock (_gate) SetAig(legs, read == DateTime.MinValue ? File.GetLastWriteTimeUtc(File_) : read);
             log.LogInformation("Network schedule from cache: {n} flights a week", legs.Count);
         }
         catch (Exception ex) { log.LogWarning("Network cache unreadable: {msg}", ex.Message); }
@@ -117,7 +158,7 @@ public sealed class NetworkStore(WorldAirports world, ILogger<NetworkStore> log)
         var (legs, read) = NetworkModel.Parse(new MemoryStream(bytes));
         legs = legs.Where(l => !Laia.Server.TrafficCore.TrafficWorld.LeaveOut(l.Airline, l.Operator)).ToList();
         if (legs.Count == 0) return 0;
-        lock (_gate) { _legs = legs; _readUtc = read == DateTime.MinValue ? DateTime.UtcNow : read; _locatedWith = -1; _legsVersion++; }
+        lock (_gate) SetAig(legs, read == DateTime.MinValue ? DateTime.UtcNow : read);
         try { Directory.CreateDirectory(Paths.DataDir); await File.WriteAllBytesAsync(File_, bytes, ct); } catch { }
         log.LogInformation("Network schedule received: {n} flights a week ({kb:N0} kB)", legs.Count, bytes.Length / 1024);
         return legs.Count;

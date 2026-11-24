@@ -30,6 +30,7 @@ public sealed class TrackDb
             CREATE INDEX IF NOT EXISTS airport_days_day ON airport_days(day);
             CREATE TABLE IF NOT EXISTS tracks(icao TEXT NOT NULL, day TEXT NOT NULL, data BLOB NOT NULL, PRIMARY KEY(icao, day));
             CREATE INDEX IF NOT EXISTS tracks_day ON tracks(day);
+            CREATE TABLE IF NOT EXISTS legs(day TEXT PRIMARY KEY, flights INTEGER NOT NULL, data BLOB NOT NULL);
             """);
     }
 
@@ -134,6 +135,40 @@ public sealed class TrackDb
         }
     }
 
+    /// <summary>A day's real flights (TraceLegs, gzipped JSON), replacing any kept before.</summary>
+    public void SaveLegs(string day, int flights, byte[] data)
+    {
+        lock (_write)
+        {
+            using var c = Open();
+            using var cmd = c.CreateCommand();
+            cmd.CommandText = "INSERT OR REPLACE INTO legs(day, flights, data) VALUES($d, $n, $x)";
+            cmd.Parameters.AddWithValue("$d", day); cmd.Parameters.AddWithValue("$n", flights); cmd.Parameters.AddWithValue("$x", data);
+            cmd.ExecuteNonQuery();
+        }
+    }
+
+    /// <summary>The days whose flights are kept, newest first, with how many.</summary>
+    public List<(string day, int flights)> LegDays()
+    {
+        using var c = Open();
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = "SELECT day, flights FROM legs ORDER BY day DESC";
+        using var r = cmd.ExecuteReader();
+        var res = new List<(string, int)>();
+        while (r.Read()) res.Add((r.GetString(0), r.GetInt32(1)));
+        return res;
+    }
+
+    public byte[]? Legs(string day)
+    {
+        using var c = Open();
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = "SELECT data FROM legs WHERE day = $d";
+        cmd.Parameters.AddWithValue("$d", day);
+        return cmd.ExecuteScalar() as byte[];
+    }
+
     /// <summary>Removes days older than this many days (day names are yyyy.MM.dd); returns how many.</summary>
     public int Prune(int keepDays)
     {
@@ -149,7 +184,7 @@ public sealed class TrackDb
                 n = Convert.ToInt32(cmd.ExecuteScalar(), CultureInfo.InvariantCulture);
             }
             if (n == 0) return 0;
-            foreach (var t in new[] { "days", "airport_days", "tracks" })
+            foreach (var t in new[] { "days", "airport_days", "tracks", "legs" })
             {
                 using var cmd = c.CreateCommand();
                 cmd.CommandText = $"DELETE FROM {t} WHERE day < $c";

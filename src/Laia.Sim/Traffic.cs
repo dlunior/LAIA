@@ -7,7 +7,7 @@ namespace Laia.Sim;
 /// <summary>AIG aircraft models installed in the Community folder, by airline and type.</summary>
 internal sealed class AigCatalog
 {
-    public sealed record Model(string Title, string Airline, string Type);
+    public sealed record Model(string Title, string Airline, string Type, bool Fsltl = false);
     public List<Model> Models { get; } = new();
     /// <summary>The Community folder the models were found in (the AIG flight plans live there too).</summary>
     public string? Community { get; private set; }
@@ -31,16 +31,45 @@ internal sealed class AigCatalog
             if (cat.Models.Count > 0) { cat.Community = c; break; } // the first Community folder that has AIG models
         }
         Log.Write($"AIG catalog: {cat.Models.Count} liveries found");
+        // FSLTL's liveries too, after AIG's (user, 24 Nov: "AIG first"): for real flights AIG has no livery for.
+        var aig = cat.Models.Count;
+        foreach (var c in community)
+        {
+            try
+            {
+                foreach (var pkg in Directory.GetDirectories(c!, "fsltl-*"))
+                {
+                    var planes = Path.Combine(pkg, "SimObjects", "Airplanes");
+                    if (!Directory.Exists(planes)) continue;
+                    foreach (var dir in Directory.GetDirectories(planes, "FSLTL_*"))
+                    {
+                        var cfg = Path.Combine(dir, "aircraft.cfg");
+                        if (!File.Exists(cfg)) continue;
+                        var before = cat.Models.Count;
+                        cat.Parse(cfg, fsltl: true);
+                        // The folder names the airline (FSLTL_A320_AAY) where the cfg doesn't; ZZZZ is FSLTL's plain white.
+                        var parts = Path.GetFileName(dir).Split('_');
+                        var code = parts.Length >= 3 ? parts[2].ToUpperInvariant() : "";
+                        for (var k = before; k < cat.Models.Count; k++)
+                            if (cat.Models[k].Airline.Length == 0 && code.Length == 3) cat.Models[k] = cat.Models[k] with { Airline = code };
+                        cat.Models.RemoveAll(m => m.Fsltl && (m.Airline.Length != 3 || m.Airline == "ZZZ" || m.Airline == "ZZZZ"));
+                    }
+                }
+            }
+            catch (Exception ex) { Log.Write("FSLTL scan error: " + ex.Message); }
+            if (cat.Models.Count > aig) break;
+        }
+        if (cat.Models.Count > aig) Log.Write($"FSLTL catalog: {cat.Models.Count - aig} liveries found (used after AIG's)");
         return cat;
     }
 
-    private void Parse(string path)
+    private void Parse(string path, bool fsltl = false)
     {
         string section = "", type = "";
         string? title = null, airline = null;
         void Flush()
         {
-            if (title is not null) Models.Add(new Model(title, (airline ?? "").ToUpperInvariant(), type.ToUpperInvariant()));
+            if (title is not null) Models.Add(new Model(title, (airline ?? "").ToUpperInvariant(), type.ToUpperInvariant(), fsltl));
             title = null; airline = null;
         }
         foreach (var raw in File.ReadLines(path))
@@ -87,12 +116,16 @@ internal sealed class AigCatalog
     {
         if (Models.Count == 0) return Fallback;
         var fam = Family(type == "A220" ? "BCS3" : type);
+        // AIG first, then FSLTL, at each of the close matches; the loose ones (another type, another airline) AIG only.
         var tiers = new Func<Model, bool>[]
         {
-            m => m.Airline == airline && m.Type == type,
-            m => m.Airline == airline && Family(m.Type) == fam,
-            m => m.Airline == airline,
-            m => Family(m.Type) == fam,
+            m => !m.Fsltl && m.Airline == airline && m.Type == type,
+            m => !m.Fsltl && m.Airline == airline && Family(m.Type) == fam,
+            m => m.Fsltl && m.Airline == airline && m.Type == type,
+            m => m.Fsltl && m.Airline == airline && Family(m.Type) == fam,
+            m => !m.Fsltl && m.Airline == airline,
+            m => !m.Fsltl && Family(m.Type) == fam,
+            m => !m.Fsltl,
             _ => true,
         };
         foreach (var t in tiers)

@@ -41,6 +41,8 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<WindsAloftReader>(
 builder.Services.AddSingleton<LiveRunways>();
 builder.Services.AddHostedService<NasrUpdater>();
 builder.Services.AddSingleton<FlightSource>();
+builder.Services.AddSingleton<RealTimetableService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<RealTimetableService>());
 builder.Services.AddSingleton<PerfMonitor>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<PerfMonitor>());
 builder.Services.AddSingleton<TrafficEngine>();

@@ -62,6 +62,17 @@ app.MapGet("/api/tracks/{icao}/{day}", (string icao, string day, HttpContext ctx
     return Results.Bytes(blob, "application/octet-stream");
 });
 
+// The real flights kept (for LAIA's timetable): the days, then one day's as gzipped JSON
+// [[callsign, type, registration, from, to, take-off, landing], …] (Unix seconds; an end not seen is "" / null).
+app.MapGet("/api/legdays", () => Results.Json(db.LegDays().Select(d => new { day = d.day, flights = d.flights })));
+app.MapGet("/api/legs/{day}", (string day, HttpContext ctx) =>
+{
+    var blob = db.Legs(day);
+    if (blob is null) return Results.NotFound();
+    ctx.Response.Headers.CacheControl = "public, max-age=86400";
+    return Results.Bytes(blob, "application/octet-stream");
+});
+
 // A small page to check on it from a browser.
 app.MapGet("/", () =>
 {

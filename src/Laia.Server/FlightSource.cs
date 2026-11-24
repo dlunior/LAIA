@@ -121,6 +121,22 @@ public sealed class FlightSource(SettingsStore settings, ILogger<FlightSource> l
         catch { }
     }
 
+    /// <summary>An installed livery (AIG or FSLTL, from LAIA Sim's catalog) for this airline and type, or the type's
+    /// family (a 737-800 livery for a 737 MAX 8). False until a catalog is known.</summary>
+    public bool HasLivery(string airline, string type)
+    {
+        lock (_gate)
+        {
+            LoadCatalog();
+            if (_catalog.Count == 0) return false;
+            var fam = RealTimetable.Family(type);
+            return _catalog.Any(e => e.Airline.Equals(airline, StringComparison.OrdinalIgnoreCase) && (e.Type == type || RealTimetable.Family(e.Type) == fam));
+        }
+    }
+
+    /// <summary>Changes when a new catalog arrives.</summary>
+    public int CatalogSignature { get { lock (_gate) { LoadCatalog(); return _catalog.Count * 31 + _catalog.Sum(e => e.Count); } } }
+
     /// <summary>Installed models are known (from LAIA Sim, or from the last session).</summary>
     public bool CatalogKnown { get { lock (_gate) { LoadCatalog(); return _catalog.Count > 0; } } }
 

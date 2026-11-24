@@ -31,6 +31,8 @@ jobs:
           if ($LASTEXITCODE) { throw "server build failed" }
           dotnet build src/Laia.Sim -c Release -v q
           if ($LASTEXITCODE) { throw "LAIA Sim build failed" }
+          dotnet build src/Laia.Collector -c Release -v q
+          if ($LASTEXITCODE) { throw "LAIA Collector build failed" }
       - name: Check traffic logic (offline simulation)
         shell: pwsh
         run: |

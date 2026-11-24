@@ -170,6 +170,7 @@ async function pollTraffic(){try{const r=await fetch("/api/traffic");const t=awa
   if(st.navdata)a+=" En-route navigation data: "+esc(st.navdata)+".";
   if(st.learned)a+=" Learned from real tracks: "+esc(st.learned)+".";
   if(st.windsAloft)a+=" "+esc(st.windsAloft)+".";
+  if(st.timetable)a+=" "+esc(st.timetable)+".";
   const pf=t.perf;
   if(pf)a+=` Server PC (last minute): processor ${pf.pcCpu==null?"?":pf.pcCpu+"%"} (LAIA ${pf.laiaCpu}%), memory ${pf.memPct==null?"?":pf.memPct+"% of "+pf.memGb+" GB"} (LAIA ${pf.laiaMb} MB), traffic updates ${pf.avgMs} ms on average, longest ${pf.maxMs} ms${pf.slow?`, ${pf.slow} over 250 ms`:""}${pf.gpu?", graphics card "+esc(pf.gpu):""}.`;
   $("tAirport").innerHTML=a;

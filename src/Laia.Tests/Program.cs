@@ -1489,6 +1489,46 @@ Console.WriteLine("== Winds aloft: the FD forecast read, and the user's own sim 
     Check(none.FromDeg == 180 && none.Kt == 10, "with no forecast and no readings: the surface wind (as before)");
 }
 
+Console.WriteLine("== Real flights from ADS-B (the LAIA Collector) and the real timetable built from them (user, 24 Nov)");
+{
+    var aptA = new TraceLegs.Apt("KAAA", 40.0, -75.0, 100);
+    var aptB = new TraceLegs.Apt("KBBB", 41.0, -77.0, 600);
+    IEnumerable<TraceLegs.Apt> Near(double la, double lo) => new[] { aptA, aptB };
+    // One aircraft's day: on the ground at KAAA, up, across to KBBB (the receivers lose it at 1,400 ft), on the ground
+    // there, then back to KAAA, seen to the ground.
+    var t0 = new DateTimeOffset(2026, 11, 23, 14, 0, 0, TimeSpan.Zero).ToUnixTimeSeconds();
+    var pts = new List<string>();
+    void P(double dt, double la, double lo, string alt, string? cs = null) =>
+        pts.Add($"[{dt},{la},{lo},{alt},250,270,0,0{(cs is null ? "" : $",{{\"flight\":\"{cs}   \"}}")}]");
+    P(0, 40.0, -75.0, "\"ground\"", "DAL123"); P(300, 40.0, -75.01, "\"ground\"");
+    for (var k = 0; k <= 40; k++) P(400 + k * 90, 40.0 + k * 0.025, -75.01 - k * 0.05, (k == 0 ? 400 : Math.Min(35000, 400 + k * 2000)).ToString(), k == 5 ? "DAL123" : null);
+    P(400 + 41 * 90, 40.99, -76.99, "1400");
+    P(9000, 41.0, -77.0, "\"ground\"", "DAL124"); P(9600, 41.0, -77.0, "\"ground\"");
+    for (var k = 0; k <= 40; k++) P(9700 + k * 90, 41.0 - k * 0.025, -77.0 + k * 0.05, Math.Min(33000, 1200 + k * 1800).ToString());
+    P(9700 + 41 * 90, 40.0, -75.0, "\"ground\"");
+    var json = $"{{\"icao\":\"a1b2c3\",\"r\":\"N123DL\",\"t\":\"B739\",\"timestamp\":{t0},\"trace\":[{string.Join(",", pts)}]}}";
+    var legs = TraceLegs.Extract(System.Text.Encoding.UTF8.GetBytes(json), Near);
+    Console.WriteLine("  " + string.Join("; ", legs.Select(l => $"{l.Callsign} {l.Type} {l.Reg} {l.Dep}→{l.Arr} {DateTimeOffset.FromUnixTimeSeconds((long)l.DepT):HH:mm}–{DateTimeOffset.FromUnixTimeSeconds((long)l.ArrT):HH:mm}")));
+    Check(legs.Count == 2 && legs[0].Dep == "KAAA" && legs[0].Arr == "KBBB" && legs[1].Dep == "KBBB" && legs[1].Arr == "KAAA", "both flights, each from its ground stop to the next");
+    Check(legs.Count == 2 && legs[0].Callsign == "DAL123" && legs[1].Callsign == "DAL124" && legs[0].Reg == "N123DL" && legs[0].Type == "B739", "callsign, registration and type from the trace");
+    Check(legs.Count == 2 && Math.Abs(legs[0].DepT - (t0 + 300)) < 5 && legs[0].ArrT > t0 + 400 + 41 * 90, "take-off from the last ground point; a landing lost at 1,400 ft worked on from there");
+    // A timetable from two weeks of the same flights, plus one with no installed livery and one with an end not seen.
+    var day1 = legs.ToList();
+    var day2 = legs.Select(l => l with { DepT = l.DepT - 7 * 86400, ArrT = l.ArrT - 7 * 86400 }).ToList();
+    day1.Add(new TraceLegs.Leg("XYZ900", "A320", "N900XY", "KAAA", "KBBB", t0 + 3600, t0 + 7200));
+    day1.Add(new TraceLegs.Leg("DAL777", "B739", "N777DL", "", "KBBB", double.NaN, t0 + 20000));
+    var aigByReg = new Dictionary<string, RealTimetable.AigInfo> { ["N123DL"] = new("DAL", "AIG Delta 739 N123DL", "DAL") };
+    var aigRoute = new Dictionary<string, (string, string)> { ["DAL777"] = ("KAAA", "KBBB") };
+    var tt = RealTimetable.Build(new[] { day1, day2 }, (a, t) => a == "DAL", aigByReg, aigRoute, c => c == "KAAA" ? (40.0, -75.0) : (41.0, -77.0));
+    Console.WriteLine("  " + tt.Summary + ": " + string.Join("; ", tt.Legs.Select(l => $"{l.Callsign} {l.Dep}→{l.Arr} {l.DepMin / 1440}d{l.DepMin % 1440 / 60:00}:{l.DepMin % 60:00} \"{l.Title}\"")));
+    Check(tt.Legs.Count(l => l.Callsign == "DAL123") == 1, "the same flight on the same weekday two weeks running: once (the newest)");
+    Check(tt.Legs.FirstOrDefault(l => l.Callsign == "DAL123") is { Title: "AIG Delta 739 N123DL" } d1 && d1.DepMin == RealTimetable.WeekMinute(t0 + 300 - 12 * 60), "the AIG airframe's exact model, and push-back 12 minutes before take-off");
+    Check(!tt.Legs.Any(l => l.Callsign == "XYZ900") && tt.NoLivery >= 1, "no installed livery: the flight is skipped");
+    Check(tt.Legs.FirstOrDefault(l => l.Callsign == "DAL777") is { Dep: "KAAA" } d7 && d7.DepMin < d7.ArrMin, "an end the receivers didn't see comes from the AIG flight, its time from the distance");
+    var good = RealTimetable.GoodAirports(tt, c => c == "KAAA" ? 2 : 200);
+    Check(!good.Contains("KAAA") && !good.Contains("KBBB"), "used only where it has 14+ flights a week and half the AIG timetable's");
+}
+
 Console.WriteLine("== Winds aloft from Open-Meteo (the FD tables were discontinued, Nov 2026): pressure levels to the forecast levels");
 {
     var json = """

@@ -9,7 +9,7 @@ namespace Laia.Server;
 /// Without a layout (or for the test buttons at an airport not read yet) a simple runway-only world is used.
 /// </summary>
 public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportStore airports, FlightSource source, SettingsStore settings,
-    SimBriefService simbrief, ServerState state, ScheduleStore schedules, NetworkStore network, WorldAirports worldAirports, RoutesDb routesDb, NasrDb nasrDb, AdsbHistory history, MetarReader metar, WindsAloftReader winds, LiveRunways liveRunways, SimBriefService simBrief, PerfMonitor perf, ILogger<TrafficEngine> log) : BackgroundService
+    SimBriefService simbrief, ServerState state, ScheduleStore schedules, RealTimetableService timetable, NetworkStore network, WorldAirports worldAirports, RoutesDb routesDb, NasrDb nasrDb, AdsbHistory history, MetarReader metar, WindsAloftReader winds, LiveRunways liveRunways, SimBriefService simBrief, PerfMonitor perf, ILogger<TrafficEngine> log) : BackgroundService
 {
     private readonly object _gate = new();
     private readonly List<TrafficWorld> _neighbours = new();
@@ -107,7 +107,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     /// <summary>Whether a field has airline passenger service: 14 or more passenger airline flights a week in its real
     /// schedule (not cargo); null until its schedule is known.</summary>
     private bool? PassengerService(string icao) =>
-        schedules.Get(icao) is { } sd ? sd.Legs.Count(l => !TrafficWorld.IsCargo(l.Airline)) >= 14 : null;
+        (timetable.For(icao) ?? schedules.Get(icao)) is { } sd ? sd.Legs.Count(l => !TrafficWorld.IsCargo(l.Airline)) >= 14 : null;
 
 
     private void UpdatePrep(TrafficWorld w, Prep? p, IReadOnlyList<TrafficWorld> neighbours)
@@ -1113,6 +1113,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 })).Where(f => f.Kind != "parked").ToList(),
                 parked = Worlds().Sum(x => x.Flights.Count(f => f.Kind == "parked")),
                 windsAloft = "Winds aloft: " + winds.Status,
+                timetable = char.ToUpper(timetable.Status[0]) + timetable.Status[1..],
                 learned = history.Status + (w is not null && history.Profile(w.Apt.Icao) is { } lp ? "; " + lp.Describe() : ""),
                 neighbours = _neighbours.Count == 0 ? null : $"({_neighbourHow}) " + string.Join(", ", _neighbours.Select(n => $"{n.Apt.Icao} ({n.Flights.Count} flying{(n.PredictionSummary is { } ps ? "; predictions: " + ps : "")})")),
                 sky = network.Count == 0 ? network.Status : $"{network.AirborneNow(w?.ScheduleClock ?? WeekMinuteNow()):N0} flights in the air worldwide · {network.Status}",
@@ -1483,7 +1484,8 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                         {
                             w.Level = Level;
                             // The installed AIG schedule is the real one to follow (exact models and registrations).
-                            if (w.Schedule is null) w.Schedule = schedules.Get(w.Apt.Icao);
+                            // Or the real timetable from ADS-B, where it's good (user, 24 Nov).
+                            if (w.Schedule is null) w.Schedule = timetable.For(w.Apt.Icao) ?? schedules.Get(w.Apt.Icao);
                             if (w == _world || w == _ahead) w.Gates = source.Gates(w.Apt.Icao);
                             w.Atis = Atis.Get(w.Apt.Icao);
                             if (w.Rules is null && Aaup.Get(w.Apt.Icao) is { } aaup)
