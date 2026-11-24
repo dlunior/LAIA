@@ -180,7 +180,10 @@ internal sealed class TrafficRenderer : IAsyncDisposable
         await _sc.AddToDataDefinitionAsync(DefGear, "GEAR RIGHT POSITION", "percent over 100", SimDataType.Float64);
         await _sc.AddToDataDefinitionAsync(DefWaypoints, "AI WAYPOINT LIST", "number", SimDataType.Waypoint);
         // The lights as the sim shows them, in the order of LightEvents — read back now and then to check they took.
+        // First the switches, then whether each is actually lit (powered) — "LIGHT … ON" (user, 23 Nov: add the check).
         foreach (var n in new[] { "LIGHT NAV", "LIGHT BEACON", "LIGHT STROBE", "LIGHT LANDING", "LIGHT TAXI", "LIGHT LOGO", "LIGHT WING", "LIGHT CABIN" })
+            await _sc.AddToDataDefinitionAsync(DefLights, n, "bool", SimDataType.Float64);
+        foreach (var n in new[] { "LIGHT NAV ON", "LIGHT BEACON ON", "LIGHT STROBE ON", "LIGHT LANDING ON", "LIGHT TAXI ON", "LIGHT LOGO ON", "LIGHT WING ON", "LIGHT CABIN ON" })
             await _sc.AddToDataDefinitionAsync(DefLights, n, "bool", SimDataType.Float64);
         await _sc.MapClientEventToSimEventAsync(EvFreezeLatLon, "FREEZE_LATITUDE_LONGITUDE_SET");
         await _sc.MapClientEventToSimEventAsync(EvFreezeAlt, "FREEZE_ALTITUDE_SET");
@@ -342,7 +345,7 @@ internal sealed class TrafficRenderer : IAsyncDisposable
     // six drawn aircraft (airborne first) have their lights read from the sim and compared with what LAIA sent; every
     // 5 minutes a summary per light, and once per model any light it was sent but doesn't show.
     private double _lightCheckAt = -100, _lightLogAt;
-    private readonly int[] _lightSent = new int[8], _lightShown = new int[8];
+    private readonly int[] _lightSent = new int[8], _lightShown = new int[8], _lightLit = new int[8];
     private int _lightChecks;
     private readonly HashSet<string> _lightModelLogged = new();
 
@@ -358,16 +361,17 @@ internal sealed class TrafficRenderer : IAsyncDisposable
         if (now - _lightLogAt >= 300 && _lightChecks > 0)
         {
             _lightLogAt = now;
-            var parts = Enumerable.Range(0, 8).Where(i => _lightSent[i] > 0).Select(i => $"{LightEvents[i].Replace("_LIGHTS_SET", "").Replace("_SET", "").ToLowerInvariant()} {_lightShown[i]}/{_lightSent[i]}");
-            Log.Write($"Lights read back from the sim ({_lightChecks} aircraft checked; shown/sent on): {string.Join(", ", parts)}");
-            Array.Clear(_lightSent); Array.Clear(_lightShown); _lightChecks = 0;
+            var parts = Enumerable.Range(0, 8).Where(i => _lightSent[i] > 0).Select(i => $"{LightEvents[i].Replace("_LIGHTS_SET", "").Replace("_SET", "").ToLowerInvariant()} {_lightShown[i]}/{_lightLit[i]}/{_lightSent[i]}");
+            Log.Write($"Lights read back from the sim ({_lightChecks} aircraft checked; switched on / actually lit / sent on): {string.Join(", ", parts)}");
+            Array.Clear(_lightSent); Array.Clear(_lightShown); Array.Clear(_lightLit); _lightChecks = 0;
         }
     }
 
     private void OnLights(Obj o, SimObjectData d)
     {
-        var shown = 0;
+        int shown = 0, lit = 0;
         for (var i = 0; i < 8; i++) if (d.ReadFloat64() > 0.5) shown |= 1 << i;
+        for (var i = 0; i < 8; i++) if (d.ReadFloat64() > 0.5) lit |= 1 << i;
         var asked = o.LightAsked;
         if (asked < 0) return;
         _lightChecks++;
@@ -378,6 +382,8 @@ internal sealed class TrafficRenderer : IAsyncDisposable
             _lightSent[i]++;
             if (((shown >> i) & 1) != 0) _lightShown[i]++;
             else missing.Add(LightEvents[i]);
+            if (((lit >> i) & 1) != 0) _lightLit[i]++;
+            else if (((shown >> i) & 1) != 0) missing.Add(LightEvents[i] + " (switched on, not lit)");
         }
         if (missing.Count > 0 && _lightModelLogged.Add(o.Title + "|" + string.Join(",", missing)))
             Log.Write($"Lights: {o.Latest.Callsign} (\"{o.Title}\", {(o.Latest.OnGround ? "on the ground" : $"airborne at {o.Latest.AltFt:0} ft")}) was sent {string.Join(", ", missing)} on but the sim shows it off");
