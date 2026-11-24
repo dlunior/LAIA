@@ -2728,7 +2728,9 @@ public sealed partial class TrafficWorld
                 }
                 continue;
             }
-            var tPass = RollTime(f, x.Value.alongA - d.Along(f.Pos)) + 15 + extraSec;
+            // 25 s to spare: the roll can start a few seconds late, and the arrival shouldn't be on a half-mile final
+            // as the departure goes through (24 Nov, test: UAL2717 through the intersection with AAL2736 1,250 m out).
+            var tPass = RollTime(f, x.Value.alongA - d.Along(f.Pos)) + 25 + extraSec;
             foreach (var o in Flights)
             {
                 if (o == f || o.Done || o.Rwy is null || o.Rwy.Runway != end.Runway) continue;
@@ -4333,7 +4335,7 @@ public sealed partial class TrafficWorld
     /// </summary>
     private Approach? ApproachFor(RunwayEnd rwy)
     {
-        var key = string.Join(";", AtisApproaches.Select(x => $"{x.kind}|{x.suffix}|{x.runway}"));
+        var key = string.Join(";", AtisApproaches.Select(x => $"{x.kind}|{x.suffix}|{x.runway}")) + "#" + string.Join(";", NeighbourFinals.Select(n => n.who));
         if (_apps.TryGetValue(rwy, out var had) && had.key == key) return had.app;
         var apps = Apt.Data.Approaches.Where(a => a.Runway == rwy.Ident && a.FinalLegs.Count > 0 && Flyable(a, rwy)).ToList();
         Approach? pick = null;
@@ -4349,6 +4351,18 @@ public sealed partial class TrafficWorld
         {
             pick = apps.OrderBy(a => ApproachPref(a.Type)).ThenByDescending(a => a.Transitions.Count).ThenBy(a => a.Suffix).FirstOrDefault();
             why = AtisApproaches.Count > 0 ? "the ATIS names none LAIA can fly here, so the standard choice" : "no ATIS approach known, so the standard choice";
+            // Tied to the neighbours' flow (plan, Phase 4): where the standard choice runs through a neighbouring
+            // airport's final in use (a mile or more of it within 2 nm of that centreline), the approach that keeps
+            // clearest of them is used instead.
+            if (pick is not null && NeighbourConflict(pick, rwy, out var whoStd) is var cStd && cStd > Geo2.MPerNm)
+            {
+                var alt = apps.Select(a => (a, c: NeighbourConflict(a, rwy, out _))).OrderBy(x => x.c).ThenBy(x => ApproachPref(x.a.Type)).First();
+                if (alt.a != pick && alt.c < cStd * 0.5)
+                {
+                    why = $"the standard {ApproachLabel(pick)} runs through {whoStd}'s final in use ({cStd / Geo2.MPerNm:0.0} nm of it), this one {alt.c / Geo2.MPerNm:0.0} nm";
+                    pick = alt.a;
+                }
+            }
         }
         var label = pick is null ? null : ApproachLabel(pick);
         if (!_apps.ContainsKey(rwy) || had.label != label) Log($"Approach in use at {Apt.Icao}: {label ?? "none (vectors to final)"} for runway {rwy.Ident} ({why})");
@@ -5550,7 +5564,18 @@ public sealed partial class TrafficWorld
             }
         }
         Log($"Runway change at {Apt.Icao}: landing {string.Join(", ", ArrRwys.Select(e => e.Ident))}, departing {string.Join(", ", DepRwys.Select(e => e.Ident))} — {arr} arrival{(arr == 1 ? "" : "s")} and {dep} departure{(dep == 1 ? "" : "s")} given the new runways{(replan > 0 && ArrRwys.Count > 1 ? $", {replan} planned again across the runways now in use" : "")}; arrivals within 25 nm finish on their runway");
+        // The planned changeover (plan, Phase 4): the last arrival to the old runways and the first to the new.
+        var lastOld = Flights.Where(f => !f.Done && f.Kind == "arrival" && !f.OnGround && f.Rwy is not null && !ArrRwys.Contains(f.Rwy) && f != UserArr)
+            .OrderByDescending(f => f.ThrS - f.S).FirstOrDefault();
+        var firstNew = Flights.Where(f => !f.Done && f.Kind == "arrival" && !f.OnGround && f.Rwy is not null && ArrRwys.Contains(f.Rwy) && f != UserArr)
+            .OrderBy(f => f.ThrS - f.S).FirstOrDefault();
+        if (lastOld is not null || firstNew is not null)
+            Log($"Runway change at {Apt.Icao}: the last arrival to the old runway{(lastOld is null ? " — none, it's clear" : $" is {lastOld.Callsign} on {lastOld.Rwy!.Ident} ({(lastOld.ThrS - lastOld.S) / Geo2.MPerNm:0} nm out)")}; the first to the new {(firstNew is null ? "— none yet" : $"is {firstNew.Callsign} on {firstNew.Rwy!.Ident} ({(firstNew.ThrS - firstNew.S) / Geo2.MPerNm:0} nm out)")}");
+        _changeNote = (Time, string.Join("/", ArrRwys.Select(e => e.Ident)), string.Join("/", DepRwys.Select(e => e.Ident)), lastOld?.Callsign);
     }
+
+    /// <summary>The last runway change, for the user's notice: when, landing, departing, the last arrival the old way.</summary>
+    private (double at, string land, string dep, string? lastOld)? _changeNote;
 
     /// <summary>For the control page: what the arrival manager has done and how well the landings were spaced.</summary>
     public string? ArrivalManagerSummary
@@ -6757,6 +6782,42 @@ public sealed partial class TrafficWorld
     /// airport's for a neighbour, a neighbour's for the main airport. Projected on a straight line.</summary>
     public sealed record Foreign(string Callsign, string Airport, string Kind, V2 Pos, double AltFt, double Vs, double GsKt, double Track, string Phase, bool Main);
     public List<Foreign> Others { get; set; } = new();
+    /// <summary>Neighbouring airports' landing runways in use (threshold in this frame, heading), for the approach choice.</summary>
+    public List<(V2 thr, double hdg, string who)> NeighbourFinals { get; set; } = new();
+
+    /// <summary>
+    /// How much of an approach (its transitions and final, below 6,000 ft) runs through a neighbour's final in use —
+    /// within 2 nm of its extended centreline from 1 to 15 nm out: metres of the approach in there. 0: clear of them.
+    /// </summary>
+    private double NeighbourConflict(Approach a, RunwayEnd rwy, out string who)
+    {
+        who = "";
+        if (NeighbourFinals.Count == 0) return 0;
+        var legs = a.Transitions.SelectMany(t => t.Legs).Concat(a.FinalLegs).ToList();
+        var pts = Apt.LegsToPoints(a.FinalLegs, rwy.Threshold - rwy.Dir * (15 * Geo2.MPerNm), 4000, out _).Select(q => q.P).ToList();
+        foreach (var t in a.Transitions)
+            pts.AddRange(Apt.LegsToPoints(t.Legs, rwy.Threshold - rwy.Dir * (20 * Geo2.MPerNm), 6000, out _).Select(q => q.P));
+        double total = 0; var worst = 0.0;
+        foreach (var (thr, hdg, name) in NeighbourFinals)
+        {
+            var dir = V2.FromBearing(hdg);
+            double m = 0;
+            for (var i = 1; i < pts.Count; i++)
+            {
+                var seg = pts[i] - pts[i - 1]; var len = seg.Length;
+                for (var d = 0.0; d < len; d += 200)
+                {
+                    var p = pts[i - 1] + seg * (d / Math.Max(1, len));
+                    var along = -V2.Dot(p - thr, dir);                      // miles out on its final
+                    var off = Math.Abs(V2.Dot(p - thr, dir.Perp));
+                    if (along > 1 * Geo2.MPerNm && along < 15 * Geo2.MPerNm && off < 2 * Geo2.MPerNm) m += Math.Min(200, len - d);
+                }
+            }
+            total += m;
+            if (m > worst) { worst = m; who = name; }
+        }
+        return total;
+    }
     private static V2 Ahead(Foreign o, double t) => o.Pos + V2.FromBearing(o.Track) * (o.GsKt * 0.5144 * t);
 
     /// <summary>

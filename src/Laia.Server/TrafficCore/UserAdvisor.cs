@@ -457,6 +457,21 @@ public sealed partial class TrafficWorld
     {
         var list = new List<Notice>();
         if (UserPos is not { } u) { Notices = list; return; }
+        // A runway change, for 10 minutes (plan, Phase 4: notes with lead time): which way the airport is turning and
+        // where that leaves the user — after the change (their new runway and approach) or before it (keeping theirs).
+        if (_changeNote is { } cn && Time - cn.at < 600 && (u.Length < 80 * Geo2.MPerNm || UserArr is not null))
+        {
+            var head = $"{Apt.Icao} is changing to land {cn.land} / depart {cn.dep}";
+            string tail;
+            if (!UserOnGround && UserArr?.Rwy is { } ur)
+                tail = ArrRwys.Contains(ur)
+                    ? $" — you're after the change: expect the {(ApproachFor(ur) is { } ap ? ApproachLabel(ap) : $"vectors to {ur.Ident}")}"
+                    : $" — you're before it: you keep runway {ur.Ident}{(cn.lastOld is null ? "" : $"; the last one that way is {cn.lastOld}")}";
+            else if (UserOnGround && DepRwys.Count > 0)
+                tail = $" — expect runway {DepRwys.OrderBy(r => (r.Threshold - u).Length).First().Ident} for departure now";
+            else tail = "";
+            list.Add(new Notice("rwychg", head + tail, false));
+        }
         if (!UserOnGround)
         {
             if (Sequence is { } sq)

@@ -690,6 +690,20 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 list.Add(new TrafficWorld.Foreign(l.Callsign, "en route", vs < -300 ? "arrival" : "departure", w.Apt.Map.ToXY(p.Lat, p.Lon), a, vs, p.GsKt, p.Heading, p.Phase, true));
             }
             w.Others = list;
+            // The other airports' landing runways in use (in this airport's frame), within 40 nm: the approach here is
+            // picked to keep clear of their finals when the ATIS doesn't name one (LGA's RNAV X or Y 31 by JFK's flow).
+            var finals = new List<(V2 thr, double hdg, string who)>();
+            foreach (var o in worlds)
+            {
+                if (o == w || o.ArrRwys.Count == 0) continue;
+                if (Geo2.DistanceNm(o.Apt.Data.Lat, o.Apt.Data.Lon, w.Apt.Data.Lat, w.Apt.Data.Lon) > 40) continue;
+                foreach (var r in o.ArrRwys)
+                {
+                    var (la, lo) = o.Apt.Map.ToLatLon(r.Threshold);
+                    finals.Add((w.Apt.Map.ToXY(la, lo), r.Heading, $"{o.Apt.Icao} {r.Ident}"));
+                }
+            }
+            w.NeighbourFinals = finals;
         }
     }
 
