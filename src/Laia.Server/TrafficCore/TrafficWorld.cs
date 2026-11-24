@@ -5076,8 +5076,9 @@ public sealed partial class TrafficWorld
         // A rebuild that makes its way in much longer than the track change asked for, or that starts by turning
         // back, is thrown away (the old way is kept).
         var grown = (f.ThrS - f.S) / Geo2.MPerNm - toGo - (fan[best].lenNm - cur);
-        var firstTurn = f.Path is { Points.Count: > 1 } np ? Math.Abs(Geo2.Diff((np.Points[1] - np.Points[0]).Bearing, f.Heading)) : 0;
-        if (grown > 20 || (firstTurn > 100 && (np!.Points[1] - np.Points[0]).Length > 2 * Geo2.MPerNm))
+        double firstTurn = 0, firstLeg = 0;
+        if (f.Path is { Points.Count: > 1 } np) { var d0 = np.Points[1] - np.Points[0]; firstTurn = Math.Abs(Geo2.Diff(d0.Bearing, f.Heading)); firstLeg = d0.Length; }
+        if (grown > 20 || (firstTurn > 100 && firstLeg > 2 * Geo2.MPerNm))
         {
             Log($"{f.Callsign}: real track change not made — the new way would have been {grown:0} nm longer than asked for{(firstTurn > 100 ? $", turning back {firstTurn:0}°" : "")}");
             f.FanIdx = was; f.Path = oldPath; f.S = oldS; f.ThrS = oldThr; f.Via = oldVia; f.Fan = oldFan; f.FanAt = Time;
