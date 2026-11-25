@@ -5229,19 +5229,14 @@ public sealed partial class TrafficWorld
                 eta = (r.Runway == cur.Runway ? f.EtaNominal : nominal + ((f.Pos - r.Threshold).Length - (f.Pos - cur.Threshold).Length) / (220 * Kt));
                 slot = Earliest(r.Runway, Math.Max(eta, nominal), f);
                 var c = slot - nominal;                                        // delay (detours included) plus the extra flying
-                // Shared out as real traffic shares them (24 Nov, KMSP at night: real arrivals 45 % 12R / 55 % 12L, but the
-                // old "less used costs up to 2 minutes" sent every arrival to 12L for 23 s — 7 landings to 1): each runway
-                // costs for how far its share of the arrivals planned around this one (40 minutes either way, this one
-                // counted) would go over its real share — so a 45/55 split comes out about 45/55, a 90/10 one 9 to 1.
-                // (On its first plan; later re-plans keep the old weighting, so the balance itself never moves anyone
-                // back and forth — the 230 nm rush broke three off when it did.)
-                if (share is not null && !isFirst) c += 120 * (1 - share.GetValueOrDefault(r.Runway) / Math.Max(1e-6, share.Values.Max()));
-                else if (share is not null && share.Values.Sum() > 0)
+                // A runway real traffic from its direction uses less costs up to 2 minutes — but only for a clear
+                // difference: within about a quarter of the busier one's share, nothing (24 Nov, KMSP at night: real
+                // arrivals 45 % 12R / 55 % 12L, and the flat "less used costs more" sent every arrival to 12L for 23 s —
+                // 7 landings to 1). A near-even split is then shared by the delay each runway gives; 90/10 still leans hard.
+                if (share is not null)
                 {
-                    var tot = share.Values.Sum();
-                    var near = opts.Sum(o => book.TryGetValue(o.Runway, out var tl) ? tl.Count(x => Math.Abs(x.slot - nominal) < 2400) : 0) + 1;
-                    var mine = (book.TryGetValue(r.Runway, out var tlr) ? tlr.Count(x => Math.Abs(x.slot - nominal) < 2400) : 0) + 1;
-                    c += 120 * Math.Max(0, (double)mine / near - share.GetValueOrDefault(r.Runway) / tot);
+                    var rel = 1 - share.GetValueOrDefault(r.Runway) / Math.Max(1e-6, share.Values.Max());
+                    c += 120 * Math.Max(0, rel - 0.25) / 0.75;
                 }
                 if (r.Runway != cur.Runway && !isFirst) c += 45 + 60 * f.RwySwitches;     // changing costs, more each time
                 // Going back to a runway it was moved off, inside 60 nm, costs two minutes more (22 Nov, KMSP: SWA4367 30L →

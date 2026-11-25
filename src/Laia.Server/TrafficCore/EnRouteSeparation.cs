@@ -66,6 +66,8 @@ public sealed class EnRouteSeparation
     private (string leg, string other, double askKt, double gsAt, double at, double clearUntil)? _ask;
     private readonly Dictionary<string, double> _spdAt = new();
     private double _clearUntil;
+    private readonly Dictionary<(string l, string f), (double up, double down)> _trail = new();
+    private readonly Dictionary<string, (string other, double kt)> _trailObs = new();
 
     /// <summary>The next level of a flight's own direction at or beyond an altitude (odd thousands east, even west).</summary>
     private static double DirLevel(NetLeg l, double alt, bool up)
@@ -160,6 +162,21 @@ public sealed class EnRouteSeparation
         }
 
         // 1. Two whole-sky flights level at the same level going the same way, one catching the other up.
+        var idx = new Dictionary<string, int>();
+        for (var i = 0; i < n; i++) if (ok[i]) idx[legs[i].Id] = i;
+        // Speeds given to keep one in trail stay while the two are still in line at the level within 25 nm (dropping
+        // them would only bring the closing back: on, off, on again every few seconds).
+        foreach (var (key, val) in _trail.ToList())
+        {
+            if (!idx.TryGetValue(key.l, out var L) || !idx.TryGetValue(key.f, out var F)) { if (prune) _trail.Remove(key); continue; }
+            var dir = V2.FromBearing(hdg[F], 1);
+            var along = V2.Dot(pos[L, 0] - pos[F, 0], dir) / nm;
+            if (!level[L] || !level[F] || Math.Abs(eff[L, 0] - eff[F, 0]) >= 1000 || Math.Abs(Geo2.Diff(hdg[L], hdg[F])) > 60 || along < 0 || along > 25)
+            { _trail.Remove(key); continue; }
+            if (val.up > 0) { newSpd[L] = Math.Max(newSpd[L], val.up); spdWhy[L] ??= $"{legs[F].Callsign} in trail behind, {along:0} nm"; }
+            if (val.down > 0) { newSpd[F] = Math.Min(newSpd[F], -val.down); spdWhy[F] ??= $"in trail behind {legs[L].Callsign}, {along:0} nm"; }
+            resolved.Add((Math.Min(L, F), Math.Max(L, F)));
+        }
         for (var i = 0; i < n; i++)
             for (var j = i + 1; j < n; j++)
             {
@@ -183,6 +200,7 @@ public sealed class EnRouteSeparation
                     var downKt = Math.Min(newSpd[F], legs[F].SpdKt - down);
                     if (upKt != 0) { newSpd[L] = upKt; spdWhy[L] ??= $"{legs[F].Callsign} catching up behind, {d0:0} nm"; }
                     if (downKt != 0) { newSpd[F] = downKt; spdWhy[F] ??= $"in trail behind {legs[L].Callsign}, {d0:0} nm"; }
+                    _trail[(legs[L].Id, legs[F].Id)] = (Math.Max(0, upKt), Math.Max(0, -downKt));
                     resolved.Add((Math.Min(i, j), Math.Max(i, j)));
                 }
             }
@@ -193,6 +211,15 @@ public sealed class EnRouteSeparation
             double cap = double.PositiveInfinity, floor = double.NegativeInfinity, lvl = 0; string? why = null;
             _st.TryGetValue(l0.Id, out var st0);
             var vectorFor = (string?)null; var vectorSign = 0;
+            if (_trailObs.TryGetValue(l0.Id, out var to))
+            {
+                var ob = obs.FirstOrDefault(x => x.Name == to.other);
+                var keep = ob.Name is not null && level[i] && Math.Abs(ob.AltFt - eff[i, 0]) < 800 && Math.Abs(Geo2.Diff(hdg[i], ob.Track)) <= 60
+                    && (ob.p0 - pos[i, 0]).Length < 25 * nm;
+                if (!keep) _trailObs.Remove(l0.Id);
+                else if (to.kt > 0) { newSpd[i] = Math.Max(newSpd[i], to.kt); spdWhy[i] ??= $"{to.other} in trail behind"; }
+                else { newSpd[i] = Math.Min(newSpd[i], to.kt); spdWhy[i] ??= $"in trail behind {to.other}"; }
+            }
             foreach (var o in obs)
             {
                 if ((pos[i, 0] - o.p0).Length > (gs[i] * Geo2.MpsPerKt + o.v.Length) * N * Step + o.SepNm * nm) continue;
@@ -236,6 +263,7 @@ public sealed class EnRouteSeparation
                         {
                             if (up > 0) { newSpd[i] = Math.Max(newSpd[i], l0.SpdKt + up); spdWhy[i] ??= $"{o.Name} catching up behind, {d0:0} nm"; }
                             if (down > 0) { newSpd[i] = Math.Min(newSpd[i], l0.SpdKt - down); spdWhy[i] ??= $"in trail behind {o.Name}, {d0:0} nm"; }
+                            _trailObs[l0.Id] = (o.Name, newSpd[i]);
                             break;
                         }
                         // Speed can't: a level of its own direction 2,000 ft away, chosen once and kept; or a vector.

@@ -2200,7 +2200,8 @@ Console.WriteLine("== En-route separation of the whole-sky flights (RVSM: 1,000 
     var ps0 = NetworkModel.At(slow2, 680); var pq0 = NetworkModel.At(quick, 680);
     Console.WriteLine($"  in trail: {slow2.Callsign} {ps0?.GsKt:0} kt, {quick.Callsign} {pq0?.GsKt:0} kt at FL{ps0?.AltFt / 100:0}/{pq0?.AltFt / 100:0}, {(ps0 is not null && pq0 is not null ? Geo2.DistanceNm(ps0.Lat, ps0.Lon, pq0.Lat, pq0.Lon) : 0):0} nm apart at 680");
     var w3 = Worst(new() { slow2, quick }, new(), 600, 860, out var n3, out var ev3);
-    foreach (var e in ev3.Take(4)) Console.WriteLine("  " + e);
+    foreach (var e in ev3.Take(6)) Console.WriteLine("  " + e);
+    Console.WriteLine($"  {ev3.Count} instructions; closest {w3:N0} ft within 5 nm");
     Check(ev3.Any(e => e.Contains("speeds up") || e.Contains("slows")) && !ev3.Any(e => e.Contains("level change")) && w3 >= 950,
         "a flight a little faster at the same level is kept in trail by speed (the one ahead faster first), not moved off its level");
     Check(ev3.FirstOrDefault(e => e.Contains("speeds up") || e.Contains("slows"))?.Contains("speeds up") == true, "the one ahead is sped up first");
@@ -2209,14 +2210,14 @@ Console.WriteLine("== En-route separation of the whole-sky flights (RVSM: 1,000 
     {
         var ai = Long("N7", "700", "A320", 600);
         var sep = new EnRouteSeparation();
-        var p0 = NetworkModel.At(ai, 645)!;
+        var p0 = NetworkModel.At(ai, 700)!;
         double uLon = p0.Lon + 10 / (60 * Math.Cos(40 * Math.PI / 180)), uGs = p0.GsKt - 25;
         var evs = new List<string>(); string? notice = null; double closest = double.MaxValue; var flips = 0; var lastSide = 0;
-        for (var c = 645.0; c < 685; c += 2.0 / 60)
+        for (var c = 700.0; c < 740; c += 2.0 / 60)
         {
             uLon += uGs / 60 * (2.0 / 60) / (60 * Math.Cos(40 * Math.PI / 180));
             var obs = new List<EnRouteSeparation.Obstacle> { new("UAL1196 (you)", 40, uLon, 90, uGs, p0.AltFt, 0, 6) };
-            foreach (var e in sep.Update(c, 40, -95, new[] { ai }, obs)) evs.Add($"{(c - 645) * 60:0} s {e.Leg.Callsign} {e.Text} for {e.Who}");
+            foreach (var e in sep.Update(c, 40, -95, new[] { ai }, obs)) evs.Add($"{(c - 700) * 60:0} s {e.Leg.Callsign} {e.Text} for {e.Who}");
             notice ??= sep.UserNotice?.text;
             if (NetworkModel.At(ai, c) is { } a)
             {
