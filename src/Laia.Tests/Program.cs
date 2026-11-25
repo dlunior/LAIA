@@ -2211,12 +2211,13 @@ Console.WriteLine("== En-route separation of the whole-sky flights (RVSM: 1,000 
         var ai = Long("N7", "700", "A320", 600);
         var sep = new EnRouteSeparation();
         var p0 = NetworkModel.At(ai, 700)!;
-        double uLon = p0.Lon + 10 / (60 * Math.Cos(40 * Math.PI / 180)), uGs = p0.GsKt - 25;
+        double uS = p0.FlownNm + 10, uGs = p0.GsKt - 25;   // the user 10 nm ahead on the same route
         var evs = new List<string>(); string? notice = null; double closest = double.MaxValue; var flips = 0; var lastSide = 0;
         for (var c = 700.0; c < 740; c += 2.0 / 60)
         {
-            uLon += uGs / 60 * (2.0 / 60) / (60 * Math.Cos(40 * Math.PI / 180));
-            var obs = new List<EnRouteSeparation.Obstacle> { new("UAL1196 (you)", 40, uLon, 90, uGs, p0.AltFt, 0, 6) };
+            uS += uGs / 60 * (2.0 / 60);
+            var (uLat, uLon, uHdg) = ai.PointAt(uS);
+            var obs = new List<EnRouteSeparation.Obstacle> { new("UAL1196 (you)", uLat, uLon, uHdg, uGs, p0.AltFt, 0, 6) };
             foreach (var e in sep.Update(c, 40, -95, new[] { ai }, obs)) evs.Add($"{(c - 700) * 60:0} s {e.Leg.Callsign} {e.Text} for {e.Who}");
             notice ??= sep.UserNotice?.text;
             if (NetworkModel.At(ai, c) is { } a)
@@ -2225,7 +2226,8 @@ Console.WriteLine("== En-route separation of the whole-sky flights (RVSM: 1,000 
                 var side = alt > p0.AltFt + 300 ? 1 : alt < p0.AltFt - 300 ? -1 : 0;
                 if (side != 0 && lastSide != 0 && side != lastSide) flips++;
                 if (side != 0) lastSide = side;
-                var d = Geo2.DistanceNm(a.Lat, a.Lon, 40, uLon);
+                var (uLat2, uLon2, _) = ai.PointAt(uS);
+                var d = Geo2.DistanceNm(a.Lat, a.Lon, uLat2, uLon2);
                 if (Math.Abs(alt - p0.AltFt) < 900) closest = Math.Min(closest, d);
             }
         }

@@ -175,7 +175,6 @@ public sealed class EnRouteSeparation
             { _trail.Remove(key); continue; }
             if (val.up > 0) { newSpd[L] = Math.Max(newSpd[L], val.up); spdWhy[L] ??= $"{legs[F].Callsign} in trail behind, {along:0} nm"; }
             if (val.down > 0) { newSpd[F] = Math.Min(newSpd[F], -val.down); spdWhy[F] ??= $"in trail behind {legs[L].Callsign}, {along:0} nm"; }
-            resolved.Add((Math.Min(L, F), Math.Max(L, F)));
         }
         for (var i = 0; i < n; i++)
             for (var j = i + 1; j < n; j++)
@@ -203,6 +202,7 @@ public sealed class EnRouteSeparation
                     _trail[(legs[L].Id, legs[F].Id)] = (Math.Max(0, upKt), Math.Max(0, -downKt));
                     resolved.Add((Math.Min(i, j), Math.Max(i, j)));
                 }
+                else _trail.Remove((legs[L].Id, legs[F].Id));   // speed isn't enough (any more): a level or a vector
             }
         for (var i = 0; i < n; i++)
         {
