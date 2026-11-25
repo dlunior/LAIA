@@ -64,6 +64,8 @@ app.MapGet("/api/tracks/{icao}/{day}", (string icao, string day, HttpContext ctx
 
 // The real flights kept (for LAIA's timetable): the days, then one day's as gzipped JSON
 // [[callsign, type, registration, from, to, take-off, landing], …] (Unix seconds; an end not seen is "" / null).
+// Its version, so LAIA Server can say when the NAS needs the newer collector.
+app.MapGet("/api/version", () => Results.Json(new { version = typeof(Program).Assembly.GetName().Version?.ToString(3) ?? "?", features = new[] { "legs" } }));
 app.MapGet("/api/legdays", () => Results.Json(db.LegDays().Select(d => new { day = d.day, flights = d.flights })));
 app.MapGet("/api/legs/{day}", (string day, HttpContext ctx) =>
 {

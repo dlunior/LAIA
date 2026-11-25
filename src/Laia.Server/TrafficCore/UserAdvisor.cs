@@ -80,6 +80,26 @@ public sealed partial class TrafficWorld
     }
 
     private readonly Dictionary<RunwayEnd, (double at, double nm)> _userRoute = new();
+    /// <summary>The published speed limits on the user's way in: (flying miles to go at the fix, knots), farthest first.</summary>
+    private readonly Dictionary<RunwayEnd, List<(double nm, double kt)>> _userLimits = new();
+    private List<(double nm, double kt)> _routeLimits = new();
+    private List<AirPoint> _lastUserStarPts = new();
+
+    /// <summary>The speed limits along a route the user flies (points with a published speed), as miles to go.</summary>
+    private static List<(double nm, double kt)> LimitsAlong(List<V2> pts, List<AirPoint> star, V2 thr)
+    {
+        var res = new List<(double nm, double kt)>();
+        var cum = new double[pts.Count];
+        for (var i = 1; i < pts.Count; i++) cum[i] = cum[i - 1] + (pts[i] - pts[i - 1]).Length;
+        var total = pts.Count == 0 ? 0 : cum[^1] + (pts[^1] - thr).Length;
+        foreach (var a in star)
+        {
+            if (a.SpeedKt < 100 || a.SpeedKt >= 400) continue;
+            var k = pts.FindIndex(q => (q - a.P).Length < 5);
+            if (k > 0) res.Add(((total - cum[k]) / Geo2.MPerNm, a.SpeedKt));
+        }
+        return res.OrderByDescending(x => x.nm).ToList();
+    }
 
     /// <summary>
     /// The user's flying miles to the runway (user, 17 Nov: "Can LAIA calculate flying miles rather than distance
@@ -91,8 +111,10 @@ public sealed partial class TrafficWorld
     {
         if (_userRoute.TryGetValue(r, out var c) && Time - c.at < 10) return c.nm;
         double nmOut;
+        _routeLimits = new();
         try { nmOut = RouteNm(r, u); } catch { nmOut = double.NaN; }
         _userRoute[r] = (Time, nmOut);
+        _userLimits[r] = double.IsNaN(nmOut) ? new() : _routeLimits;
         return nmOut;
     }
 
@@ -110,6 +132,7 @@ public sealed partial class TrafficWorld
             legs.AddRange(star.Legs);
             if (star.RunwayTransitions.FirstOrDefault(t => t.Name == r.Ident) is { } rt) legs.AddRange(rt.Legs);
             var spA = Apt.LegsToPoints(legs, u, Math.Max(UserAltFt, 3000), out _);
+            _lastUserStarPts = spA;
             var sp = spA.Select(p => p.P).ToList();
             // Off the STAR (more than 3 nm from any of its legs): it no longer says where the user goes — direct to the
             // final instead (the caller's fallback).
@@ -137,6 +160,7 @@ public sealed partial class TrafficWorld
                 if (tail.Count > 0)
                 {
                     pts.AddRange(tail);
+                    _routeLimits = LimitsAlong(pts, spA, r.Threshold);
                     double l2 = 0;
                     for (var i = 1; i < pts.Count; i++) l2 += (pts[i] - pts[i - 1]).Length;
                     return (l2 + (pts[^1] - r.Threshold).Length) / nm;
@@ -164,6 +188,7 @@ public sealed partial class TrafficWorld
             }
         }
         pts.AddRange(Vectors(pts[^1], r, ShapeFor(r, fixedJoin: 11)));
+        if (star is not null) _routeLimits = LimitsAlong(pts, _lastUserStarPts, r.Threshold);
         double len = 0;
         for (var i = 1; i < pts.Count; i++) len += (pts[i] - pts[i - 1]).Length;
         len += (pts[^1] - r.Threshold).Length;
@@ -208,19 +233,24 @@ public sealed partial class TrafficWorld
     /// inside 20 nm, 180 inside 12, the approach speed inside 6. (Until 16 Nov far out was capped at 320 kt, which put
     /// a user cruising at 480 kt minutes later than they'd be.)
     /// </summary>
-    private double UserEtaSec(double nm)
+    private double UserEtaSec(double nm) => UserEtaSec(nm, 1.0);
+
+    /// <summary>
+    /// The same, with the user's speed beyond 20 nm scaled (a speed to suggest: 0.95 is 5 % slower), and the published
+    /// speed limits on their way in flown where they are lower (user, 24 Nov: "see if the restrictions on the STAR are
+    /// enough" — the STAR's "max 250" or "at 230" spaces arrivals by itself, so it's counted before any advice).
+    /// </summary>
+    private double UserEtaSec(double nm, double scale)
     {
         var vapp = Perf.For(UserType.Length > 0 ? UserType : "A320").Vapp;
-        double t = 0, d = nm;
-        void Leg(double from, double to, double kt) { var len = Math.Max(0, Math.Min(d, from) - to); if (len > 0) t += len / Math.Max(90, kt) * 3600; }
         var gs = Math.Clamp(UserGs > 60 ? UserGs : 300, 180, 650);
         if (UserAltFt < 11000) gs = Math.Min(gs, 260);
-        Leg(double.MaxValue, 100, gs); Leg(100, 40, Math.Min(gs, 330)); Leg(40, 20, Math.Min(gs, 260));
+        var rwy = UserArr?.Rwy ?? _expected;
+        var elev = rwy?.ElevationFt ?? Apt.ElevationFt;
+        var limits = rwy is not null && _userLimits.TryGetValue(rwy, out var ul) ? ul : null;
         // The user's own approach, as they fly it (user, 17 Nov): 210 kt indicated through the base turn onto a 10–12 mile
         // final, 190 once established, 170 from 7.5 to 5 miles, the approach speed inside 5 — each turned into ground
         // speed at its height in the wind there (the final's headwind; the base is across the wind, so no wind).
-        var rwy = UserArr?.Rwy ?? _expected;
-        var elev = rwy?.ElevationFt ?? Apt.ElevationFt;
         double Final(double ias, double nmOut)
         {
             var alt = elev + nmOut * 318;   // a 3° path
@@ -230,8 +260,36 @@ public sealed partial class TrafficWorld
             // 70 % of it (its approach speed may not be the one assumed for the type).
             return UserGs > 60 ? Math.Clamp(g, UserGs * 0.7, UserGs) : g;
         }
-        Leg(20, 11, Math.Min(UserGs > 60 ? UserGs : gs, Wind.Tas(210, elev + 4000)));
-        Leg(11, 7.5, Final(190, 9.25)); Leg(7.5, 5, Final(170, 6.25)); Leg(5, 0, Final(vapp + 5, 2.5));
+        var f20 = Math.Min(UserGs > 60 ? UserGs : gs, Wind.Tas(210, elev + 4000));
+        double Base(double d) => d > 100 ? gs * scale : d > 40 ? Math.Min(gs * scale, 330) : d > 20 ? Math.Min(gs * scale, 260)
+            : d > 11 ? f20 : d > 7.5 ? Final(190, 9.25) : d > 5 ? Final(170, 6.25) : Final(vapp + 5, 2.5);
+        // A published limit, as the flight model meets one: at it 1½ nm before the fix (slowing about 5 kt a mile), and
+        // the last one passed holds until the next.
+        double Limit(double d)
+        {
+            if (limits is null || limits.Count == 0) return double.PositiveInfinity;
+            var lim = double.PositiveInfinity; double passed = double.NaN; var anyAhead = false; var passedNm = 0.0;
+            foreach (var (ln, kt) in limits)
+            {
+                if (ln < d) { anyAhead = true; lim = Math.Min(lim, kt + Math.Max(0, d - ln - 1.5) * 5); }
+                else { passed = kt; passedNm = ln; }
+            }
+            if (!double.IsNaN(passed))
+            {
+                if (anyAhead) lim = Math.Min(lim, Math.Max(passed, limits.Where(x => x.nm < d).Min(x => x.kt)));
+                else if (passedNm - d < 10) lim = Math.Min(lim, passed);
+            }
+            return lim;
+        }
+        double t = 0;
+        const double step = 0.5;
+        for (var d = nm; d > 0; d -= step)
+        {
+            var v = Base(d);
+            var lim = Limit(d);
+            if (!double.IsInfinity(lim) && d > 5) v = Math.Min(v, Wind.Tas(lim, Math.Min(UserAltFt, elev + d * 318)));
+            t += Math.Min(step, d) / Math.Max(90, v) * 3600;
+        }
         return t;
     }
 
@@ -264,6 +322,7 @@ public sealed partial class TrafficWorld
         UpdateExpected();
         if (!UserArriving() || UserPos is not { } u)
         {
+            if (UserArr is not null) foreach (var o in Flights) o.BehindUser = false;
             UserArr = null; Sequence = null; _userSlot = double.NaN; _userEtaAbs = double.NaN; _etaScale = 1; _etaSamples.Clear(); _seqSig = ""; _userRwyChanges = 0; _userHoldLogged = false; return;
         }
         var arrs = ArrRwys.Count > 0 ? ArrRwys : ArrRwy is null ? new List<RunwayEnd>() : new() { ArrRwy };
@@ -400,18 +459,54 @@ public sealed partial class TrafficWorld
         var logNow = changed && Time >= _seqNewUntil;
         if (changed) _seqNewUntil = Time + 30;
         changed |= Time < _seqNewUntil;
-        // Something to fly to (user, 23 Nov): the speed that keeps the gap behind the one ahead — its speed now, less
-        // (or more) by what the gap is short (or long) of what's needed over the time left; beyond 8 nm, in 10 kt steps.
+        // Something to fly to, worked out rather than guessed (user, 24 Nov: "LAIA is literally a computer... can't it
+        // calculate based on the speeds and distances of the aircraft and see if speeds are even needed"): both aircraft
+        // predicted to the threshold along their flying miles at the speeds each will fly — the published limits on the
+        // way in, 250 kt below 10,000 ft, the approach, the winds — and the gap that gives compared with the gap needed.
+        // Enough already (or more than enough: the traffic behind adjusts, not the user): no speed. Too close: the
+        // smallest change beyond 20 nm that makes it, and only when it's 10 kt or more — as a Mach number at cruise (above
+        // about FL280), with the speed to fly in the descent after it.
         string? advice = null;
         var toGoNm = me.ThrS / Geo2.MPerNm;
         if (ahead is not null && !double.IsNaN(ahead.EtaSec) && !double.IsNaN(me.EtaSec) && toGoNm > 8 && me.EtaSec > 120)
         {
             var need = ThresholdGapNeeded(ahead, me, forDepartures: false);
-            var err = need - (me.EtaSec - ahead.EtaSec);          // > 0: too close
-            var kt = ahead.Ias * (1 - Math.Clamp(err / me.EtaSec, -0.2, 0.2));
-            kt = Math.Clamp(kt, me.P.Vapp + 10, UserAltFt < 10500 ? 250 : 320);
-            kt = Math.Round(Math.Clamp(kt, ahead.Ias - 40, ahead.Ias + 40) / 10) * 10;
-            advice = $"about {kt:0} kt keeps your spacing behind {ahead.Callsign} ({(ahead.Pos - u).Length / Geo2.MPerNm:0} nm ahead)";
+            var gapNow = me.EtaSec - ahead.EtaSec;
+            var err = need - gapNow;          // > 0: too close by that many seconds
+            var aheadNm = (ahead.Pos - u).Length / Geo2.MPerNm;
+            if (err <= 15)
+                advice = $"no speed change needed — at the published speeds you'll be about {Math.Round(gapNow / 60 * 2) / 2:0.#} min behind {ahead.Callsign} at the runway ({need / 60:0.#} needed)";
+            else if (toGoNm > 25)
+            {
+                // The scale on the user's speed beyond 20 nm that loses err seconds (found by halving: the prediction
+                // flies the limits, so slowing below a limit gains nothing there).
+                var baseT = UserEtaSec(toGoNm, 1.0);
+                double lo = 0.75, hi = 1.0;
+                for (var k = 0; k < 14; k++) { var mid = (lo + hi) / 2; if (UserEtaSec(toGoNm, mid) - baseT >= err) lo = mid; else hi = mid; }
+                var scale = lo;
+                var enough = UserEtaSec(toGoNm, scale) - baseT >= err - 5;
+                var tasNow = Math.Max(150, UserGs + WindAt(UserAltFt).Headwind(UserTrack));
+                if (UserAltFt >= 28000)
+                {
+                    // Mach: the speed of sound at the level (ISA) — about 574 kt TAS at FL350.
+                    var tK = Math.Max(216.65, 288.15 - 0.0019812 * UserAltFt);
+                    var a = 38.967854 * Math.Sqrt(tK);
+                    var mNow = tasNow / a; var mNew = Math.Round(mNow * scale, 2);
+                    var desc = Math.Max(250, Math.Round(280 * scale / 10) * 10);
+                    if (mNow - mNew >= 0.015)
+                        advice = $"Mach {mNew:.00}, then {desc:0} kt in the descent — keeps your spacing behind {ahead.Callsign} ({aheadNm:0} nm, {(gapNow / 60):0.#} min ahead at the runway, {need / 60:0.#} needed)" + (enough ? "" : " — as slow as it's worth going; LAIA spaces the rest");
+                    else advice = $"no speed change needed — {ahead.Callsign} will be about {gapNow / 60:0.#} min ahead at the runway ({need / 60:0.#} needed)";
+                }
+                else
+                {
+                    var iasNow = tasNow / Wind.Tas(1, UserAltFt);
+                    var kt = Math.Round(Math.Max(me.P.Vapp + 20, iasNow * scale) / 10) * 10;
+                    if (UserAltFt < 10500) kt = Math.Min(kt, 250);
+                    if (iasNow - kt >= 10)
+                        advice = $"about {kt:0} kt keeps your spacing behind {ahead.Callsign} ({aheadNm:0} nm, {gapNow / 60:0.#} min ahead at the runway, {need / 60:0.#} needed)" + (enough ? "" : " — as slow as it's worth going; LAIA spaces the rest");
+                    else advice = $"no speed change needed — {ahead.Callsign} will be about {gapNow / 60:0.#} min ahead at the runway ({need / 60:0.#} needed)";
+                }
+            }
         }
         Sequence = new UserSequence(me.Rwy!.Ident, me.Seq, ahead?.Callsign, ahead?.Type, ahead is null ? null : Where(ahead),
             behind?.Callsign, behind?.Type, changed, me.EtaSec, advice);

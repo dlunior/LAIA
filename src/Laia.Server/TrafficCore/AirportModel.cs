@@ -363,6 +363,7 @@ public sealed class AirportModel
         var alt = startAltFt;
         endedInVectors = false;
         var list = legs.ToList();
+        var skip = new HashSet<string>(StringComparer.OrdinalIgnoreCase);   // fixes left out behind a vectored heading
         for (var li = 0; li < list.Count; li++)
         {
             var l = list[li];
@@ -394,12 +395,26 @@ public sealed class AirportModel
                     // A hybrid procedure (MCO's RNAV SIDs: runway → KAAPE, then "expect radar vectors" to UKAYY, then
                     // RNAV again): ATC vectors off the heading after a few miles and clears it direct to the next fix,
                     // where pilot navigation resumes. Only when no fix follows does the route end in vectors.
-                    var next = !hybrid ? null : list.Skip(li + 1).FirstOrDefault(n => Math.Abs(n.Lat) > 0.0001 || Math.Abs(n.Lon) > 0.0001);
+                    // The fix it's cleared to is the first one still ahead once it has flown the heading a while: one
+                    // that would then be behind it is skipped (KMSP SNOWZ1 off 17: heading 215° from RUBRB, then MANCY
+                    // 2 nm north-west of RUBRB — LAIA flew back to it and out again, a zigzag "turning 383°").
+                    ProcedureLeg? next = null; var nmNext = 0.0;
+                    if (hybrid)
+                    {
+                        var fixes = list.Skip(li + 1).Where(n => Math.Abs(n.Lat) > 0.0001 || Math.Abs(n.Lon) > 0.0001).ToList();
+                        for (var k = 0; k < fixes.Count; k++)
+                        {
+                            var to = Map.ToXY(fixes[k].Lat, fixes[k].Lon);
+                            var nm = Math.Clamp((to - cur).Length / Geo2.MPerNm * 0.4, 2, 6);
+                            var p2 = cur + V2.FromBearing(TrueCourse(l), nm * Geo2.MPerNm);
+                            var off = Math.Abs(Geo2.Diff(TrueCourse(l), (to - p2).Bearing));
+                            if (off <= 90 || k == fixes.Count - 1) { next = fixes[k]; nmNext = nm; break; }
+                            if (fixes[k].Fix is { Length: > 0 } fx) skip.Add(fx);
+                        }
+                    }
                     if (next is not null)
                     {
-                        var to = Map.ToXY(next.Lat, next.Lon);
-                        var nm = Math.Clamp((to - cur).Length / Geo2.MPerNm * 0.4, 2, 6);
-                        cur += V2.FromBearing(TrueCourse(l), nm * Geo2.MPerNm);
+                        cur += V2.FromBearing(TrueCourse(l), nmNext * Geo2.MPerNm);
                         pts.Add(new AirPoint(cur, "", minA, maxA, l.SpeedKt));
                         break;
                     }
@@ -423,7 +438,7 @@ public sealed class AirportModel
                 case 12 or 13 or 14 or 16: // holds and procedure turns: skip
                     break;
                 default:
-                    if (!hasFix) break;
+                    if (!hasFix || (l.Fix is { Length: > 0 } lf && skip.Contains(lf))) break;
                     cur = Map.ToXY(l.Lat, l.Lon);
                     if (maxA > 0) alt = Math.Min(Math.Max(alt, minA), maxA); else if (minA > 0) alt = Math.Max(alt, minA);
                     pts.Add(new AirPoint(cur, l.Fix, minA, maxA, l.SpeedKt));
