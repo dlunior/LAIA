@@ -5520,7 +5520,10 @@ public sealed partial class TrafficWorld
             .OrderByDescending(o => o.OrderKey).FirstOrDefault();
         if (ahead is null) return;
         var da = (ahead.ThrS - ahead.S) / Geo2.MPerNm;
-        var ownA = ahead.EtaNominal - Time;
+        // When it would land: with the delay it already has (on a delay vector, slowed in a queue), not as if it had
+        // none (KATL, 25 Nov: DAL1816, number 28 on a 300 s delay vector, predicted to land 1.9 min after the user, still
+        // ahead of them — and the user told Mach .64 to get behind it).
+        var ownA = Math.Max(ahead.EtaNominal - Time, double.IsNaN(ahead.EtaSec) ? 0 : ahead.EtaSec);
         var onFinal = da < 15 && ahead.Rwy is { } ar && Math.Abs(ar.Offset(ahead.Pos)) < 0.6 * Geo2.MPerNm && ar.Along(ahead.Pos) < 0;
         if (onFinal || da < 25) return;
         // What it would have to lose to land the gap behind the user, and what speed can still take from it (about
@@ -5583,7 +5586,7 @@ public sealed partial class TrafficWorld
             // With the runway planner on, only straight after a planning pass (it runs just before), so the runway is the
             // one the plan has just confirmed — the planner won't move it once it's on a delay vector.
             var planOk = !Planner || ArrRwys.Count < 2 || Time == _lastPlan;
-            if (!tactical && dv >= 40 && dth > 40 && Time - f.LastVector > 180 && f.DelayVectors < 3 && planOk)
+            if (!tactical && dv >= 40 && dth > 40 && Time - f.LastVector > 180 && f.DelayVectors < 1 && planOk)   // one at most (user, 25 Nov: vectors "way over used" — KATL had 151 in 20 minutes, up to four per aircraft)
             {
                 var bySpeed = EtaToThreshold(f, dth) - base0;
                 var tromb = Trombone(f, 0, "");

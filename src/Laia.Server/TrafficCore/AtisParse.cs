@@ -41,7 +41,7 @@ public static class AtisParse
     private static readonly Regex Sep = new(@"\s*(?:,|AND|/)\s*", RegexOptions.Compiled);
     private static readonly Regex OneRwy = new(@"^[0-3]?\d[LRC]?$", RegexOptions.Compiled);
     private static readonly Regex VisualBacked = new(@"(?<![A-Z])(?:VISUAL|VIS)(?:\s+(?:APCHS?|APPROACH(?:ES)?))?\s+(?:(?:RWYS?|RY|RUNWAYS?),?\s*)?([0-3]?\d[LRC]?)(?![\dA-Z/])[^.]{0,20}?(?:USE|BACKED BY|BACKUP|WITH)\s+(?:THE\s+)?(?:([XYZ])\s+)?(?:LOC|ILS|LOCALIZER)(?:\s+([XYZ])(?![A-Z]))?", RegexOptions.Compiled);
-    private static readonly Regex Approach = new(@"(?<![A-Z])(ILS|LOC|RNAV|RNP|GPS|VOR|LDA)(?:\s+OR\s+LOC(?:/DME)?)?\s*(?:\((?:GPS|RNP)\)\s*)?(?:([XYZ])\s+)?(?:(?:RWYS?|RY|RUNWAYS?),?\s*)?([0-3]?\d[LRC]?)(?![\dA-Z/]|\.\d)", RegexOptions.Compiled);
+    private static readonly Regex Approach = new(@"(?<![A-Z])(ILS|LOC|RNAV|RNP|GPS|VOR|LDA)(?:\s+OR\s+LOC(?:/DME)?)?\s*(?:\((?:GPS|RNP)\)\s*)?(?:\(?PRM\)?\s+)?(?:([XYZ])\s+)?(?:\(?PRM\)?\s+)?(?:(?:RWYS?|RY|RUNWAYS?),?\s*)?([0-3]?\d[LRC]?)(?![\dA-Z/]|\.\d)", RegexOptions.Compiled);
 
     /// <summary>How many minutes ago a broadcast was issued, from its time ("INFO I 1952Z"); 9999 when it doesn't say.</summary>
     public static int AgeMinutes(string text, DateTime? nowUtc = null)

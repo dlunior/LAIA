@@ -468,7 +468,23 @@ public sealed partial class TrafficWorld
         // about FL280), with the speed to fly in the descent after it.
         string? advice = null;
         var toGoNm = me.ThrS / Geo2.MPerNm;
-        if (ahead is not null && !double.IsNaN(ahead.EtaSec) && !double.IsNaN(me.EtaSec) && toGoNm > 8 && me.EtaSec > 120)
+        // Before the arrival — beyond 150 flying miles, above FL240 and not yet descending — the landing order is only
+        // shown, not flown (user, 25 Nov: "separation should be between me and the aircraft around me before my sequence
+        // to the runway"): the aircraft around the user are kept apart en route (and the user asked in the notices when one
+        // catches them up); any delay for the runway is said once as minutes to expect, absorbed later.
+        var onArrival = toGoNm <= 150 || UserAltFt < 24000 || UserVs < -800;
+        var delayMin = double.IsNaN(_userSlot) || double.IsNaN(me.EtaSec) ? 0 : (_userSlot - (Time + me.EtaSec)) / 60;
+        if (!onArrival)
+        {
+            if (delayMin >= 2) advice = $"expect about {Math.Round(delayMin):0} min of delay for {me.Rwy?.Ident} — LAIA will take it in the descent and on the arrival, nothing to do now";
+        }
+        else if (ahead is not null && !double.IsNaN(ahead.EtaSec) && !double.IsNaN(me.EtaSec) && me.EtaSec - ahead.EtaSec < 0)
+        {
+            // Predicted to land before the one it's sequenced behind (it's held up): no slowing to get behind it —
+            // the order is put right (UserAmongArrivals).
+            advice = $"you'll reach the runway before {ahead.Callsign} — no speed change needed";
+        }
+        else if (ahead is not null && !double.IsNaN(ahead.EtaSec) && !double.IsNaN(me.EtaSec) && toGoNm > 8 && me.EtaSec > 120)
         {
             var need = ThresholdGapNeeded(ahead, me, forDepartures: false);
             var gapNow = me.EtaSec - ahead.EtaSec;
@@ -481,7 +497,11 @@ public sealed partial class TrafficWorld
                 // The scale on the user's speed beyond 20 nm that loses err seconds (found by halving: the prediction
                 // flies the limits, so slowing below a limit gains nothing there).
                 var baseT = UserEtaSec(toGoNm, 1.0);
-                double lo = 0.75, hi = 1.0;
+                // Never slower than a realistic speed (25 Nov: Mach .64 was asked at FL320): at most Mach .04 (about 8 %)
+                // or 40 kt below what they're flying; the rest is LAIA's (the downwind, a vector).
+                var tasNow0 = Math.Max(150, UserGs + WindAt(UserAltFt).Headwind(UserTrack));
+                var minScale = UserAltFt >= 28000 ? 0.92 : Math.Max(0.8, 1 - 40 / Math.Max(150, tasNow0 / Wind.Tas(1, UserAltFt)));
+                double lo = minScale, hi = 1.0;
                 for (var k = 0; k < 14; k++) { var mid = (lo + hi) / 2; if (UserEtaSec(toGoNm, mid) - baseT >= err) lo = mid; else hi = mid; }
                 var scale = lo;
                 var enough = UserEtaSec(toGoNm, scale) - baseT >= err - 5;
@@ -491,7 +511,7 @@ public sealed partial class TrafficWorld
                     // Mach: the speed of sound at the level (ISA) — about 574 kt TAS at FL350.
                     var tK = Math.Max(216.65, 288.15 - 0.0019812 * UserAltFt);
                     var a = 38.967854 * Math.Sqrt(tK);
-                    var mNow = tasNow / a; var mNew = Math.Round(mNow * scale, 2);
+                    var mNow = tasNow / a; var mNew = Math.Max(Math.Round(mNow * scale, 2), Math.Min(Math.Round(mNow, 2), 0.74));
                     var desc = Math.Max(250, Math.Round(280 * scale / 10) * 10);
                     if (mNow - mNew >= 0.015)
                         advice = $"Mach {mNew:.00}, then {desc:0} kt in the descent — keeps your spacing behind {ahead.Callsign} ({aheadNm:0} nm, {(gapNow / 60):0.#} min ahead at the runway, {need / 60:0.#} needed)" + (enough ? "" : " — as slow as it's worth going; LAIA spaces the rest");
@@ -508,7 +528,7 @@ public sealed partial class TrafficWorld
                 }
             }
         }
-        Sequence = new UserSequence(me.Rwy!.Ident, me.Seq, ahead?.Callsign, ahead?.Type, ahead is null ? null : Where(ahead),
+        Sequence = new UserSequence(me.Rwy!.Ident, me.Seq, ahead?.Callsign, ahead?.Type, ahead is null || !onArrival ? null : Where(ahead),
             behind?.Callsign, behind?.Type, changed, me.EtaSec, advice);
         if (logNow) Log($"{me.Callsign} (you): new sequence — number {me.Seq} for {me.Rwy.Ident}, between {ahead?.Callsign ?? "nobody"} and {behind?.Callsign ?? "nobody"}");
     }

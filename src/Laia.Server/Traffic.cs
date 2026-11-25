@@ -565,7 +565,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 t = Math.Max(t, eta + l.MeterMin);
                 total += l.MeterMin; n++; maxD = Math.Max(maxD, l.MeterMin);
             }
-            if (_meterAt - _meterLogAt > 900 && w == _world && n > 0)
+            if (_meterAt - _meterLogAt > 900 && (w == _world || (_world is null && w == _ahead)) && n > 0)
             {
                 _meterLogAt = _meterAt;
                 log.LogInformation("Arrival metering for {icao}: {n} flights landing in the next 3 hours, {runways} landing runways — average {avg:0.0} min late, most {max:0} min (departure delays at their origins, slower cruise once flying)",
