@@ -104,6 +104,42 @@ public sealed class TrackRecorder
         }
     }
 
+    private DateTime _lastEnRoute = DateTime.MinValue;
+
+    /// <summary>
+    /// The traffic between airports around the user, at most every 5 s, as its own "world" ("enroute") — so a case like
+    /// DAL8948 overtaking the user at FL360 (24 Nov) can be replayed. Rows as for an airport's (callsign, type, kind,
+    /// lat, lon, altitude, ground speed, heading, phase, "", 0, why it's being moved).
+    /// </summary>
+    public void EnRoute(List<object[]> rows)
+    {
+        var now = DateTime.UtcNow;
+        if (now - _lastEnRoute < TimeSpan.FromSeconds(5) || rows.Count == 0) return;
+        _lastEnRoute = now;
+        var t = now.Subtract(DateTime.UnixEpoch).TotalSeconds;
+        lock (_gate)
+        {
+            try
+            {
+                var w = Writer(now);
+                w.WriteLine(JsonSerializer.Serialize(new { t = Math.Round(t), w = "enroute", f = rows }));
+                w.Flush();
+            }
+            catch { }
+        }
+    }
+
+    /// <summary>A marker for an en-route instruction where the aircraft is.</summary>
+    public void EnRouteEvent(string cs, double lat, double lon, double alt, string text)
+    {
+        var t = DateTime.UtcNow.Subtract(DateTime.UnixEpoch).TotalSeconds;
+        lock (_gate)
+        {
+            try { Writer(DateTime.UtcNow).WriteLine(JsonSerializer.Serialize(new { t = Math.Round(t, 1), w = "enroute", e = new object[] { cs, R(lat, 5), R(lon, 5), Math.Round(alt), text } })); }
+            catch { }
+        }
+    }
+
     /// <summary>A log line about one aircraft ("CALLSIGN: …"), as a marker where it is.</summary>
     public void Event(TrafficWorld world, string line)
     {

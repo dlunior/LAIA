@@ -680,8 +680,26 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                 obs.Add(new($"{f.Callsign} ({w.Apt.Icao})", la, lo, f.Heading, f.Gs, f.AltFt, f.Vs, 5));
             }
         foreach (var e in _sep.Update(NetClock, sim.Lat, sim.Lon, legs, obs))
-            if (_drawnLast.Contains(e.Leg.Id) || e.Who.EndsWith("(you)"))
+        {
+            if (_drawnLast.Contains(e.Leg.Id) || e.Who.Contains("(you)") || e.Text.Contains("(you)"))
                 log.LogInformation("En route: {cs} {what} for {who}", e.Leg.Callsign, e.Text, e.Who);
+            if (NetworkModel.At(e.Leg, NetClock) is { } ep && Geo2.DistanceNm(sim.Lat, sim.Lon, ep.Lat, ep.Lon) < 60)
+                TrackRecorder.Instance.EnRouteEvent(e.Leg.Callsign, ep.Lat, ep.Lon, NetAlt(e.Leg, NetClock, ep.AltFt), $"{e.Text}{(e.Who.Length > 0 ? $" for {e.Who}" : "")}");
+        }
+        // Recorded for the replay: the user and the traffic between airports within 60 nm (user, 24 Nov).
+        if (!sim.OnGround)
+        {
+            var rows = new List<object[]>
+            {
+                new object[] { (UserCallsignOf(sim) ?? "you") + " (you)", "", "user", Math.Round(sim.Lat, 5), Math.Round(sim.Lon, 5), Math.Round(UserLevelFt(sim)), Math.Round(sim.GroundSpeed), Math.Round(sim.HeadingTrue), "air", "", 0, "" },
+            };
+            foreach (var l in legs)
+            {
+                if (NetworkModel.At(l, NetClock) is not { } p || Geo2.DistanceNm(sim.Lat, sim.Lon, p.Lat, p.Lon) > 60) continue;
+                rows.Add(new object[] { l.Callsign, l.Type, "enroute", Math.Round(p.Lat, 5), Math.Round(p.Lon, 5), Math.Round(NetAlt(l, NetClock, p.AltFt)), Math.Round(p.GsKt + l.SpdKt), Math.Round(p.Heading), p.Phase, "", 0, _sep.Why(l) ?? "" });
+            }
+            TrackRecorder.Instance.EnRoute(rows);
+        }
     }
 
     private string? UserCallsignOf(AircraftState sim) => _world?.UserCallsign is { Length: > 0 } c ? c : simBrief.Plan?.Callsign;
@@ -691,7 +709,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         if (NetworkModel.At(l, clock) is not { } p) return null;
         var vs = NetworkModel.At(l, clock + 0.25) is { } q ? (q.AltFt - p.AltFt) * 4 : 0;
         if (NetRate(l) is { } r) { vs = r; p = p with { AltFt = NetAlt(l, clock, p.AltFt) }; }
-        var gs = p.GsKt;
+        var gs = p.GsKt + l.SpdKt;
         return new TrafficAircraft
         {
             Id = l.Id, Callsign = l.Callsign, Airline = l.Operator.Length > 0 ? l.Operator : l.Airline, Type = l.Type, Model = l.Title,
@@ -896,6 +914,8 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
             foreach (var w in Worlds())
                 foreach (var n in w.Notices)
                     res.Add(new() { Id = w.Apt.Icao + ":" + n.Id, Text = n.Text, Warning = n.Warning, Clear = n.Clear });
+            // En route: an aircraft catching the user up at their level (ask them to speed up first; user, 25 Nov).
+            if (_sep.UserNotice is { } en) res.Insert(0, new() { Id = "enroute:trail", Text = en.text, Warning = !en.clear, Clear = en.clear });
             return res.Take(5).ToList();
         }
     }
@@ -1421,6 +1441,8 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
 
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
+        // The whole sky flies the winds aloft too (cruise ground speed = its normal speed through the air + the tailwind).
+        NetworkModel.WindAloft = (la, lo, ft) => winds.Field.StationCount > 0 ? winds.Field.At(DateTime.UtcNow, la, lo, ft, new Wind(0, 0), 0) : new Wind(0, 0);
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(0.25));
         var clock = System.Diagnostics.Stopwatch.StartNew();
         var last = clock.Elapsed.TotalSeconds;

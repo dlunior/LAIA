@@ -40,6 +40,7 @@ public static class AtisParse
     private static readonly Regex Pass3 = new(@"(?<![A-Z])EXPECT(?:ING)?\s+(" + List + @")(?![\dA-Z/]|\.\d)", RegexOptions.Compiled);
     private static readonly Regex Sep = new(@"\s*(?:,|AND|/)\s*", RegexOptions.Compiled);
     private static readonly Regex OneRwy = new(@"^[0-3]?\d[LRC]?$", RegexOptions.Compiled);
+    private static readonly Regex VisualBacked = new(@"(?<![A-Z])(?:VISUAL|VIS)(?:\s+(?:APCHS?|APPROACH(?:ES)?))?\s+(?:(?:RWYS?|RY|RUNWAYS?),?\s*)?([0-3]?\d[LRC]?)(?![\dA-Z/])[^.]{0,20}?(?:USE|BACKED BY|BACKUP|WITH)\s+(?:THE\s+)?(?:([XYZ])\s+)?(?:LOC|ILS|LOCALIZER)(?:\s+([XYZ])(?![A-Z]))?", RegexOptions.Compiled);
     private static readonly Regex Approach = new(@"(?<![A-Z])(ILS|LOC|RNAV|RNP|GPS|VOR|LDA)(?:\s+OR\s+LOC(?:/DME)?)?\s*(?:\((?:GPS|RNP)\)\s*)?(?:([XYZ])\s+)?(?:(?:RWYS?|RY|RUNWAYS?),?\s*)?([0-3]?\d[LRC]?)(?![\dA-Z/]|\.\d)", RegexOptions.Compiled);
 
     /// <summary>How many minutes ago a broadcast was issued, from its time ("INFO I 1952Z"); 9999 when it doesn't say.</summary>
@@ -144,8 +145,18 @@ public static class AtisParse
             var end = m.Index + m.Length;
             var trail = Sentence(t[end..Math.Min(t.Length, end + 25)]);
             if (Regex.IsMatch(trail, @"\bOTS\b|OUT OF SERVICE|\bU/S\b|UNUSABLE|UNUSBL|NOT AVBL|CLSD|CLOSED")) continue;
+            // "… MAY BE ASSIGNED RNAV RNP W 4L" is a possible extra, not the approach in use.
+            var lead = t[Math.Max(0, m.Index - 40)..m.Index];
+            if (Regex.IsMatch(lead, @"MAY BE ASSIGNED\s*$|MAY BE ASSIGNED\s+\S*\s*$")) continue;
             var e = (m.Groups[1].Value, m.Groups[2].Value, Norm(m.Groups[3].Value));
             if (!list.Contains(e)) list.Add(e);
+        }
+        // A visual approach backed up by a named localizer or ILS (KDTW, 25 Nov: "VISUAL RY 4L USE Z LOC FREQ 111.95
+        // APCH IN USE"; also "VIS APCH RWY 27L BACKED BY ILS Y"): flown as that ILS — the visual itself isn't flown.
+        foreach (Match m in VisualBacked.Matches(t))
+        {
+            var e = ("ILS", m.Groups[2].Success ? m.Groups[2].Value : m.Groups[3].Success ? m.Groups[3].Value : "", Norm(m.Groups[1].Value));
+            if (!list.Any(x => x.Item3 == e.Item3)) list.Add(e);
         }
         return list;
     }

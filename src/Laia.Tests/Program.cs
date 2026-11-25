@@ -624,7 +624,7 @@ Console.WriteLine("== Traffic from a real schedule");
     Check(goneBetween.Count >= 9, "an airframe with 90 minutes between flights is taken away, then back 45 minutes before");
 }
 
-Console.WriteLine("== Overnight: an aircraft landing after 23:00 local stays at its gate for its morning flight (user, 24 Nov)");
+Console.WriteLine("== Overnight: an aircraft landing after 22:00 local stays at its gate for its morning flight (user, 24 Nov)");
 {
     var apt = new AirportModel(TestAirport.Build(false));
     var sched = new Laia.Common.Airports.ScheduleData { Airport = "TEST", Source = "AIG" };
@@ -632,11 +632,11 @@ Console.WriteLine("== Overnight: an aircraft landing after 23:00 local stays at 
     sched.Legs.Add(new() { Airline = "DAL", Operator = "DAL", Title = "T", Type = "B739", Reg = "N950DL", Flight = "950", Dep = "KXXX", Arr = "TEST", DepMin = start - 100, ArrMin = start + 6 });
     sched.Legs.Add(new() { Airline = "DAL", Operator = "DAL", Title = "T", Type = "B739", Reg = "N950DL", Flight = "951", Dep = "TEST", Arr = "KYYY", DepMin = start + 420, ArrMin = start + 500 });
     sched.Legs.Add(new() { Airline = "DAL", Operator = "DAL", Title = "T", Type = "B739", Reg = "N960DL", Flight = "960", Dep = "KXXX", Arr = "TEST", DepMin = start - 98, ArrMin = start + 8 });
-    var world = new TrafficWorld(apt, new TestSource(), seed: 9) { Level = TrafficLevel.RealWorld, Wind = new Wind(270, 8), Schedule = sched, WeekMinute = start, LocalMinuteOverride = 23 * 60 + 20 };
+    var world = new TrafficWorld(apt, new TestSource(), seed: 9) { Level = TrafficLevel.RealWorld, Wind = new Wind(270, 8), Schedule = sched, WeekMinute = start, LocalMinuteOverride = 22 * 60 + 20 };
     for (var i = 0; i < 45 * 60 * 4; i++) { world.WeekMinute = start + world.Time / 60; world.Step(0.25); }
     var n950 = world.Flights.FirstOrDefault(f => !f.Done && f.Reg == "N950DL");
     var n960 = world.Flights.FirstOrDefault(f => !f.Done && f.Reg == "N960DL");
-    Console.WriteLine($"  after 45 min at 23:20 local: N950DL (leaves in 7 h) {n950?.Phase ?? "gone"}, N960DL (no flight out) {n960?.Phase ?? "gone"}");
+    Console.WriteLine($"  after 45 min at 22:20 local: N950DL (leaves in 7 h) {n950?.Phase ?? "gone"}, N960DL (no flight out) {n960?.Phase ?? "gone"}");
     Check(n950 is { Kind: "parked", Overnight: true }, "landed at night with a morning flight: still at its gate");
     Check(n960 is { Kind: "parked" }, "landed at night with no flight out: still at its gate before 06:00");
     world.LocalMinuteOverride = 6 * 60 + 5;
@@ -841,6 +841,13 @@ Console.WriteLine("== One approach at a time: the ATIS's, or a fixed choice — 
     var atis = AtisParse.Approaches("LGA ATIS INFO K 0551Z. 31010KT 10SM FEW250 08/M03 A3012 (THREE ZERO ONE TWO). RNAV X RWY 31 APCH IN USE. DEPG RWY 4. NOTICE TO AIR MISSIONS. ILS RWY 22 OTS. ...ADVS YOU HAVE INFO K.");
     Check(atis.Count == 1 && atis[0] == ("RNAV", "X", "31"), $"reads the approach in use from the ATIS, not the out-of-service one ({string.Join(", ", atis)})");
     var atis2 = AtisParse.Approaches("EXPECT ILS OR LOC RWY 4 APPROACH. SIMUL APCHS IN USE");
+    {
+        var dtw = AtisParse.Approaches("DTW ARR INFO I 0453Z. 03006KT 9SM SCT040 OVC250 M01/M07 A3057 (THREE ZERO FIVE SEVEN) RMK AO2 SLP361 T10111072 400331044. VISUAL RY 4L USE Z LOC FREQ 111.95 APCH IN USE. EOR OPERATIONS IN PROGRESS, RNAV RNP CAPABLE AIRCRAFT MAY BE ASSIGNED RNAV RNP W. NOTICE TO AIRMEN. RWY 22L, 4R CLSD, RWY 21R, 3L CLSD. PILOTS USE CTN FOR BIRD ACTIVITY. ...ADVS YOU HAVE INFO I.");
+        Console.WriteLine($"  KDTW info I: {string.Join(", ", dtw.Select(a => $"{a.kind} {a.suffix} {a.runway}"))}");
+        Check(dtw.Count == 1 && dtw[0] == ("ILS", "Z", "04L"), "\"VISUAL RY 4L USE Z LOC\" is flown as the ILS Z 04L (the RNAV RNP W that may be assigned isn't the one in use)");
+        var vis2 = AtisParse.Approaches("VIS APCH RWY 27L BACKED BY ILS Y. DEPG RWY 27R.");
+        Check(vis2.Count == 1 && vis2[0] == ("ILS", "Y", "27L"), "\"VIS APCH RWY 27L BACKED BY ILS Y\" is the ILS Y 27L");
+    }
     Check(atis2.Count == 1 && atis2[0] == ("ILS", "", "04"), $"\"ILS or LOC runway 4\" is the ILS to 04 ({string.Join(", ", atis2)})");
     var nm = Geo2.MPerNm;
     var data = TestAirport.Build(false);
@@ -2175,6 +2182,47 @@ Console.WriteLine("== En-route separation of the whole-sky flights (RVSM: 1,000 
     foreach (var e in ev2.Take(2)) Console.WriteLine("  " + e);
     Console.WriteLine($"  the user 1,000 ft below its level (read 20 ft high): {n2} limits given, closest {w2:N0} ft within 5 nm");
     Check(n2 == 0, "1,000 ft from the user's level is left alone (RVSM), even with the user's altitude read a little off");
+    // A little faster on the same route and level: kept in trail by speed — the one ahead a little faster first — no level
+    // change (user, 25 Nov: speed up the one ahead, "that's usually the first thing they'll do").
+    var slow2 = Leg("N5", "500", 600, 700);
+    var quick = Leg("N6", "600", 602, 694);
+    var ps0 = NetworkModel.At(slow2, 640); var pq0 = NetworkModel.At(quick, 640);
+    Console.WriteLine($"  in trail: {slow2.Callsign} {ps0?.GsKt:0} kt, {quick.Callsign} {pq0?.GsKt:0} kt at FL{ps0?.AltFt / 100:0}");
+    var w3 = Worst(new() { slow2, quick }, new(), 600, 700, out var n3, out var ev3);
+    foreach (var e in ev3.Take(4)) Console.WriteLine("  " + e);
+    Check(ev3.Any(e => e.Contains("speeds up") || e.Contains("slows")) && !ev3.Any(e => e.Contains("level change")) && w3 >= 950,
+        "a flight a little faster at the same level is kept in trail by speed (the one ahead faster first), not moved off its level");
+    Check(ev3.FirstOrDefault(e => e.Contains("speeds up") || e.Contains("slows"))?.Contains("speeds up") == true, "the one ahead is sped up first");
+    // The user ahead at its level, this one catching them up (24 Nov, DAL8948 at FL360): the user is asked first; after 90 s
+    // the one behind is slowed — never moved above the user and then below (through the user's level).
+    {
+        var ai = Leg("N7", "700", 600, 700);
+        var sep = new EnRouteSeparation();
+        var p0 = NetworkModel.At(ai, 630)!;
+        double uLon = p0.Lon + 25 / (60 * Math.Cos(40 * Math.PI / 180)), uGs = p0.GsKt - 40;
+        var evs = new List<string>(); string? notice = null; double closest = double.MaxValue; var flips = 0; var lastSide = 0;
+        for (var c = 630.0; c < 670; c += 2.0 / 60)
+        {
+            uLon += uGs / 60 * (2.0 / 60) / (60 * Math.Cos(40 * Math.PI / 180));
+            var obs = new List<EnRouteSeparation.Obstacle> { new("UAL1196 (you)", 40, uLon, 90, uGs, p0.AltFt, 0, 6) };
+            foreach (var e in sep.Update(c, 40, -95, new[] { ai }, obs)) evs.Add($"{(c - 630) * 60:0} s {e.Leg.Callsign} {e.Text} for {e.Who}");
+            notice ??= sep.UserNotice?.text;
+            if (NetworkModel.At(ai, c) is { } a)
+            {
+                var alt = sep.Alt(ai, c, a.AltFt);
+                var side = alt > p0.AltFt + 300 ? 1 : alt < p0.AltFt - 300 ? -1 : 0;
+                if (side != 0 && lastSide != 0 && side != lastSide) flips++;
+                if (side != 0) lastSide = side;
+                var d = Geo2.DistanceNm(a.Lat, a.Lon, 40, uLon);
+                if (Math.Abs(alt - p0.AltFt) < 900) closest = Math.Min(closest, d);
+            }
+        }
+        foreach (var e in evs.Take(4)) Console.WriteLine("  " + e);
+        Console.WriteLine($"  notice: {notice ?? "none"}; closest at the user's level {closest:0.0} nm; side changes {flips}");
+        Check(notice is not null && notice.Contains("catching you up"), "the user ahead is asked first, in the notices");
+        Check(evs.Any(e => e.Contains("slows")) && closest >= 5, "after 90 s the one behind is slowed and stays 5 nm or more behind at the user's level");
+        Check(flips == 0, "never moved above the user and then below (through the user's level)");
+    }
 }
 
 Console.WriteLine("== M6: learning an airport from real tracks (synthetic adsb.lol-style traces), and flying what was learned");
