@@ -183,6 +183,8 @@ public sealed class Flight
     public double StarNm = double.NaN, AppNm = double.NaN;
     /// <summary>Broken off or gone around: placed behind everyone nearer the runway than it when re-sequenced.</summary>
     public bool Rejoin;
+    /// <summary>Sequenced behind the user (it takes the delay; kept there unless the user falls clearly behind it).</summary>
+    public bool BehindUser;
     /// <summary>The real tracks off its STAR (shortest to longest), which one it flies, and where that one leaves the STAR.</summary>
     public List<(int cut, List<V2> pts, double lenNm)>? Fan;
     public int FanIdx = -1;
@@ -769,6 +771,7 @@ public sealed partial class TrafficWorld
                 if (!double.IsNaN(ahead)) f.OrderKey = Math.Max(f.OrderKey, ahead + 1);
                 f.Rejoin = false; f.Frozen = true;
             }
+            if (UserArr is { } meU && g.Contains(meU)) UserAmongArrivals(meU, g.ToList());
             var ordered = g.OrderBy(f => f.OrderKey).ToList();
             // One that will clearly be first after all (it couldn't lose its delay, or the one ahead was slowed or
             // stretched more than planned): closer to the runway along its route by 2 nm or more, and landing with the
@@ -1207,15 +1210,31 @@ public sealed partial class TrafficWorld
                 return Others.FirstOrDefault(o => o.Kind == "arrival" && o.Phase != "user" && o.AltFt > 500 && Math.Abs(o.AltFt - g.AltFt) < 1000
                     && (o.Pos - g.Pos).Length < need(gd) * Geo2.MPerNm);
             }
+            // A route that loops from the start (KJFK Peak, 24 Nov: AAL1049 and JBU168 on CAMRN5 for 31L turned 437° and
+            // 332° in their first 25 nm): started on its own way in at the same distance instead, when that doesn't.
+            if (Turned(f, 25) > 300 && !f.Test)
+            {
+                var turned = Turned(f, 25);
+                Flights.Remove(f);
+                var alt = SpawnArrival(mine, false, l, plan);
+                if (alt is not null && Turned(alt, 25) <= 300) { Log($"{alt.Callsign}: its way in from where it was turns {turned:0}° in the first 25 nm — started on {alt.Route} {mine:0} track nm out instead"); f = alt; }
+                else { if (alt is not null) Flights.Remove(alt); Flights.Add(f); }
+            }
             var near = OtherField(f);
-            if (SameRunway(f) || near is not null)
+            // Placed by its landing slot as well (user, 24 Nov: "Sim traffic should be added already sequenced without
+            // looping"): where it starts, its predicted landing must fit between the others' with the gap needed, or
+            // be late by no more than speed can still take before 20 nm — no delay vectors or loops to fix the start.
+            var shortSec = SlotShort(f);
+            if (SameRunway(f) || near is not null || shortSec > 0)
             {
                 Flights.Remove(f);
                 var before = mine > starNm + 0.5;
                 var d = mine;
+                var why = SameRunway(f) || near is not null ? "" : $"its landing would be {shortSec:0} s more than speed can take behind the traffic for {plan.rwy.Ident}";
+                var stepNm = why.Length > 0 ? shortSec / 12 + 1 : 0;   // about 300 kt behind: 12 s a mile
                 for (var tries = 0; tries < 8; tries++)
                 {
-                    d = ArrivalSlot(tries == 0 ? d : d + need(d), plan.rwy, before ? mine + 80 : Math.Max(60, mine + 40), need);
+                    d = ArrivalSlot(tries == 0 ? d + stepNm : d + Math.Max(stepNm > 0 ? stepNm : need(d), stepNm > 0 ? 1 : 0), plan.rwy, before ? mine + 80 : Math.Max(60, mine + 40), need);
                     if (d < 0) return null;
                     Flight? g;
                     if (before)
@@ -1227,11 +1246,13 @@ public sealed partial class TrafficWorld
                     else g = SpawnArrival(d, false, l, plan);
                     if (g is null) return null;
                     var near2 = OtherField(g);
-                    if (near2 is null && !SameRunway(g))
+                    var short2 = near2 is null && !SameRunway(g) ? SlotShort(g) : 0;
+                    if (near2 is null && !SameRunway(g) && short2 <= 0)
                     {
-                        Log($"{g.Callsign}: taken over from the whole sky, sequenced: starts {(g.ThrS - g.S) / Geo2.MPerNm:0} track nm out (it was {mine:0}, too close to {(near is not null ? $"{near.Callsign} ({near.Airport})" : "the traffic ahead")}), {g.Route} for runway {g.Rwy?.Ident}");
+                        Log($"{g.Callsign}: taken over from the whole sky, sequenced: starts {(g.ThrS - g.S) / Geo2.MPerNm:0} track nm out (it was {mine:0}, {(why.Length > 0 ? why : $"too close to {(near is not null ? $"{near.Callsign} ({near.Airport})" : "the traffic ahead")}")}), {g.Route} for runway {g.Rwy?.Ident}");
                         return g;
                     }
+                    stepNm = short2 > 0 ? short2 / 12 + 1 : 0;
                     near = near2 ?? near;
                     d = Math.Max(d, (g.ThrS - g.S) / Geo2.MPerNm);
                     Flights.Remove(g);
@@ -1891,6 +1912,52 @@ public sealed partial class TrafficWorld
             if (dp.Length > 0) all.Add("take-offs " + dp);
             return all.Count == 0 ? null : string.Join("; ", all);
         }
+    }
+
+    /// <summary>Degrees a flight's path turns through in its first nm miles.</summary>
+    private static double Turned(Flight f, double nmAhead)
+    {
+        if (f.Path is null) return 0;
+        double total = 0, prev = double.NaN;
+        var max = Math.Min(f.Path.Length, f.S + nmAhead * Geo2.MPerNm);
+        for (var s2 = f.S; s2 < max; s2 += 150)
+        {
+            var d = f.Path.At(s2).dir;
+            if (!double.IsNaN(prev)) total += Math.Abs(Geo2.Diff(d, prev));
+            prev = d;
+        }
+        return total;
+    }
+
+    /// <summary>
+    /// For an arrival just taken over: the seconds its landing would have to lose beyond what speed can still take
+    /// (about 2.2 s a mile beyond 20 nm, 80 % of it counted, and a minute more where it has a downwind to stretch) to fit
+    /// between the landings already planned on its runway with the gap needed. 0 or less when it fits.
+    /// </summary>
+    private double SlotShort(Flight g)
+    {
+        if (g.Rwy is null || g.Path is null) return 0;
+        var nm = Geo2.MPerNm;
+        var dg = (g.ThrS - g.S) / nm;
+        var eta = Time + EtaToThreshold(g, dg, nominal: true);
+        var others = new List<(Flight o, double t)>();
+        foreach (var o in Flights)
+        {
+            if (o == g || o.Done || o.Kind != "arrival" || o.OnGround || o.Rwy?.Runway != g.Rwy.Runway || o.Path is null || o.Phase == "go-around") continue;
+            var t = o.Frozen && o.FrozenSlot > 0 ? o.FrozenSlot : Time + (double.IsNaN(o.EtaSec) ? EtaToThreshold(o, (o.ThrS - o.S) / nm) : o.EtaSec);
+            others.Add((o, t));
+        }
+        if (UserArr is { } me && me.Rwy?.Runway == g.Rwy.Runway && !double.IsNaN(_userSlot)) others.Add((me, _userSlot));
+        var slot = eta;
+        foreach (var (o, t) in others.OrderBy(x => x.t))
+        {
+            var gapA = ThresholdGapNeeded(o, g, forDepartures: false);
+            if (t <= slot - gapA) continue;                                    // lands well before
+            if (t >= slot + ThresholdGapNeeded(g, o, forDepartures: false)) break;   // well after: it fits here
+            slot = t + gapA;
+        }
+        var canLose = Math.Max(0, dg - 20) * 2.2 * 0.8 + (g.Fan is { Count: >= 3 } ? 60 : 0);
+        return slot - eta - canLose;
     }
 
     /// <summary>For the log: a route that turns more than a full circle in its first 25 nm is a loop to look into.</summary>
@@ -3096,20 +3163,24 @@ public sealed partial class TrafficWorld
     /// The highest speed the procedure allows here: a limit ahead must be met at its fix (slowing about 5 kt per mile,
     /// at it 1½ nm before), and the last limit passed holds until the next one (or for 10 nm after the last).
     /// </summary>
-    private static double ProcedureLimit(Flight f, bool before)
+    private static double ProcedureLimit(Flight f, bool before) => ProcedureLimitAt(f, f.S, before);
+
+    /// <summary>The same limit at any point along its path (s, metres) — what the flight model will fly there, so the
+    /// predictions fly the published speeds too (user, 24 Nov: "see if the restrictions on the STAR are enough").</summary>
+    private static double ProcedureLimitAt(Flight f, double s, bool before)
     {
         var lim = double.PositiveInfinity;
         (double S, double Kt)? passed = null;
         foreach (var c in f.SpeedLimits)
         {
-            var ahead = (c.S - f.S) / Geo2.MPerNm;
+            var ahead = (c.S - s) / Geo2.MPerNm;
             // Slowing about 5 kt per nm, at the limit 1½ nm before the fix (16 Nov, KAUS: every WLEEE7 arrival crossed
             // MUSEC "max 230" at 241 kt — at the limit only half a mile before, descending as it slowed, it got there late).
             if (ahead >= 0) { lim = Math.Min(lim, before ? c.Kt : c.Kt + Math.Max(0, ahead - 1.5) * 5); }
             else passed = c;
         }
-        if (!before && passed is { } p && (f.S - p.S) / Geo2.MPerNm < 10 && !f.SpeedLimits.Any(c => c.S > f.S)) lim = Math.Min(lim, p.Kt);
-        else if (!before && passed is { } p2 && f.SpeedLimits.Any(c => c.S > f.S)) lim = Math.Min(lim, Math.Max(p2.Kt, f.SpeedLimits.Where(c => c.S > f.S).Min(c => c.Kt)));
+        if (!before && passed is { } p && (s - p.S) / Geo2.MPerNm < 10 && !f.SpeedLimits.Any(c => c.S > s)) lim = Math.Min(lim, p.Kt);
+        else if (!before && passed is { } p2 && f.SpeedLimits.Any(c => c.S > s)) lim = Math.Min(lim, Math.Max(p2.Kt, f.SpeedLimits.Where(c => c.S > s).Min(c => c.Kt)));
         return lim;
     }
 
@@ -3947,11 +4018,13 @@ public sealed partial class TrafficWorld
             }
             return at;
         }
-        var found = new List<(double leaveNm, V2 leave, List<V2> rest)>();
+        var found = new List<(double leaveNm, V2 leave, List<V2> rest, List<double> alts, HashSet<string>? deps)>();
+        _depIdsNow = (DepRwys.Count > 0 ? DepRwys : DepRwy is null ? new List<RunwayEnd>() : new() { DepRwy }).Select(d => d.Ident).ToHashSet();
         foreach (var smp in prof.Samples)
         {
             if (smp.Kind != "arrival" || smp.Runway != rwy.Ident || smp.Points.Count < 6) continue;
-            var pts = smp.Points.Where(q => q.Length >= 2).Select(q => Apt.Map.ToXY(q[0], q[1])).ToList();
+            var pq = smp.Points.Where(q => q.Length >= 2).ToList();
+            var pts = pq.Select(q => Apt.Map.ToXY(q[0], q[1])).ToList();
             // Flew the STAR: within 2 nm of it for 5 nm or more.
             int i = 0; double onFor = 0; int lastOn = -1;
             for (; i < pts.Count; i++)
@@ -3980,13 +4053,15 @@ public sealed partial class TrafficWorld
             if (first < 0 || Progress(pts[lastOn]) - Progress(pts[first]) < 4 * nm) continue;
             // From the turn off the STAR until established on final.
             var rest = new List<V2>();
+            var alts = new List<double>();
             for (var j = lastOn; j < pts.Count; j++)
             {
                 rest.Add(pts[j]);
+                alts.Add(pq[j].Length >= 3 ? pq[j][2] : double.NaN);
                 if (Math.Abs(rwy.Offset(pts[j])) < 0.3 * nm && rwy.Along(pts[j]) < -2 * nm && rwy.Along(pts[j]) > -20 * nm) break;
             }
             if (rest.Count < 2 || Math.Abs(rwy.Offset(rest[^1])) >= 0.3 * nm) continue;
-            found.Add((pts[lastOn].Length / nm, pts[lastOn], rest));
+            found.Add((pts[lastOn].Length / nm, pts[lastOn], rest, alts, DepsAround(prof, smp.T)));
             _fanBusy[rest] = Busy(prof, smp.T);
         }
         // Only the ordinary ways in (user, 19 Nov: WYNDE3 arrivals put on downwinds "no ADS-B track even comes close to
@@ -4008,6 +4083,24 @@ public sealed partial class TrafficWorld
         }
         found = found.Where(x => Turned(x.rest) <= 300).ToList();
         if (found.Count < 3) return null;
+        // Never through the departures (user, 24 Nov, KMSP: DAL2654 for 12R on a real track northwest at 10,000–5,000 ft
+        // through the fan of runway 17's departures — "absolutely not, it's in the departure corridor"; on the replay 0–2
+        // of 1,000 real 12R arrivals passed within a mile and 2,500 ft of it, and up to 41 of 500 real runway-17
+        // departures). Each track's whole low part is compared with the real flow: where real departures from the
+        // runways in use now are many and real arrivals to this runway few, for 2 nm or more, it isn't used.
+        if (CorridorGrids(prof, rwy) is { } grids)
+        {
+            var kept = found.Where(x => !InDepartureCorridor(x.rest, x.alts, grids)).ToList();
+            if (kept.Count >= 3) found = kept;
+        }
+        // Flown in the same runway configuration where enough were (the departure runways in use then, from the learned
+        // take-offs around its landing): a night-time shortcut flown when today's departure runway was quiet isn't one
+        // to copy with it busy.
+        if (_depIdsNow.Count > 0)
+        {
+            var same = found.Where(x => x.deps is { } dset && _depIdsNow.All(dset.Contains)).ToList();
+            if (same.Count >= 3) found = same;
+        }
         var lens = found.Select(x => Len(x.rest)).OrderBy(x => x).ToList();
         var med = lens[lens.Count / 2];
         // Much longer than usual is a hold or a loop; short is kept down to a third of the usual — at a busy airport most
@@ -4024,11 +4117,88 @@ public sealed partial class TrafficWorld
                 && Math.Abs(Len(o.rest) - Len(x.rest)) < 0.1 * Len(x.rest))).ToList();
         }
         if (found.Count < 3) return null;
-        _fanFound = found.OrderBy(x => x.leaveNm).ToList();
+        _fanFound = found.OrderBy(x => x.leaveNm).Select(x => (x.leaveNm, x.leave, x.rest)).ToList();
         var typical = _fanFound[_fanFound.Count / 2];
         return Fanned(typical, star);
     }
     private List<(double leaveNm, V2 leave, List<V2> rest)>? _fanFound;
+    private HashSet<string> _depIdsNow = new();
+
+    /// <summary>The departure runways real traffic used within 20 minutes of a time (learned take-offs), or null.</summary>
+    private HashSet<string>? DepsAround(AirportProfile prof, double t)
+    {
+        if (t <= 0) return null;
+        if (!ReferenceEquals(_depTFor, prof))
+        {
+            _depTFor = prof;
+            _depT = prof.Samples.Where(x => x.Kind == "departure" && x.T > 0).Select(x => (x.T, x.Runway)).OrderBy(x => x.T).ToArray();
+        }
+        if (_depT.Length == 0) return null;
+        int lo = 0, hi = _depT.Length; while (lo < hi) { var m = (lo + hi) / 2; if (_depT[m].T < t - 1200) lo = m + 1; else hi = m; }
+        var res = new HashSet<string>();
+        for (var i = lo; i < _depT.Length && _depT[i].T <= t + 1200; i++) res.Add(_depT[i].Runway);
+        return res.Count == 0 ? null : res;
+    }
+    private object? _depTFor; private (double T, string Runway)[] _depT = Array.Empty<(double, string)>();
+
+    /// <summary>
+    /// Where real traffic flies, on a grid of 1-nm squares and 2,500-ft layers: the real departures from the runways in
+    /// use now, and the real arrivals to this runway (each counted once a square). Cached per runway configuration.
+    /// </summary>
+    private (Dictionary<(int, int, int), int> dep, Dictionary<(int, int, int), int> arr)? CorridorGrids(AirportProfile prof, RunwayEnd rwy)
+    {
+        if (_depIdsNow.Count == 0) return null;
+        var key = $"{rwy.Ident}|{string.Join(",", _depIdsNow.OrderBy(x => x))}";
+        if (ReferenceEquals(_gridFor, prof) && _grids.TryGetValue(key, out var g)) return g;
+        if (!ReferenceEquals(_gridFor, prof)) { _gridFor = prof; _grids.Clear(); }
+        var dep = new Dictionary<(int, int, int), int>(); var arr = new Dictionary<(int, int, int), int>();
+        var seen = new HashSet<(int, int, int)>();
+        foreach (var smp in prof.Samples)
+        {
+            var d = smp.Kind == "departure" && _depIdsNow.Contains(smp.Runway);
+            var a = smp.Kind == "arrival" && smp.Runway == rwy.Ident;
+            if (!d && !a) continue;
+            seen.Clear();
+            foreach (var q in smp.Points)
+            {
+                if (q.Length < 3 || q[2] > 15000) continue;
+                var c = Cell(Apt.Map.ToXY(q[0], q[1]), q[2]);
+                if (seen.Add(c)) { var m = d ? dep : arr; m[c] = m.GetValueOrDefault(c) + 1; }
+            }
+        }
+        var res = (dep, arr);
+        _grids[key] = res;
+        return res;
+    }
+    private object? _gridFor;
+    private readonly Dictionary<string, (Dictionary<(int, int, int), int> dep, Dictionary<(int, int, int), int> arr)> _grids = new();
+    private static (int, int, int) Cell(V2 p, double altFt) => ((int)Math.Floor(p.X / Geo2.MPerNm), (int)Math.Floor(p.Y / Geo2.MPerNm), (int)Math.Floor(altFt / 2500));
+
+    /// <summary>
+    /// A real track's low part (below 12,000 ft, beyond 4 nm from the field) runs through where the active departures
+    /// fly and the arrivals to its runway don't — 10 or more real departures around a point (a mile and a layer either
+    /// way) and fewer than a fifth as many arrivals — for 2 nm or more of it.
+    /// </summary>
+    private static bool InDepartureCorridor(List<V2> rest, List<double> alts, (Dictionary<(int, int, int), int> dep, Dictionary<(int, int, int), int> arr) g)
+    {
+        int Around(Dictionary<(int, int, int), int> m, (int x, int y, int z) c)
+        {
+            var n = 0;
+            for (var dx = -1; dx <= 1; dx++) for (var dy = -1; dy <= 1; dy++) for (var dz = -1; dz <= 1; dz++)
+                n += m.GetValueOrDefault((c.x + dx, c.y + dy, c.z + dz));
+            return n;
+        }
+        double bad = 0;
+        for (var i = 1; i < rest.Count && i < alts.Count; i++)
+        {
+            var alt = alts[i];
+            if (double.IsNaN(alt) || alt > 12000 || rest[i].Length < 4 * Geo2.MPerNm) continue;
+            var c = Cell(rest[i], alt);
+            var dn = Around(g.dep, c); var an = Around(g.arr, c);
+            if (dn >= 10 && an * 5 < dn) { bad += (rest[i] - rest[i - 1]).Length; if (bad >= 2 * Geo2.MPerNm) return true; }
+        }
+        return false;
+    }
     private readonly Dictionary<List<V2>, int> _fanBusy = new(ReferenceEqualityComparer.Instance);
     private object? _busyFor; private double[] _busyT = Array.Empty<double>();
 
@@ -4736,6 +4906,9 @@ public sealed partial class TrafficWorld
             // Times at points on the way (marks: distances to the threshold, largest first).
             while (marks is not null && mk < marks.Length && marks[mk] >= d - 1e-9) { at![mk] = t; mk++; }
             var v = PlannedSpeed(f, d, nominal);
+            // The published speed limits along the way (a STAR's "max 230", the approach's 210 at the IAF): flown by
+            // the flight model, so counted here — speed is assigned only for what the procedure doesn't already do.
+            if (f.SpeedLimits.Count > 0 && f.Path is not null) v = Math.Max(f.P.Vapp, Math.Min(v, ProcedureLimitAt(f, f.ThrS - d * Geo2.MPerNm, false)));
             if (d > dth - 1.5 && !nominal) v = Math.Min(v, Math.Max(f.Ias, f.P.Vapp));      // it can't be faster than it is now right away
             if (f.WentAround) v = Math.Min(v, 200);
             var alt = Profile(f.Rwy!, d);
@@ -5297,12 +5470,76 @@ public sealed partial class TrafficWorld
     public string? SlotSummary => _dev40.Count == 0 && _dev20.Count == 0 ? null
         : $"on their slot (±30 s) at 40 nm {(_dev40.Count == 0 ? 0 : 100.0 * _dev40.Count(d => d <= 30) / _dev40.Count):0}%, at 20 nm {(_dev20.Count == 0 ? 0 : 100.0 * _dev20.Count(d => d <= 30) / _dev20.Count):0}% (last {Math.Max(_dev40.Count, _dev20.Count)} landings)";
 
+    /// <summary>
+    /// The user among LAIA's arrivals to their runway (user, 24 Nov, KIAH–KMSP: DAL2654 and the user abreast 150 nm out
+    /// on routes that merge; the order flipped as the user crossed 150 nm, so DAL2654 stayed slowed for the user and the
+    /// user was told to slow behind it — both lost the time; later the user was clearly ahead of DAL2654 and still
+    /// sequenced behind it). LAIA's own aircraft do the fine-tuning, the user's part stays simple:
+    /// - one directly ahead of the user that the user will reach the runway with or before (by flying miles at the
+    ///   speeds each will fly, published limits included), and that can still lose the time by speed, goes behind them;
+    /// - one behind the user stays behind (it takes the delay) — a few seconds of estimate either way never flips it —
+    ///   until the user is clearly later than it would land on its own (3 minutes) or it's much nearer the runway.
+    /// </summary>
+    private void UserAmongArrivals(Flight me, List<Flight> g)
+    {
+        var meEta = me.EtaSec;
+        if (double.IsNaN(meEta)) return;
+        var du = me.ThrS / Geo2.MPerNm;
+        foreach (var o in g)
+        {
+            if (o == me || o.Path is null) continue;
+            var d = (o.ThrS - o.S) / Geo2.MPerNm;
+            var own = o.EtaNominal - Time;   // when it would land with nothing in its way
+            if (o.BehindUser)
+            {
+                if (meEta - own > 180 || (d < du - 15 && d < 40) || o.Rejoin)
+                {
+                    o.BehindUser = false; o.OrderKey = o.EtaNominal;
+                    Log($"{o.Callsign}: no longer kept behind {me.Callsign} (you) — {(meEta - own > 180 ? $"you're {(meEta - own) / 60:0.0} min later than it would land" : "it's well ahead of you now")}");
+                }
+                else if (o.OrderKey <= me.OrderKey) o.OrderKey = me.OrderKey + 1;
+                continue;
+            }
+            if (o.OrderKey > me.OrderKey)
+            {
+                // Behind the user now: kept there from here on (the hysteresis), when the two are close in the order.
+                if (o.OrderKey - me.OrderKey < 300) o.BehindUser = true;
+                continue;
+            }
+        }
+        // The one directly ahead: abreast, or the user clearly ahead of it.
+        var ahead = g.Where(o => o != me && !o.BehindUser && o.OrderKey <= me.OrderKey && o.Path is not null && !o.Rejoin && !o.WentAround)
+            .OrderByDescending(o => o.OrderKey).FirstOrDefault();
+        if (ahead is null) return;
+        var da = (ahead.ThrS - ahead.S) / Geo2.MPerNm;
+        var ownA = ahead.EtaNominal - Time;
+        var onFinal = da < 15 && ahead.Rwy is { } ar && Math.Abs(ar.Offset(ahead.Pos)) < 0.6 * Geo2.MPerNm && ar.Along(ahead.Pos) < 0;
+        if (onFinal || da < 25) return;
+        // What it would have to lose to land the gap behind the user, and what speed can still take from it (about
+        // 2.2 s a mile beyond 20 nm: 280 → 240 kt high, 250 → 210 low) with the downwind's give (a minute).
+        var lose = meEta + ThresholdGapNeeded(me, ahead, forDepartures: false) - ownA;
+        var canLose = Math.Max(0, da - 20) * 2.2 + (ahead.Fan is { Count: >= 3 } || !double.IsNaN(ahead.BaseTurnNm) ? 60 : 0);
+        if (meEta <= ownA + 30 && du <= da + 10 && lose <= canLose)
+        {
+            ahead.OrderKey = me.OrderKey + 1;
+            ahead.BehindUser = true;
+            Log($"{ahead.Callsign}: now behind {me.Callsign} (you) for {me.Rwy?.Ident} — {(meEta < ownA - 30 ? "you're ahead of it" : "abreast")} ({du:0} against {da:0} flying nm), it takes the {Math.Max(0, lose):0} s");
+        }
+    }
+
     private void AssignSequenceSpeed(Flight f)
     {
         if (f.Rwy is null || f.Path is null) return;
         var dth = (f.ThrS - f.S) / Geo2.MPerNm;
         var old = f.SlowDv;
-        if (dth <= 22 || f.Delay < 10) { if (f.Delay < 5 || dth <= 22) f.SlowDv = 0; }
+        // One decision per arrival close in (KMSP, 24 Nov, SWA696: its base turn was brought in for a gap too big
+        // behind DAL2078, and three seconds later speed control slowed it 40 kt for its slot — then vectors and a
+        // break-off; it landed 319 s behind where 88 were needed). Once the tactical spacing has a leader and a
+        // downwind/base to move (inside 45 nm), the base turn and the speed come from the same prediction — the gap
+        // behind the one ahead: speed takes only what the trombone can't, and no delay vectors on top.
+        var tactical = dth <= 45 && f.LeaderCs is not null && Time - f.LastTrombone < 20 && !double.IsNaN(f.TromboneLeft);
+        var delay = tactical ? Math.Max(0, f.TromboneLeft) : f.Delay;
+        if (dth <= 22 || delay < 10) { if (delay < 5 || dth <= 22) f.SlowDv = 0; }
         else
         {
             var keep = f.SlowDv;
@@ -5313,7 +5550,7 @@ public sealed partial class TrafficWorld
             {
                 f.SlowDv = c;
                 dv = c;
-                if (EtaToThreshold(f, dth) - base0 >= f.Delay) break;
+                if (EtaToThreshold(f, dth) - base0 >= delay) break;
             }
             // Few, steady speed instructions (7110.65 5-7-1: the minimum necessary, no alternating; 20 Nov, CYUL: ACA336
             // and ACA376 got 12–14 each): a change of less than 10 kt is never given, and within 2½ minutes of the last
@@ -5326,7 +5563,7 @@ public sealed partial class TrafficWorld
             // Far out, the delay speed can't take is planned onto a longer real track (the way real controllers stretch
             // arrivals: a longer downwind, a wider base) before any delay vectors — one plan, made by the arrival
             // manager from the slot; close in (45 nm) the tactical spacing adjusts it from the aircraft ahead.
-            if (dv >= 40 && dth > 45 && f.Fan is { Count: >= 3 } && Time - f.FanAt > 20)
+            if (!tactical && dv >= 40 && dth > 45 && f.Fan is { Count: >= 3 } && Time - f.FanAt > 20)
             {
                 var bySpeed0 = EtaToThreshold(f, dth) - base0;
                 if (f.Delay - bySpeed0 > 20) FanPick(f, f.Delay - bySpeed0, $"{f.Delay:0} s delay for the sequence (number {f.Seq} for {f.Rwy.Ident}), {bySpeed0:0} s of it by speed");
@@ -5336,7 +5573,7 @@ public sealed partial class TrafficWorld
             // With the runway planner on, only straight after a planning pass (it runs just before), so the runway is the
             // one the plan has just confirmed — the planner won't move it once it's on a delay vector.
             var planOk = !Planner || ArrRwys.Count < 2 || Time == _lastPlan;
-            if (dv >= 40 && dth > 40 && Time - f.LastVector > 180 && f.DelayVectors < 3 && planOk)
+            if (!tactical && f.Age > 180 && dv >= 40 && dth > 40 && Time - f.LastVector > 180 && f.DelayVectors < 3 && planOk)
             {
                 var bySpeed = EtaToThreshold(f, dth) - base0;
                 var tromb = Trombone(f, 0, "");
@@ -5349,12 +5586,12 @@ public sealed partial class TrafficWorld
             }
         }
         // Not slowed again for a small delay just after being let go (a delay wavering around 5–10 s turned it off and on).
-        if (old == 0 && f.SlowDv > 0 && f.Delay < 30 && Time - f.SpeedAt < 300) f.SlowDv = 0;
+        if (old == 0 && f.SlowDv > 0 && delay < 30 && Time - f.SpeedAt < 300) f.SlowDv = 0;
         if (f.SlowDv != old) f.SpeedAt = Time;
         if (f.SlowDv > 0 && (old == 0 || Math.Abs(f.SlowDv - old) >= 10))
         {
             _speedAssigns++;
-            Log($"{f.Callsign}: reduce speed {f.SlowDv:0} kt for the sequence (number {f.Seq} for {f.Rwy.Ident}, {f.Delay:0} s to lose)");
+            Log($"{f.Callsign}: reduce speed {f.SlowDv:0} kt for the sequence (number {f.Seq} for {f.Rwy.Ident}, {delay:0} s to lose{(tactical ? $", behind {f.LeaderCs} after the base turn's share" : "")})");
         }
         f.Mgr = f.Phase == "holding" ? "holding" : f.SlowDv > 0 ? $"slowed {f.SlowDv:0} kt" : f.Frozen ? "sequenced" : "";
     }

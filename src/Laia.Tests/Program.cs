@@ -2449,6 +2449,66 @@ Console.WriteLine("== The user's runway: never changed below 10,000 ft, at most 
     Check(third == "09" && w.ArrRwy?.Ident == "27", "no second change for the user: they keep their runway");
 }
 
+Console.WriteLine("== Start-up by landing slot: arrivals taken over on top of each other close in land in order with no vectors or loops");
+{
+    var nm = Geo2.MPerNm;
+    var data = TestAirport.Build(false);
+    var map = new LocalMap(data.Lat, data.Lon);
+    var origin = map.ToLatLon(new V2(250 * nm, -100 * nm));
+    var world = new TrafficWorld(new AirportModel(data), new TestSource(), seed: 5)
+    {
+        Automatic = false, Wind = new Wind(270, 10), WeekMinute = 2000, Locate = c => c == "KFAR" ? origin : null,
+    };
+    var log = new List<string>(); world.Log = s2 => log.Add(s2);
+    world.SelectRunways(true);
+    Laia.Common.Airports.ScheduleLeg Leg(int dep, string fl, string reg) => new() { Airline = "DAL", Operator = "DAL", Type = "A321", Reg = reg, Flight = fl, Dep = "KFAR", Arr = "TEST", DepMin = dep, ArrMin = dep + 60 };
+    NetPos? np = null;
+    for (var dep = 2000 - 90; dep <= 2000; dep++)
+    {
+        var p = world.NetworkPosition(Leg(dep, "1", "N1"));
+        if (p is not null && Geo2.DistanceNm(data.Lat, data.Lon, p.Lat, p.Lon) is > 45 and < 60) { np = p; break; }
+    }
+    Check(np is not null, "the whole sky has an arrival about 50 nm out");
+    var fl = new List<Laia.Server.TrafficCore.Flight>();
+    for (var k = 0; k < 4 && np is not null; k++) if (world.SpawnFromNetwork(Leg(1, (k + 1).ToString(), "N" + (k + 1)), np) is { } g) fl.Add(g);
+    foreach (var x in log.Where(x => x.Contains("taken over"))) Console.WriteLine("  " + x);
+    Check(fl.Count == 4, "all four are taken over");
+    var dists = fl.Select(f => (f.ThrS - f.S) / nm).OrderBy(x => x).ToList();
+    var apart = dists.Zip(dists.Skip(1), (x, y) => y - x).DefaultIfEmpty(99).Min();
+    Check(apart >= 6.9, $"they start at least 7 track nm apart ({apart:0.0})");
+    for (var t = 0.0; t < 2700 && fl.Any(f => !f.OnGround); t += 0.5) world.Step(0.5);
+    var vec = log.Count(x => x.Contains("vectors for spacing") || x.Contains("breaking off") || x.Contains("going around") || x.Contains("a loop to look into"));
+    foreach (var x in log.Where(x => x.Contains("vectors for spacing") || x.Contains("breaking off") || x.Contains("loop"))) Console.WriteLine("  " + x);
+    Check(fl.All(f => f.OnGround), "all four land");
+    Check(vec == 0, $"no vectors, break-offs, go-arounds or loops to fix the start ({vec})");
+}
+
+Console.WriteLine("== The user abreast of a LAIA arrival: the AI one goes behind and takes the delay, and stays there");
+{
+    var nm = Geo2.MPerNm;
+    var w = new TrafficWorld(new AirportModel(TestAirport.Build(false)), new TestSource(), seed: 8) { Automatic = false, Wind = new Wind(270, 5) };
+    var log = new List<string>(); w.Log = s2 => log.Add(s2);
+    w.SelectRunways(true);
+    var r = w.ArrRwy!;
+    var ai = w.SpawnArrival(95, false)!;
+    w.UserCallsign = "DAL1196"; w.UserType = "A321"; w.UserDestination = "TEST";
+    w.UserOnGround = false; w.UserAltFt = 16000; w.UserGs = 300;
+    var left = new V2(-r.Dir.Y, r.Dir.X);
+    // Out on the extended centreline's side, heading in at an angle (not on the final): about 92 flying miles.
+    w.UserPos = r.Threshold - r.Dir * (80 * nm) + left * (6 * nm);
+    w.UserTrack = Geo2.Norm(r.Heading + 35);
+    for (var t = 0.0; t < 40; t += 0.5) { w.Step(0.5); w.UserPos = w.UserPos.Value + V2.FromBearing(w.UserTrack) * (300 * 0.5144 * 0.5); }
+    var seq1 = w.Sequence?.Number;
+    // The user slows a little (keeping their spacing): a few seconds of estimate either way doesn't flip the order.
+    w.UserGs = 270;
+    for (var t = 0.0; t < 120; t += 0.5) { w.Step(0.5); w.UserPos = w.UserPos.Value + V2.FromBearing(w.UserTrack) * (270 * 0.5144 * 0.5); }
+    var seq2 = w.Sequence?.Number;
+    foreach (var x in log.Where(x => x.Contains("(you)") || x.Contains(ai.Callsign + ":"))) Console.WriteLine("  " + x);
+    Console.WriteLine($"  user number {seq1} then {seq2}; {ai.Callsign} {(ai.ThrS - ai.S) / nm:0} nm out, slowed {ai.SlowDv:0} kt; advice: {w.Sequence?.SpeedAdvice}");
+    Check(seq1 == 1 && seq2 == 1, "the user is number 1, the LAIA arrival abreast of them behind");
+    Check(ai.BehindUser && ai.Seq == 2, "the LAIA arrival is kept behind the user");
+}
+
 Console.WriteLine("== Neighbouring fields: runway traffic only, on the main airport's clock; satellite STARs are a last resort");
 {
     var nm = Geo2.MPerNm;
