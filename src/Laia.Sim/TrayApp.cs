@@ -1,3 +1,4 @@
+using System.Net.Http;
 using System.Diagnostics;
 using Laia.Common;
 
@@ -63,6 +64,7 @@ internal sealed class TrayApp : ApplicationContext
         menu.Items.Add(_noticesItem);
         menu.Items.Add(_speakItem);
         menu.Items.Add(new ToolStripMenuItem("Open ATC control page", null, (_, _) => OpenControlPage()));
+        menu.Items.Add(new ToolStripMenuItem("Restart LAIA Server", null, async (_, _) => await RestartServerAsync()));
         menu.Items.Add(_updateItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(new ToolStripMenuItem("Exit LAIA Sim", null, (_, _) => ExitThread()));
@@ -366,6 +368,21 @@ internal sealed class TrayApp : ApplicationContext
             });
         }
         catch { }
+    }
+
+    /// <summary>Asks the server to restart its service (user, 24 Nov: restart it without going to the other PC).</summary>
+    private async Task RestartServerAsync()
+    {
+        if (_server is null) { _tray.ShowBalloonTip(3000, "LAIA", "Not connected to LAIA Server yet.", ToolTipIcon.Info); return; }
+        if (MessageBox.Show("Restart LAIA Server? Traffic stops for about 20 seconds.", "LAIA", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+            using var r = await http.PostAsync(_server.BaseUrl.TrimEnd('/') + "/api/restart", null);
+            _tray.ShowBalloonTip(4000, "LAIA", r.IsSuccessStatusCode ? "LAIA Server is restarting — back in about 20 seconds." : $"The server answered {(int)r.StatusCode}.", ToolTipIcon.Info);
+            Log.Write("Restart LAIA Server asked for: " + (int)r.StatusCode);
+        }
+        catch (Exception ex) { _tray.ShowBalloonTip(4000, "LAIA", "Couldn't reach LAIA Server: " + ex.Message, ToolTipIcon.Warning); }
     }
 
     private void OpenControlPage()

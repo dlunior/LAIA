@@ -166,6 +166,19 @@ app.MapGet("/api/map/flow", (TrafficEngine t) => t.TaxiFlowMap() is { } r ? Resu
 app.MapGet("/api/learned", (TrafficEngine t, AdsbHistory h) => Results.Json(t.AirportsInUse().Select(i => new { icao = i, file = h.ProfileFile(i) })
     .Where(x => x.file is not null).Select(x => new { x.icao, modified = File.GetLastWriteTimeUtc(x.file!) }), jsonOpts));
 app.MapPost("/api/selftest", (TrafficEngine t) => { t.RestartSelfTest(); return Results.Ok(); });
+// Restart the server (user, 24 Nov: "Is there a way to remotely restart the service?"): a small detached command stops
+// the LAIA service and starts it again a few seconds after this answers, so the page and LAIA Sim get the reply first.
+app.MapPost("/api/restart", (ILogger<TrafficEngine> log) =>
+{
+    if (!OperatingSystem.IsWindows()) return Results.Json(new { ok = false, message = "Restart works on Windows only." }, jsonOpts);
+    log.LogInformation("Restart asked for from {from}: the LAIA service stops and starts again in a few seconds", "the control page or LAIA Sim");
+    var sc = Path.Combine(Environment.SystemDirectory, "sc.exe");
+    var ping = Path.Combine(Environment.SystemDirectory, "PING.EXE");
+    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "cmd.exe"),
+        $"/c \"\"{ping}\" -n 3 127.0.0.1 >nul & \"{sc}\" stop LAIA >nul & \"{ping}\" -n 8 127.0.0.1 >nul & \"{sc}\" start LAIA >nul\"")
+        { UseShellExecute = false, CreateNoWindow = true });
+    return Results.Json(new { ok = true, message = "LAIA Server is restarting — back in about 20 seconds." }, jsonOpts);
+});
 app.MapGet("/api/learned/{icao}", (string icao, AdsbHistory h) => h.ProfileFile(icao) is { } f ? Results.File(f, "application/json") : Results.NotFound());
 // LAIA's own track recording (TrackRecorder): the files, one file, and a time range for the map's replay.
 app.MapGet("/api/tracks", () => Results.Json(Laia.Server.TrafficCore.TrackRecorder.Files().Select(f => new { f.name, f.size, f.modified }), jsonOpts));

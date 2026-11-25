@@ -39,12 +39,17 @@ public sealed class RealTimetableService(SettingsStore settings, NetworkStore ne
     {
         await Task.Delay(TimeSpan.FromSeconds(45), ct).ContinueWith(_ => { });
         var last = DateTime.MinValue;
+        var lastLook = DateTime.MinValue;
         while (!ct.IsCancellationRequested)
         {
             try
             {
                 var sig = source.CatalogSignature;
-                if (network.AigVersion != _builtFor || sig != _catalogSig || DateTime.UtcNow - last > TimeSpan.FromHours(6))
+                // Every 15 minutes, a look at the collector's newest day: a new one (or the first ones, after an update
+                // of the collector) is built in at once rather than at the 6-hour rebuild (24 Nov: it waited 6 hours).
+                var newDay = false;
+                if (DateTime.UtcNow - lastLook > TimeSpan.FromMinutes(15)) { lastLook = DateTime.UtcNow; newDay = await NewestDayAsync(ct) is { } nd && nd != _builtDay; }
+                if (network.AigVersion != _builtFor || sig != _catalogSig || newDay || DateTime.UtcNow - last > TimeSpan.FromHours(6))
                 {
                     if (network.AigCount > 0) { await RebuildAsync(ct); _builtFor = network.AigVersion; _catalogSig = sig; last = DateTime.UtcNow; }
                 }
@@ -53,6 +58,37 @@ public sealed class RealTimetableService(SettingsStore settings, NetworkStore ne
             catch (Exception ex) { Status = "real timetable: " + ex.Message; log.LogWarning("Real timetable failed: {msg}", ex.Message); }
             try { await Task.Delay(TimeSpan.FromMinutes(1), ct); } catch { break; }
         }
+    }
+
+    private string? _builtDay;
+
+    private string Source()
+    {
+        var src = (settings.Get("track_source") ?? "").Trim();
+        if (src.Length == 0) src = AdsbHistory.DefaultSource;
+        return src.TrimEnd('/');
+    }
+
+    /// <summary>The collector's newest day with flights (null: none, or it can't be reached); also notes when the
+    /// collector is an older version without them (its /api/legdays unknown).</summary>
+    private async Task<string?> NewestDayAsync(CancellationToken ct)
+    {
+        var src = Source();
+        if (src.Equals("off", StringComparison.OrdinalIgnoreCase)) return null;
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
+            using var r = await http.GetAsync($"{src}/api/legdays", ct);
+            if (r.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                Status = "real timetable: the LAIA Collector on the NAS needs updating — it's an older version without the real flights (Container Manager: stop and clean the laia-collector project, delete its image, build it again)";
+                return null;
+            }
+            if (!r.IsSuccessStatusCode) return null;
+            var days = JsonSerializer.Deserialize<List<LegDay>>(await r.Content.ReadAsStringAsync(ct)) ?? new();
+            return days.Where(d => d.Flights > 0).Select(d => d.Day).OrderByDescending(d => d, StringComparer.Ordinal).FirstOrDefault();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException) { return null; }
     }
 
     private async Task RebuildAsync(CancellationToken ct)
@@ -65,8 +101,14 @@ public sealed class RealTimetableService(SettingsStore settings, NetworkStore ne
         http.DefaultRequestHeaders.UserAgent.ParseAdd("LAIA-Server");
         List<LegDay> days;
         try { days = JsonSerializer.Deserialize<List<LegDay>>(await http.GetStringAsync($"{src}/api/legdays", ct)) ?? new(); }
-        catch (Exception ex) when (ex is not OperationCanceledException) { Status = $"real timetable: the LAIA Collector has no flights yet ({ex.Message})"; return; }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Status = ex.Message.Contains("404") ? "real timetable: the LAIA Collector on the NAS needs updating — it's an older version without the real flights (Container Manager: stop and clean the laia-collector project, delete its image, build it again)"
+                : $"real timetable: the LAIA Collector can't be reached ({ex.Message})";
+            return;
+        }
         days = days.Where(d => d.Flights > 0).OrderByDescending(d => d.Day, StringComparer.Ordinal).Take(28).ToList();
+        _builtDay = days.FirstOrDefault()?.Day;
         if (days.Count == 0) { Status = "real timetable: the LAIA Collector has no flights yet (it reads its days again for them first)"; return; }
         var dir = Path.Combine(Paths.DataDir, "timetable");
         Directory.CreateDirectory(dir);

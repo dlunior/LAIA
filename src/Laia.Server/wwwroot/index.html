@@ -86,7 +86,7 @@
       <div id="prepDone" class="ready" style="display:none">All data ready — traffic is starting.</div>
     </div></div>
     <div class="muted" id="tAirport" style="margin-top:8px"></div>
-    <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap"><button id="tDep" class="ghost">Send a test departure</button><button id="tArr" class="ghost">Send a test arrival</button><button id="tClr" class="ghost">Remove traffic</button><a href="/map" target="_blank" style="text-decoration:none"><button class="ghost" type="button">Open the live map</button></a></div>
+    <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap"><button id="tDep" class="ghost">Send a test departure</button><button id="tArr" class="ghost">Send a test arrival</button><button id="tClr" class="ghost">Remove traffic</button><button id="tRst" class="ghost" title="Stops and starts the LAIA Server service on this PC (about 20 seconds)">Restart LAIA Server</button><a href="/map" target="_blank" style="text-decoration:none"><button class="ghost" type="button">Open the live map</button></a></div>
     <div class="muted" id="tMsg" style="margin-top:8px"></div>
     <dl id="tList"></dl>
   </section>
@@ -148,6 +148,7 @@ async function traffic(path){$("tMsg").textContent="…";try{const r=await fetch
 $("tDep").addEventListener("click",()=>traffic("/api/traffic/test/departure"));
 $("tArr").addEventListener("click",()=>traffic("/api/traffic/test/arrival"));
 $("tClr").addEventListener("click",()=>traffic("/api/traffic/clear"));
+$("tRst").addEventListener("click",()=>{if(confirm("Restart LAIA Server? Traffic stops for about 20 seconds."))traffic("/api/restart");});
 let prepWanted=false,prepHidden=false,prepShown=false;
 document.querySelectorAll(".lvl button").forEach(b=>b.addEventListener("click",()=>{if(b.dataset.l!=="off"){prepWanted=true;prepHidden=false;}traffic("/api/traffic/level/"+b.dataset.l);}));
 $("prepClose").addEventListener("click",()=>{prepHidden=true;prepShown=false;$("prepBox").style.display="none";});
