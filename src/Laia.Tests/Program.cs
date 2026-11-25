@@ -2195,7 +2195,7 @@ Console.WriteLine("== En-route separation of the whole-sky flights (RVSM: 1,000 
     var slow2 = Long("N5", "500", "A320", 600);
     var quick = Long("N6", "600", "B752", 600);
     // Line the 757 up 3 minutes behind the A320 at take-off (its schedule padding differs).
-    double TakeOff(Laia.Server.TrafficCore.NetLeg l) { for (var c = l.DepMin; c < l.DepMin + 200; c += 0.1) if (NetworkModel.At(l, c) is not null) return c; return double.NaN; }
+    double TakeOff(Laia.Server.TrafficCore.NetLeg l) { for (double c = l.DepMin; c < l.DepMin + 200; c += 0.1) if (NetworkModel.At(l, c) is not null) return c; return double.NaN; }
     quick.DepMin += (int)Math.Round(TakeOff(slow2) + 3 - TakeOff(quick)); quick.ArrMin = quick.DepMin + 260;
     var ps0 = NetworkModel.At(slow2, 680); var pq0 = NetworkModel.At(quick, 680);
     Console.WriteLine($"  in trail: {slow2.Callsign} {ps0?.GsKt:0} kt, {quick.Callsign} {pq0?.GsKt:0} kt at FL{ps0?.AltFt / 100:0}/{pq0?.AltFt / 100:0}, {(ps0 is not null && pq0 is not null ? Geo2.DistanceNm(ps0.Lat, ps0.Lon, pq0.Lat, pq0.Lon) : 0):0} nm apart at 680");
