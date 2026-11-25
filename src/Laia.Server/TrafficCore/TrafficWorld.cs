@@ -211,7 +211,7 @@ public sealed class Flight
     public (Procedure p, Transition? t)? StarPick, SidPick;
     public double LastHold = -999;
     /// <summary>When the base turn was last moved (the trombone), and how far out it is now (nm; NaN: no downwind ahead).</summary>
-    public double LastTrombone = -999, BaseTurnNm = double.NaN, TromboneLoggedNm = double.NaN, TromboneLeft = double.NaN;
+    public double TromboneAdd, LastTrombone = -999, BaseTurnNm = double.NaN, TromboneLoggedNm = double.NaN, TromboneLeft = double.NaN;
 
     public double AglFt(double groundFt) => OnGround ? 0 : Math.Max(0, AltFt - groundFt);
 
@@ -5537,7 +5537,9 @@ public sealed partial class TrafficWorld
         // break-off; it landed 319 s behind where 88 were needed). Once the tactical spacing has a leader and a
         // downwind/base to move (inside 45 nm), the base turn and the speed come from the same prediction — the gap
         // behind the one ahead: speed takes only what the trombone can't, and no delay vectors on top.
-        var tactical = dth <= 45 && f.LeaderCs is not null && Time - f.LastTrombone < 20 && !double.IsNaN(f.TromboneLeft);
+        // (Only where the two disagree: the base turn being brought in to close a gap that's too big means no speed
+        // reduction for the slot at the same time; otherwise the slot's delay stands — merging streams need it.)
+        var tactical = dth <= 45 && f.LeaderCs is not null && Time - f.LastTrombone < 20 && !double.IsNaN(f.TromboneLeft) && f.TromboneAdd < -25;
         var delay = tactical ? Math.Max(0, f.TromboneLeft) : f.Delay;
         if (dth <= 22 || delay < 10) { if (delay < 5 || dth <= 22) f.SlowDv = 0; }
         else
@@ -7420,6 +7422,7 @@ public sealed partial class TrafficWorld
                     if (add < 0 && (leader.Mgr is "vectored around" or "vectored" || leader.Rejoin || leader.WentAround || leader.DetourSec > 0)) add = 0;
                     else if (add < 0 && !double.IsNaN(staAdd)) add = Math.Max(add, Math.Min(0, staAdd - 60));
                     if (inverted) add = 0;
+                    f.TromboneAdd = add;
                     f.TromboneLeft = Trombone(f, add > 10 || add < -25 ? add : 0, $"{gapSec:0} s behind {leader.Callsign} at the runway, {wantGap:0} wanted");
                     if (double.IsNaN(f.TromboneLeft) && f.Fan is not null)
                         f.TromboneLeft = FanPick(f, add > 10 || add < -25 ? add : 0, $"{gapSec:0} s behind {leader.Callsign} at the runway, {wantGap:0} wanted");

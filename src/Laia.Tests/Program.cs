@@ -2413,7 +2413,7 @@ Console.WriteLine("== The user's place holds while they slow to keep their spaci
     Console.WriteLine($"  your numbers: {string.Join(", ", seqs)}; advice: {advice ?? "none"}; the one behind sped up at most {maxUp:0.0} kt/s");
     Check(!log.Any(x => x.Contains("now ahead of N456CD") || x.Contains("(you): new sequence") || x.Contains("re-sequenced")), "nobody behind is put ahead of the user for slowing down, and no new sequence");
     Check(seqs.Zip(seqs.Skip(1)).All(p => p.Second < p.First), "the user's number only goes down (as the ones ahead land)");
-    Check(advice is not null && advice.Contains("kt keeps your spacing"), "the notice gives a speed that keeps the spacing");
+    Check(advice is not null && (advice.Contains("kt keeps your spacing") || advice.Contains("no speed change needed")), "the notice says what speed keeps the spacing (or that none is needed)");
     Check(maxUp <= 1.55, "speeding up comes in gradually (1.5 kt a second or less)");
 }
 
@@ -2490,13 +2490,17 @@ Console.WriteLine("== The user abreast of a LAIA arrival: the AI one goes behind
     var log = new List<string>(); w.Log = s2 => log.Add(s2);
     w.SelectRunways(true);
     var r = w.ArrRwy!;
-    var ai = w.SpawnArrival(95, false)!;
-    w.UserCallsign = "DAL1196"; w.UserType = "A321"; w.UserDestination = "TEST";
-    w.UserOnGround = false; w.UserAltFt = 16000; w.UserGs = 300;
     var left = new V2(-r.Dir.Y, r.Dir.X);
-    // Out on the extended centreline's side, heading in at an angle (not on the final): about 92 flying miles.
-    w.UserPos = r.Threshold - r.Dir * (80 * nm) + left * (6 * nm);
-    w.UserTrack = Geo2.Norm(r.Heading + 35);
+    // A LAIA arrival taken over 110 nm out on the extended centreline (side), and the user abreast of it on the other
+    // side, heading in at an angle (not on the final), a couple of flying miles nearer.
+    var ai = w.SpawnArrival(0, false, entry: (r.Threshold - r.Dir * (110 * nm) + left * (8 * nm), 20000, 20000))!;
+    var da = (ai.ThrS - ai.S) / nm;
+    w.UserCallsign = "DAL1196"; w.UserType = "A321"; w.UserDestination = "TEST";
+    w.UserOnGround = false; w.UserAltFt = 20000; w.UserGs = 300;
+    var join = r.Threshold - r.Dir * (11 * nm);
+    w.UserPos = join - r.Dir * ((da - 13) * nm * 0.995) - left * (8 * nm);
+    w.UserTrack = (join - w.UserPos.Value).Bearing;
+    Console.WriteLine($"  {ai.Callsign} {da:0} flying nm out on {ai.Route}");
     for (var t = 0.0; t < 40; t += 0.5) { w.Step(0.5); w.UserPos = w.UserPos.Value + V2.FromBearing(w.UserTrack) * (300 * 0.5144 * 0.5); }
     var seq1 = w.Sequence?.Number;
     // The user slows a little (keeping their spacing): a few seconds of estimate either way doesn't flip the order.
