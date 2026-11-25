@@ -2199,7 +2199,7 @@ Console.WriteLine("== En-route separation of the whole-sky flights (RVSM: 1,000 
         var ai = Leg("N7", "700", 600, 700);
         var sep = new EnRouteSeparation();
         var p0 = NetworkModel.At(ai, 630)!;
-        double uLon = p0.Lon + 25 / (60 * Math.Cos(40 * Math.PI / 180)), uGs = p0.GsKt - 40;
+        double uLon = p0.Lon + 25 / (60 * Math.Cos(40 * Math.PI / 180)), uGs = p0.GsKt - 25;
         var evs = new List<string>(); string? notice = null; double closest = double.MaxValue; var flips = 0; var lastSide = 0;
         for (var c = 630.0; c < 670; c += 2.0 / 60)
         {
