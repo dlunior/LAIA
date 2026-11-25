@@ -5520,7 +5520,10 @@ public sealed partial class TrafficWorld
             .OrderByDescending(o => o.OrderKey).FirstOrDefault();
         if (ahead is null) return;
         var da = (ahead.ThrS - ahead.S) / Geo2.MPerNm;
-        var ownA = ahead.EtaNominal - Time;
+        // When it would land: with the delay it already has (on a delay vector, slowed in a queue), not as if it had
+        // none (KATL, 25 Nov: DAL1816, number 28 on a 300 s delay vector, predicted to land 1.9 min after the user, still
+        // ahead of them — and the user told Mach .64 to get behind it).
+        var ownA = Math.Max(ahead.EtaNominal - Time, double.IsNaN(ahead.EtaSec) ? 0 : ahead.EtaSec);
         var onFinal = da < 15 && ahead.Rwy is { } ar && Math.Abs(ar.Offset(ahead.Pos)) < 0.6 * Geo2.MPerNm && ar.Along(ahead.Pos) < 0;
         if (onFinal || da < 25) return;
         // What it would have to lose to land the gap behind the user, and what speed can still take from it (about
