@@ -1529,6 +1529,28 @@ Console.WriteLine("== Real flights from ADS-B (the LAIA Collector) and the real 
     Check(!good.Contains("KAAA") && !good.Contains("KBBB"), "used only where it has 14+ flights a week and half the AIG timetable's");
 }
 
+Console.WriteLine("== A vectored SID heading skips a fix left behind it (24 Nov, KMSP SNOWZ1 off 17 zigzagged 'turning 383°')");
+{
+    var apt = new AirportModel(TestAirport.Build(false));
+    Laia.Common.Airports.ProcedureLeg Fix(int type, string name, V2 at, double course = 0)
+    {
+        var (la, lo) = apt.Map.ToLatLon(at);
+        return new() { Type = type, Fix = name, Lat = la, Lon = lo, Course = course, TrueCourse = true };
+    }
+    var nm = Geo2.MPerNm;
+    var a = new V2(0, -3 * nm);                                     // RUBRB, south of the runway end
+    var b = a + new V2(-1.75 * nm, 1.0 * nm);                       // MANCY, 2 nm north-west of it (behind the heading)
+    var c = a + new V2(-6.5 * nm, -6.5 * nm);                       // SNOWZ, 9 nm south-west
+    var legs = new List<Laia.Common.Airports.ProcedureLeg> { Fix(4, "RUBRB", a, 220), Fix(11, "RUBRB", a, 215), Fix(18, "MANCY", b), Fix(15, "MANCY", b), Fix(18, "SNOWZ", c) };
+    var pts = apt.LegsToPoints(legs, new V2(0, 0), 1000, out _, hybrid: true);
+    double turned = 0;
+    var all = new[] { new V2(0, 0) }.Concat(pts.Select(p => p.P)).ToList();
+    for (var i = 2; i < all.Count; i++) turned += Math.Abs(Geo2.Diff((all[i - 1] - all[i - 2]).Bearing, (all[i] - all[i - 1]).Bearing));
+    Console.WriteLine($"  route: {string.Join(" → ", pts.Select(p => p.Fix.Length > 0 ? p.Fix : "·"))}; turns {turned:0}° in all");
+    Check(!pts.Any(p => p.Fix == "MANCY") && pts.Any(p => p.Fix == "SNOWZ"), "the fix behind the heading is left out, the next one ahead flown to");
+    Check(turned < 120, "no zigzag back to it");
+}
+
 Console.WriteLine("== Winds aloft from Open-Meteo (the FD tables were discontinued, Nov 2026): pressure levels to the forecast levels");
 {
     var json = """
