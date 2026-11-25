@@ -5575,7 +5575,7 @@ public sealed partial class TrafficWorld
             // With the runway planner on, only straight after a planning pass (it runs just before), so the runway is the
             // one the plan has just confirmed — the planner won't move it once it's on a delay vector.
             var planOk = !Planner || ArrRwys.Count < 2 || Time == _lastPlan;
-            if (!tactical && f.Age > 180 && dv >= 40 && dth > 40 && Time - f.LastVector > 180 && f.DelayVectors < 3 && planOk)
+            if (!tactical && dv >= 40 && dth > 40 && Time - f.LastVector > 180 && f.DelayVectors < 3 && planOk)
             {
                 var bySpeed = EtaToThreshold(f, dth) - base0;
                 var tromb = Trombone(f, 0, "");

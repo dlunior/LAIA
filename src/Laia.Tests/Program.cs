@@ -2497,15 +2497,16 @@ Console.WriteLine("== The user abreast of a LAIA arrival: the AI one goes behind
     var da = (ai.ThrS - ai.S) / nm;
     w.UserCallsign = "DAL1196"; w.UserType = "A321"; w.UserDestination = "TEST";
     w.UserOnGround = false; w.UserAltFt = 20000; w.UserGs = 300;
-    var join = r.Threshold - r.Dir * (11 * nm);
-    w.UserPos = join - r.Dir * ((da - 13) * nm * 0.995) - left * (8 * nm);
-    w.UserTrack = (join - w.UserPos.Value).Bearing;
-    Console.WriteLine($"  {ai.Callsign} {da:0} flying nm out on {ai.Route}");
-    for (var t = 0.0; t < 40; t += 0.5) { w.Step(0.5); w.UserPos = w.UserPos.Value + V2.FromBearing(w.UserTrack) * (300 * 0.5144 * 0.5); }
+    // Right beside it, on the same STAR, a little faster.
+    w.UserStar = "ARRVL1";
+    w.UserPos = ai.Pos + V2.FromBearing(ai.Heading) * (0.5 * nm) + V2.FromBearing(ai.Heading + 90) * (1.5 * nm);
+    w.UserTrack = ai.Heading; w.UserGs = Math.Max(ai.Gs, 250) + 15;
+    Console.WriteLine($"  {ai.Callsign} {da:0} flying nm out on {ai.Route} at {ai.Gs:0} kt; the user beside it at {w.UserGs:0}");
+    for (var t = 0.0; t < 40; t += 0.5) { w.Step(0.5); w.UserPos = w.UserPos.Value + V2.FromBearing(w.UserTrack) * (w.UserGs * 0.5144 * 0.5); w.UserTrack = ai.Heading; }
     var seq1 = w.Sequence?.Number;
     // The user slows a little (keeping their spacing): a few seconds of estimate either way doesn't flip the order.
-    w.UserGs = 270;
-    for (var t = 0.0; t < 120; t += 0.5) { w.Step(0.5); w.UserPos = w.UserPos.Value + V2.FromBearing(w.UserTrack) * (270 * 0.5144 * 0.5); }
+    w.UserGs -= 25;
+    for (var t = 0.0; t < 120; t += 0.5) { w.Step(0.5); w.UserPos = w.UserPos.Value + V2.FromBearing(w.UserTrack) * (w.UserGs * 0.5144 * 0.5); w.UserTrack = ai.Heading; }
     var seq2 = w.Sequence?.Number;
     foreach (var x in log.Where(x => x.Contains("(you)") || x.Contains(ai.Callsign + ":"))) Console.WriteLine("  " + x);
     Console.WriteLine($"  user number {seq1} then {seq2}; {ai.Callsign} {(ai.ThrS - ai.S) / nm:0} nm out, slowed {ai.SlowDv:0} kt; advice: {w.Sequence?.SpeedAdvice}");
