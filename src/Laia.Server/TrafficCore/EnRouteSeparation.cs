@@ -153,7 +153,7 @@ public sealed class EnRouteSeparation
             up = down = 0;
             if (dNm < 5.5) return false;
             var need = closureKt - (dNm - 5.5) / horizonH;
-            if (need <= 0) return false;
+            if (need <= 0) return true;     // nothing to change yet: it stays 5 nm or more behind over the five minutes
             up = Math.Min(need, maxUp);
             down = need - up;
             if (down > maxDown) return false;
@@ -185,6 +185,7 @@ public sealed class EnRouteSeparation
                 for (var k = 0; k < N && !conflict; k++)
                     conflict = (pos[i, k] - pos[j, k]).Length < 5 * nm && Math.Abs(eff[i, k] - eff[j, k]) < 1000;
                 if (!conflict) continue;
+                if ((_st.TryGetValue(legs[i].Id, out var sti) && sti is { Lvl: not 0, Why: not null }) || (_st.TryGetValue(legs[j].Id, out var stj) && stj is { Lvl: not 0, Why: not null })) continue;
                 var dir = V2.FromBearing(hdg[i], 1);
                 var iBehind = V2.Dot(pos[j, 0] - pos[i, 0], dir) > 0;
                 int F = iBehind ? i : j, L = iBehind ? j : i;
@@ -234,7 +235,8 @@ public sealed class EnRouteSeparation
                     if ((pos[i, k] - (o.p0 + o.v * t)).Length >= o.SepNm * nm || Math.Abs(alt[i, k] - oAlt) >= 800) continue;
                     var isUser = o.Name.EndsWith("(you)");
                     var sameWay = Math.Abs(Geo2.Diff(hdg[i], o.Track)) <= 60 && o.GsKt > 60;
-                    if (level[i] && Math.Abs(o.AltFt - alt[i, 0]) < 500 && sameWay)
+                    var onLevelChange = st0 is { Lvl: not 0, Why: not null };   // already given a level: kept, not switched back
+                    if (level[i] && Math.Abs(o.AltFt - alt[i, 0]) < 500 && sameWay && !onLevelChange)
                     {
                         // At its level going the same way: in trail by speed if it can be (user, 25 Nov: speed up the one
                         // ahead first — "that's usually the first thing they'll do"; the one behind slower; then a level,
