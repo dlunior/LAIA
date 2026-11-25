@@ -36,7 +36,7 @@ public static class AtisParse
     private static readonly Regex Spelled2 = new(@"\b(RWYS?|RUNWAYS?|RYS?)\s*(\d{1,2})\s+(LEFT|RIGHT|CENTER|CENTRE)\b", RegexOptions.Compiled);
     private static readonly Regex Notams = new(@"NOTICES?\s+TO\s+AIR(?:MEN|\s*MISSIONS)|\bNOTAMS?\b", RegexOptions.Compiled);
     private static readonly Regex Pass1 = new(@"([A-Z0-9 .,/\-]{0,36}?)(?<![A-Z])(?:RWYS?|RUNWAYS?|RYS?),?\s*(" + List + ")", RegexOptions.Compiled);
-    private static readonly Regex Pass2 = new(@"(?<![A-Z])(ILS|RNAV|RNP|VISUAL|VIS|LOC|LDA|SDF|LDG|LNDG|LANDING|ARR|ARRIVALS?|DEP|DEPG|DEPTG|DEPARTING|DEPARTURES?)(?:\s+(?:[XYZ]|APCHS?|APPROACH(?:ES)?))?\s+(" + List + @")(?![\dA-Z/]|\.\d)", RegexOptions.Compiled);
+    private static readonly Regex Pass2 = new(@"(?<![A-Z])(ILS|RNAV|RNP|VISUAL|VIS|LOC|LDA|SDF|LDG|LNDG|LANDING|ARR|ARRIVALS?|DEP|DEPG|DEPTG|DEPARTING|DEPARTURES?)(?:\s+(?:[XYZ]|APCHS?|APPROACH(?:ES)?|\(?PRM\)?)){0,2}\s+(" + List + @")(?![\dA-Z/]|\.\d)", RegexOptions.Compiled);
     private static readonly Regex Pass3 = new(@"(?<![A-Z])EXPECT(?:ING)?\s+(" + List + @")(?![\dA-Z/]|\.\d)", RegexOptions.Compiled);
     private static readonly Regex Sep = new(@"\s*(?:,|AND|/)\s*", RegexOptions.Compiled);
     private static readonly Regex OneRwy = new(@"^[0-3]?\d[LRC]?$", RegexOptions.Compiled);

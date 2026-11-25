@@ -847,7 +847,7 @@ Console.WriteLine("== One approach at a time: the ATIS's, or a fixed choice — 
         Check(dtw.Count == 1 && dtw[0] == ("ILS", "Z", "04L"), "\"VISUAL RY 4L USE Z LOC\" is flown as the ILS Z 04L (the RNAV RNP W that may be assigned isn't the one in use)");
         // KATL info B 2252Z, 25 Nov: "ILS PRM 9R" — the PRM between ILS and the runway hid two of the three landing runways.
         var atl = AtisParse.FromText("ATL ARR INFO B 2252Z. 06010KT 8SM -RA OVC020 08/06 A3005 (THREE ZERO ZERO FIVE) RMK AO2 SLP177 P0004 T00780056. SIMULTANEOUS APCHS IN USE, ILS 8L, ILS PRM 9R, ILS PRM 10. NOTAMS... RWY 9L PAPI OTS. IM RWY 8L OTS, IM RWY 9R OTS, IM RWY 10 OTS, DME PORTION OF ILS RWY 9L OTS. WIND SHEAR ADZYS IN EFCT. ...ADVS YOU HAVE INFO B.");
-        Console.WriteLine($"  KATL info B: {atl}");
+        Console.WriteLine($"  KATL info B: {atl.Describe()}");
         Check(atl.Landing.OrderBy(x => x).SequenceEqual(new[] { "08L", "09R", "10" }) && atl.Approaches.Count == 3, "\"ILS 8L, ILS PRM 9R, ILS PRM 10\" lands all three (PRM read)");
         var vis2 = AtisParse.Approaches("VIS APCH RWY 27L BACKED BY ILS Y. DEPG RWY 27R.");
         Check(vis2.Count == 1 && vis2[0] == ("ILS", "Y", "27L"), "\"VIS APCH RWY 27L BACKED BY ILS Y\" is the ILS Y 27L");
