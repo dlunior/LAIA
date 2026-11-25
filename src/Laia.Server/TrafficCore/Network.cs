@@ -20,6 +20,14 @@ public sealed class NetLeg
     /// before it takes off (a departure clearance time), eased in at no more than 15% slower once airborne.
     /// </summary>
     public double MeterMin, MeterTarget;
+    /// <summary>The average tailwind (+) along its route at its cruise level, knots (NaN until worked out).</summary>
+    public double WindKt = double.NaN, WindAt = double.NegativeInfinity;
+    /// <summary>
+    /// Separation en route (EnRouteSeparation): minutes behind (+) or ahead of (−) its schedule from speed changes given
+    /// to keep it in trail; the speed change now (kt, + faster); and a vector off its route and back — started at a
+    /// clock minute, turned VecAngle degrees (+ right) for VecOutMin, then back the same way onto its route.
+    /// </summary>
+    public double SepLagMin, SpdKt, VecStart = double.NaN, VecOutMin, VecAngle;
     /// <summary>
     /// Its route (user, 18 Nov: "would adding the real world routes to our sim traffic help?" — "yes"): points from the
     /// departure airport to the arrival airport (both included) along its FAA preferred route and, into an airport LAIA
@@ -72,6 +80,39 @@ public sealed record NetPos(NetLeg Leg, double Lat, double Lon, double AltFt, do
 /// </summary>
 public static class NetworkModel
 {
+    /// <summary>The wind aloft at a place and altitude (set by the traffic engine from the winds-aloft field).</summary>
+    public static Func<double, double, double, Wind>? WindAloft;
+
+    /// <summary>
+    /// The average tailwind along a flight's route at its cruise level (five points along it), worked out once — so it
+    /// cruises at its type's normal speed through the air and its ground speed follows the wind like everything else
+    /// (user, 24 Nov: DAL8948 at 440 kt over the ground in still air caught up the user, at M.78 into an 80 kt headwind).
+    /// </summary>
+    public static double TailwindKt(NetLeg l)
+    {
+        // Once per flight: worked out again only when its last one is long over (the same leg next week, a newer
+        // forecast), never during a flight, so nothing jumps along its route in the air.
+        var now = Environment.TickCount64 / 60000.0;
+        if (!double.IsNaN(l.WindKt) && now - l.WindAt <= l.BlockMin + 30) return l.WindKt;
+        l.WindAt = now;
+        // A new flight on this leg (next week's): no speed change, lag or vector carried over from the last one.
+        l.SepLagMin = 0; l.SpdKt = 0; l.VecStart = double.NaN;
+        if (WindAloft is not { } w) { l.WindKt = 0; return 0; }
+        var cruise = CruiseFt(l);
+        double sum = 0; var n = 0;
+        try
+        {
+            for (var k = 1; k <= 5; k++)
+            {
+                var (la, lo, hdg) = l.PointAt(l.PathNm * (k - 0.5) / 5);
+                sum += -w(la, lo, cruise).Headwind(hdg); n++;
+            }
+        }
+        catch { }
+        l.WindKt = n == 0 ? 0 : Math.Clamp(sum / n, -150, 200);
+        return l.WindKt;
+    }
+
     public const string Header = "LAIA-NET";
 
     /// <summary>The cruise level: by distance and aircraft, on the right semicircle (odd thousands eastbound, even westbound).</summary>
@@ -101,7 +142,8 @@ public static class NetworkModel
     public static NetPos? At(NetLeg l, double weekMin, bool includeGround = false)
     {
         if (!l.Located || l.DistNm < 15) return null;
-        weekMin -= l.MeterMin;
+        var clock = weekMin;
+        weekMin -= l.MeterMin + l.SepLagMin;
         var block = l.BlockMin;
         if (block < 10) return null;
         var e = ((weekMin - l.DepMin) % 10080 + 10080) % 10080;
@@ -123,7 +165,7 @@ public static class NetworkModel
         // flight's whole block on the straight line could have a jet cruising at 300 kt (user, 17 Nov: "why UAL2458 is
         // flying so slow"). It flies its type's normal speed (8% slack) instead; the spare time is spent on the ground
         // before take-off, so it still lands when the schedule says.
-        var nominal = CruiseGsKt(l.Type) / 60;   // nm per minute
+        var nominal = Math.Max(0.6 * CruiseGsKt(l.Type), CruiseGsKt(l.Type) + TailwindKt(l)) / 60;   // nm per minute, over the ground
         for (var i = 0; i < 2; i++)
         {
             var c0 = Math.Min((cruise - l.DepElev) / (jet ? 2000 : 1300), 0.45 * t);
@@ -169,6 +211,19 @@ public static class NetworkModel
         // when the airport took them over (WJA1272 at 26,490 ft 52 nm out).
         // The cruise ends where that path meets the cruise level, so the top of descent is where an airliner's would be.
         var (lat, lon, hdg) = l.PointAt(s);
+        // On a vector: off to the side of its route and back.
+        if (!double.IsNaN(l.VecStart) && l.VecOutMin > 0)
+        {
+            var dt = ((clock - l.VecStart) % 10080 + 15120) % 10080 - 5040;
+            if (dt >= 0 && dt <= 2 * l.VecOutMin)
+            {
+                var outT = dt <= l.VecOutMin ? dt : 2 * l.VecOutMin - dt;
+                var side = v * Math.Sin(Math.Abs(l.VecAngle) * Math.PI / 180) * outT;   // nm off the route
+                var perp = hdg + (l.VecAngle >= 0 ? 90 : -90);
+                (lat, lon) = Geo2.Offset(lat, lon, perp, side);
+                hdg = Geo2.Norm(hdg + (dt <= l.VecOutMin ? l.VecAngle : -l.VecAngle));
+            }
+        }
         // Miles to go: the filed route's, but no more than the way it will really be flown from here (user, 19 Nov,
         // AAL2867 taken over 54 nm from O'Hare at 32,450 ft: its filed route still had about 100 nm to run, while from
         // the hand-over it flies direct to its STAR). A little over the straight line, for the STAR and the vectors.

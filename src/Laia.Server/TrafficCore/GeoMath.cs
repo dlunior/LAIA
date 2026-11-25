@@ -33,6 +33,15 @@ public static class Geo2
         return 2 * Math.Asin(Math.Min(1, Math.Sqrt(a))) * 3440.065;
     }
 
+    /// <summary>The point a distance (nm) from a place along a bearing (flat over a few miles).</summary>
+    public static (double lat, double lon) Offset(double lat, double lon, double bearingDeg, double nm)
+    {
+        var b = bearingDeg * Math.PI / 180;
+        var dLat = nm * Math.Cos(b) / 60;
+        var dLon = nm * Math.Sin(b) / (60 * Math.Max(0.05, Math.Cos(lat * Math.PI / 180)));
+        return (lat + dLat, lon + dLon);
+    }
+
     public static double BearingDeg(double lat1, double lon1, double lat2, double lon2)
     {
         var p1 = lat1 * Math.PI / 180; var p2 = lat2 * Math.PI / 180; var dl = (lon2 - lon1) * Math.PI / 180;

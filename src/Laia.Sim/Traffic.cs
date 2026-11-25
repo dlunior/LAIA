@@ -9,6 +9,51 @@ internal sealed class AigCatalog
 {
     public sealed record Model(string Title, string Airline, string Type, bool Fsltl = false);
     public List<Model> Models { get; } = new();
+
+    /// <summary>
+    /// How a model's exterior lights are wired (its systems.cfg [LIGHTS]): for each of LAIA's eight light kinds (in the
+    /// order of the light bits) the circuit indexes its lightdefs use, and every potentiometer (dimmer) they use. AIG's
+    /// 737 MAX, for one: nav and tail strobes on circuit 1, wingtip strobes on 2, landing lights on 2 and 3, every light
+    /// dimmed by potentiometer 1 (beacons 2 and 3) (user, 25 Nov: BeyondATC and vPilot show the same AIG models'
+    /// nav lights and strobes much brighter than LAIA does).
+    /// </summary>
+    public sealed record LightRig(int[][] Circuits, int[] Pots);
+    private readonly Dictionary<string, LightRig> _rigs = new(StringComparer.OrdinalIgnoreCase);
+    public LightRig? RigFor(string title) => _rigs.TryGetValue(title, out var r) ? r : null;
+
+    /// <summary>Reads a model folder's systems.cfg [LIGHTS] lightdefs (Type, #Index, #PotentiometerIndex).</summary>
+    private static LightRig? ReadRig(string folder)
+    {
+        var path = Path.Combine(folder, "systems.cfg");
+        if (!File.Exists(path)) return null;
+        // lightdef Type → LAIA's light bit: 3 nav, 1 beacon, 2 strobe, 5 landing, 6 taxi, 9 logo, 8 wing, 10 cabin.
+        var bitOf = new Dictionary<int, int> { [3] = 0, [1] = 1, [2] = 2, [5] = 3, [6] = 4, [9] = 5, [8] = 6, [10] = 7 };
+        var circuits = Enumerable.Range(0, 8).Select(_ => new SortedSet<int>()).ToArray();
+        var pots = new SortedSet<int>();
+        var inLights = false;
+        foreach (var raw in File.ReadLines(path))
+        {
+            var line = raw.Split(';')[0].Trim();
+            if (line.StartsWith('[')) { inLights = line.Equals("[LIGHTS]", StringComparison.OrdinalIgnoreCase); continue; }
+            if (!inLights || !line.StartsWith("lightdef", StringComparison.OrdinalIgnoreCase)) continue;
+            var eq = line.IndexOf('=');
+            if (eq < 0) continue;
+            int? type = null, index = null, pot = null;
+            foreach (var part in line[(eq + 1)..].Split('#'))
+            {
+                var kv = part.Split(':', 2);
+                if (kv.Length != 2) continue;
+                var k = kv[0].Trim(); var v = kv[1].Trim();
+                if (k.Equals("Type", StringComparison.OrdinalIgnoreCase) && int.TryParse(v, out var t)) type = t;
+                else if (k.Equals("Index", StringComparison.OrdinalIgnoreCase) && int.TryParse(v, out var ix)) index = ix;
+                else if (k.Equals("PotentiometerIndex", StringComparison.OrdinalIgnoreCase) && int.TryParse(v, out var pi)) pot = pi;
+            }
+            if (type is not { } ty || !bitOf.TryGetValue(ty, out var bit)) continue;
+            if (index is { } i0 && i0 > 0) circuits[bit].Add(i0);
+            if (pot is { } p0 && p0 is > 0 and <= 30) pots.Add(p0);
+        }
+        return new LightRig(circuits.Select(c => c.ToArray()).ToArray(), pots.ToArray());
+    }
     /// <summary>The Community folder the models were found in (the AIG flight plans live there too).</summary>
     public string? Community { get; private set; }
     public static string Fallback => "Airbus A320 Neo Asobo";
@@ -30,7 +75,7 @@ internal sealed class AigCatalog
             catch (Exception ex) { Log.Write("AIG scan error: " + ex.Message); }
             if (cat.Models.Count > 0) { cat.Community = c; break; } // the first Community folder that has AIG models
         }
-        Log.Write($"AIG catalog: {cat.Models.Count} liveries found");
+        Log.Write($"AIG catalog: {cat.Models.Count} liveries found ({cat._rigs.Count} with their lights' circuits and dimmers read)");
         // FSLTL's liveries too, after AIG's (user, 24 Nov: "AIG first"): for real flights AIG has no livery for.
         var aig = cat.Models.Count;
         foreach (var c in community)
@@ -64,6 +109,16 @@ internal sealed class AigCatalog
     }
 
     private void Parse(string path, bool fsltl = false)
+    {
+        var before = Models.Count;
+        ParseCfg(path, fsltl);
+        if (Models.Count == before) return;
+        LightRig? rig = null;
+        try { rig = ReadRig(Path.GetDirectoryName(path)!); } catch { }
+        if (rig is not null) for (var k = before; k < Models.Count; k++) _rigs[Models[k].Title] = rig;
+    }
+
+    private void ParseCfg(string path, bool fsltl)
     {
         string section = "", type = "";
         string? title = null, airline = null;
@@ -152,6 +207,10 @@ internal sealed class TrafficRenderer : IAsyncDisposable
     private static readonly string[] LightEvents =
         { "NAV_LIGHTS_SET", "BEACON_LIGHTS_SET", "STROBES_SET", "LANDING_LIGHTS_SET", "TAXI_LIGHTS_SET", "LOGO_LIGHTS_SET", "WING_LIGHTS_SET", "CABIN_LIGHTS_SET" };
     private const uint EvLightBase = 110, EvGearUp = 130, EvGearDown = 131;
+    // Each light circuit on its own (the *_ON/*_OFF events take the circuit index), and the dimmers (potentiometers).
+    private static readonly string?[] LightOn = { "NAV_LIGHTS_ON", "BEACON_LIGHTS_ON", "STROBES_ON", "LANDING_LIGHTS_ON", "TAXI_LIGHTS_ON", null, "WING_LIGHTS_ON", "CABIN_LIGHTS_ON" };
+    private static readonly string?[] LightOff = { "NAV_LIGHTS_OFF", "BEACON_LIGHTS_OFF", "STROBES_OFF", "LANDING_LIGHTS_OFF", "TAXI_LIGHTS_OFF", null, "WING_LIGHTS_OFF", "CABIN_LIGHTS_OFF" };
+    private const uint EvPotBase = 140, EvLightOnBase = 175, EvLightOffBase = 185;
     private const double RenderDelay = 0.6; // seconds behind the server (server updates arrive 4x a second)
     private readonly SimConnectClient _sc;
     private readonly AigCatalog _catalog;
@@ -184,7 +243,8 @@ internal sealed class TrafficRenderer : IAsyncDisposable
         public double GroundAlt = double.NaN, CgFt = double.NaN, SmoothGround = double.NaN, StaticPitch, RestPitch;
         public bool StaticLogged, RestMeasured, CreatedOnGround;
         public double LastLights = -100, LastGear = -100, GearPos = -1, GearTime;
-        public int SentLights = -1, SentGear = -1;
+        public int SentLights = -1, SentGear = -1, RigLights = -1;
+        public double LastRig = -100;
         public double SentLat, SentLon, SentAlt, SentHdg, LastSent = -100;
     }
 
@@ -222,6 +282,14 @@ internal sealed class TrafficRenderer : IAsyncDisposable
         await _sc.MapClientEventToSimEventAsync(EvFreezeAlt, "FREEZE_ALTITUDE_SET");
         await _sc.MapClientEventToSimEventAsync(EvFreezeAtt, "FREEZE_ATTITUDE_SET");
         for (var i = 0; i < LightEvents.Length; i++) await _sc.MapClientEventToSimEventAsync(EvLightBase + (uint)i, LightEvents[i]);
+        for (var i = 0; i < LightOn.Length; i++)
+        {
+            if (LightOn[i] is { } on) await _sc.MapClientEventToSimEventAsync(EvLightOnBase + (uint)i, on);
+            if (LightOff[i] is { } off) await _sc.MapClientEventToSimEventAsync(EvLightOffBase + (uint)i, off);
+        }
+        for (var n = 1; n <= 30; n++) await _sc.MapClientEventToSimEventAsync(EvPotBase + (uint)(n - 1), $"LIGHT_POTENTIOMETER_{n}_SET");
+        // The dimmers as the sim has them (the AIG models use 1–3), read back with the lights.
+        for (var n = 1; n <= 3; n++) await _sc.AddToDataDefinitionAsync(DefLights, $"LIGHT POTENTIOMETER:{n}", "percent", SimDataType.Float64);
         await _sc.MapClientEventToSimEventAsync(EvGearUp, "GEAR_UP");
         await _sc.MapClientEventToSimEventAsync(EvGearDown, "GEAR_DOWN");
         _sc.AssignedObjectId += OnAssigned;
@@ -348,6 +416,13 @@ internal sealed class TrafficRenderer : IAsyncDisposable
         if (o is null) { _ = _sc.AIRemoveObjectAsync(objectId, _nextReq++); return; } // removed before it appeared
         o.ObjectId = objectId;
         o.CreatedOnGround = o.Latest.OnGround;
+        // The first few each session: the dimmers and lights as the model starts, before LAIA sets anything.
+        if (_firstLooks < 5)
+        {
+            _firstLooks++;
+            o.LightAsked = -2;
+            try { await _sc.RequestDataOnSimObjectAsync(o.LightReq, DefLights, objectId, SimPeriod.Once); } catch { }
+        }
         if (o.Motion == "msfs")
         {
             // MSFS's AI keeps control and flies the path LAIA sends.
@@ -379,8 +454,40 @@ internal sealed class TrafficRenderer : IAsyncDisposable
     // 5 minutes a summary per light, and once per model any light it was sent but doesn't show.
     private double _lightCheckAt = -100, _lightLogAt;
     private readonly int[] _lightSent = new int[8], _lightShown = new int[8], _lightLit = new int[8];
+    private readonly double[] _potSum = new double[3]; private int _potChecks, _firstLooks;
+    private static string LightNames(int bits)
+    {
+        var n = Enumerable.Range(0, 8).Where(i => ((bits >> i) & 1) != 0).Select(i => LightEvents[i].Replace("_LIGHTS_SET", "").Replace("_SET", "").ToLowerInvariant()).ToList();
+        return n.Count == 0 ? "none" : string.Join(" ", n);
+    }
     private int _lightChecks;
     private readonly HashSet<string> _lightModelLogged = new();
+
+    /// <summary>
+    /// The lights: each switch as before (the whole kind), then each circuit the model wires that kind to, on or off
+    /// on its own (a switch with no circuit may reach only the first: tail strobes but no wingtip strobes), and the
+    /// model's dimmers at full (LIGHT_POTENTIOMETER_n_SET 100 — left alone, a dimmer can sit low and every light on it
+    /// shows faint). Circuits and dimmers again every 30 s, in case the model resets them.
+    /// </summary>
+    private async Task SendLightsAsync(Obj o, int lights, double now)
+    {
+        for (var i = 0; i < LightEvents.Length; i++)
+            await _sc.TransmitClientEventAsync(o.ObjectId, EvLightBase + (uint)i, (uint)((lights >> i) & 1));
+        var rig = _catalog.RigFor(o.Title);
+        if (rig is null) return;
+        var full = lights != o.RigLights || now - o.LastRig > 30;
+        if (!full) return;
+        o.RigLights = lights; o.LastRig = now;
+        foreach (var n in rig.Pots) await _sc.TransmitClientEventAsync(o.ObjectId, EvPotBase + (uint)(n - 1), 100);
+        for (var i = 0; i < 8; i++)
+        {
+            var on = ((lights >> i) & 1) != 0;
+            var ev = on ? LightOn[i] : LightOff[i];
+            if (ev is null) continue;
+            foreach (var c in rig.Circuits[i])
+                await _sc.TransmitClientEventAsync(o.ObjectId, (on ? EvLightOnBase : EvLightOffBase) + (uint)i, (uint)c);
+        }
+    }
 
     private async Task CheckLightsAsync(List<Obj> objs, double now)
     {
@@ -395,8 +502,10 @@ internal sealed class TrafficRenderer : IAsyncDisposable
         {
             _lightLogAt = now;
             var parts = Enumerable.Range(0, 8).Where(i => _lightSent[i] > 0).Select(i => $"{LightEvents[i].Replace("_LIGHTS_SET", "").Replace("_SET", "").ToLowerInvariant()} {_lightShown[i]}/{_lightLit[i]}/{_lightSent[i]}");
-            Log.Write($"Lights read back from the sim ({_lightChecks} aircraft checked; switched on / actually lit / sent on): {string.Join(", ", parts)}");
+            Log.Write($"Lights read back from the sim ({_lightChecks} aircraft checked; switched on / actually lit / sent on): {string.Join(", ", parts)}" +
+                (_potChecks > 0 ? $"; dimmers 1/2/3 average {_potSum[0] / _potChecks:0}/{_potSum[1] / _potChecks:0}/{_potSum[2] / _potChecks:0}%" : ""));
             Array.Clear(_lightSent); Array.Clear(_lightShown); Array.Clear(_lightLit); _lightChecks = 0;
+            Array.Clear(_potSum); _potChecks = 0;
         }
     }
 
@@ -405,7 +514,17 @@ internal sealed class TrafficRenderer : IAsyncDisposable
         int shown = 0, lit = 0;
         for (var i = 0; i < 8; i++) if (d.ReadFloat64() > 0.5) shown |= 1 << i;
         for (var i = 0; i < 8; i++) if (d.ReadFloat64() > 0.5) lit |= 1 << i;
+        var pot = new double[3];
+        for (var i = 0; i < 3; i++) pot[i] = d.ReadFloat64();
         var asked = o.LightAsked;
+        if (asked == -2)
+        {
+            // Read once as it appears, before LAIA sets anything: how the model starts (the first few only).
+            Log.Write($"Lights as \"{o.Title}\" appears, before LAIA sets them: dimmers 1/2/3 at {pot[0]:0}/{pot[1]:0}/{pot[2]:0}%; switched on: {LightNames(shown)}; lit: {LightNames(lit)}");
+            o.LightAsked = -1;
+            return;
+        }
+        if (asked >= 0) { _potChecks++; for (var i = 0; i < 3; i++) _potSum[i] += pot[i]; }
         if (asked < 0) return;
         _lightChecks++;
         var missing = new List<string>();
@@ -574,11 +693,7 @@ internal sealed class TrafficRenderer : IAsyncDisposable
                         {
                             o.SentLights = tl.Lights;
                             o.LastLights = now;
-                            try
-                            {
-                                for (var i = 0; i < LightEvents.Length; i++)
-                                    await _sc.TransmitClientEventAsync(o.ObjectId, EvLightBase + (uint)i, (uint)((tl.Lights >> i) & 1));
-                            }
+                            try { await SendLightsAsync(o, tl.Lights, now); }
                             catch { }
                         }
                         continue;
@@ -633,8 +748,7 @@ internal sealed class TrafficRenderer : IAsyncDisposable
                         {
                             o.SentLights = t.Lights;
                             o.LastLights = now;
-                            for (var i = 0; i < LightEvents.Length; i++)
-                                await _sc.TransmitClientEventAsync(o.ObjectId, EvLightBase + (uint)i, (uint)((t.Lights >> i) & 1));
+                            await SendLightsAsync(o, t.Lights, now);
                         }
                         // Gear: the gear command (what a pilot's lever does) when it changes and every few seconds,
                         // plus the handle position for models that read that.

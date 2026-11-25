@@ -958,7 +958,7 @@ public sealed partial class TrafficWorld
     }
 
     /// <summary>Between 23:00 and 06:00 at the airport.</summary>
-    public bool NightNow => LocalSchedMinute is >= 23 * 60 or < 6 * 60;
+    public bool NightNow => LocalSchedMinute is >= 22 * 60 or < 6 * 60;   // 22:00–06:00 airport time (user, 24 Nov: "change it from 11PM to 10PM")
 
     /// <summary>How far out arrivals are taken over from the whole sky (nm).</summary>
     /// <summary>How far out arrivals are taken over from the whole sky (user, 19 Nov: "Let's push the bar... 400 —
@@ -5229,7 +5229,15 @@ public sealed partial class TrafficWorld
                 eta = (r.Runway == cur.Runway ? f.EtaNominal : nominal + ((f.Pos - r.Threshold).Length - (f.Pos - cur.Threshold).Length) / (220 * Kt));
                 slot = Earliest(r.Runway, Math.Max(eta, nominal), f);
                 var c = slot - nominal;                                        // delay (detours included) plus the extra flying
-                if (share is not null) c += 120 * (1 - share.GetValueOrDefault(r.Runway) / Math.Max(1e-6, share.Values.Max()));
+                // A runway real traffic from its direction uses less costs up to 2 minutes — but only for a clear
+                // difference: within about a quarter of the busier one's share, nothing (24 Nov, KMSP at night: real
+                // arrivals 45 % 12R / 55 % 12L, and the flat "less used costs more" sent every arrival to 12L for 23 s —
+                // 7 landings to 1). A near-even split is then shared by the delay each runway gives; 90/10 still leans hard.
+                if (share is not null)
+                {
+                    var rel = 1 - share.GetValueOrDefault(r.Runway) / Math.Max(1e-6, share.Values.Max());
+                    c += 120 * Math.Max(0, rel - 0.25) / 0.75;
+                }
                 if (r.Runway != cur.Runway && !isFirst) c += 45 + 60 * f.RwySwitches;     // changing costs, more each time
                 // Going back to a runway it was moved off, inside 60 nm, costs two minutes more (22 Nov, KMSP: SWA4367 30L →
                 // 30R for 80 s, then back to 30L ten minutes later for 11 s). Further out it is free: re-balancing far
