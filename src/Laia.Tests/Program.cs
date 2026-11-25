@@ -2184,11 +2184,22 @@ Console.WriteLine("== En-route separation of the whole-sky flights (RVSM: 1,000 
     Check(n2 == 0, "1,000 ft from the user's level is left alone (RVSM), even with the user's altitude read a little off");
     // A little faster on the same route and level: kept in trail by speed — the one ahead a little faster first — no level
     // change (user, 25 Nov: speed up the one ahead, "that's usually the first thing they'll do").
-    var slow2 = Leg("N5", "500", 600, 700);
-    var quick = Leg("N6", "600", 608, 700);
-    var ps0 = NetworkModel.At(slow2, 650); var pq0 = NetworkModel.At(quick, 650);
-    Console.WriteLine($"  in trail: {slow2.Callsign} {ps0?.GsKt:0} kt, {quick.Callsign} {pq0?.GsKt:0} kt at FL{ps0?.AltFt / 100:0}");
-    var w3 = Worst(new() { slow2, quick }, new(), 600, 700, out var n3, out var ev3);
+    // A long route (1,400 nm) so the catching up happens in the cruise: an A320 and, 3 minutes behind it after take-off,
+    // a 757 about 10 kt faster.
+    Laia.Server.TrafficCore.NetLeg Long(string reg, string fl, string type, int dep) => new()
+    {
+        Airline = "DAL", Operator = "DAL", Type = type, Reg = reg, Flight = fl, Dep = "KAAA", Arr = "KCCC", Located = true,
+        DepLat = 40, DepLon = -100, ArrLat = 40, ArrLon = -70, DepElev = 500, ArrElev = 500, DepMin = dep, ArrMin = dep + 260,
+        DistNm = Geo2.DistanceNm(40, -100, 40, -70),
+    };
+    var slow2 = Long("N5", "500", "A320", 600);
+    var quick = Long("N6", "600", "B752", 600);
+    // Line the 757 up 3 minutes behind the A320 at take-off (its schedule padding differs).
+    double TakeOff(Laia.Server.TrafficCore.NetLeg l) { for (var c = l.DepMin; c < l.DepMin + 200; c += 0.1) if (NetworkModel.At(l, c) is not null) return c; return double.NaN; }
+    quick.DepMin += (int)Math.Round(TakeOff(slow2) + 3 - TakeOff(quick)); quick.ArrMin = quick.DepMin + 260;
+    var ps0 = NetworkModel.At(slow2, 680); var pq0 = NetworkModel.At(quick, 680);
+    Console.WriteLine($"  in trail: {slow2.Callsign} {ps0?.GsKt:0} kt, {quick.Callsign} {pq0?.GsKt:0} kt at FL{ps0?.AltFt / 100:0}/{pq0?.AltFt / 100:0}, {(ps0 is not null && pq0 is not null ? Geo2.DistanceNm(ps0.Lat, ps0.Lon, pq0.Lat, pq0.Lon) : 0):0} nm apart at 680");
+    var w3 = Worst(new() { slow2, quick }, new(), 600, 860, out var n3, out var ev3);
     foreach (var e in ev3.Take(4)) Console.WriteLine("  " + e);
     Check(ev3.Any(e => e.Contains("speeds up") || e.Contains("slows")) && !ev3.Any(e => e.Contains("level change")) && w3 >= 950,
         "a flight a little faster at the same level is kept in trail by speed (the one ahead faster first), not moved off its level");
@@ -2196,10 +2207,10 @@ Console.WriteLine("== En-route separation of the whole-sky flights (RVSM: 1,000 
     // The user ahead at its level, this one catching them up (24 Nov, DAL8948 at FL360): the user is asked first; after 90 s
     // the one behind is slowed — never moved above the user and then below (through the user's level).
     {
-        var ai = Leg("N7", "700", 600, 700);
+        var ai = Long("N7", "700", "A320", 600);
         var sep = new EnRouteSeparation();
         var p0 = NetworkModel.At(ai, 645)!;
-        double uLon = p0.Lon + 25 / (60 * Math.Cos(40 * Math.PI / 180)), uGs = p0.GsKt - 25;
+        double uLon = p0.Lon + 10 / (60 * Math.Cos(40 * Math.PI / 180)), uGs = p0.GsKt - 25;
         var evs = new List<string>(); string? notice = null; double closest = double.MaxValue; var flips = 0; var lastSide = 0;
         for (var c = 645.0; c < 685; c += 2.0 / 60)
         {
