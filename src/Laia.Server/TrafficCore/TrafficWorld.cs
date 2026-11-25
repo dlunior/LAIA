@@ -5233,7 +5233,10 @@ public sealed partial class TrafficWorld
                 // old "less used costs up to 2 minutes" sent every arrival to 12L for 23 s — 7 landings to 1): each runway
                 // costs for how far its share of the arrivals planned around this one (40 minutes either way, this one
                 // counted) would go over its real share — so a 45/55 split comes out about 45/55, a 90/10 one 9 to 1.
-                if (share is not null && share.Values.Sum() > 0)
+                // (On its first plan; later re-plans keep the old weighting, so the balance itself never moves anyone
+                // back and forth — the 230 nm rush broke three off when it did.)
+                if (share is not null && !isFirst) c += 120 * (1 - share.GetValueOrDefault(r.Runway) / Math.Max(1e-6, share.Values.Max()));
+                else if (share is not null && share.Values.Sum() > 0)
                 {
                     var tot = share.Values.Sum();
                     var near = opts.Sum(o => book.TryGetValue(o.Runway, out var tl) ? tl.Count(x => Math.Abs(x.slot - nominal) < 2400) : 0) + 1;

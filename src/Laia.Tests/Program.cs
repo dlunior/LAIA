@@ -2185,8 +2185,8 @@ Console.WriteLine("== En-route separation of the whole-sky flights (RVSM: 1,000 
     // A little faster on the same route and level: kept in trail by speed — the one ahead a little faster first — no level
     // change (user, 25 Nov: speed up the one ahead, "that's usually the first thing they'll do").
     var slow2 = Leg("N5", "500", 600, 700);
-    var quick = Leg("N6", "600", 602, 694);
-    var ps0 = NetworkModel.At(slow2, 640); var pq0 = NetworkModel.At(quick, 640);
+    var quick = Leg("N6", "600", 608, 700);
+    var ps0 = NetworkModel.At(slow2, 650); var pq0 = NetworkModel.At(quick, 650);
     Console.WriteLine($"  in trail: {slow2.Callsign} {ps0?.GsKt:0} kt, {quick.Callsign} {pq0?.GsKt:0} kt at FL{ps0?.AltFt / 100:0}");
     var w3 = Worst(new() { slow2, quick }, new(), 600, 700, out var n3, out var ev3);
     foreach (var e in ev3.Take(4)) Console.WriteLine("  " + e);
@@ -2198,14 +2198,14 @@ Console.WriteLine("== En-route separation of the whole-sky flights (RVSM: 1,000 
     {
         var ai = Leg("N7", "700", 600, 700);
         var sep = new EnRouteSeparation();
-        var p0 = NetworkModel.At(ai, 630)!;
+        var p0 = NetworkModel.At(ai, 645)!;
         double uLon = p0.Lon + 25 / (60 * Math.Cos(40 * Math.PI / 180)), uGs = p0.GsKt - 25;
         var evs = new List<string>(); string? notice = null; double closest = double.MaxValue; var flips = 0; var lastSide = 0;
-        for (var c = 630.0; c < 670; c += 2.0 / 60)
+        for (var c = 645.0; c < 685; c += 2.0 / 60)
         {
             uLon += uGs / 60 * (2.0 / 60) / (60 * Math.Cos(40 * Math.PI / 180));
             var obs = new List<EnRouteSeparation.Obstacle> { new("UAL1196 (you)", 40, uLon, 90, uGs, p0.AltFt, 0, 6) };
-            foreach (var e in sep.Update(c, 40, -95, new[] { ai }, obs)) evs.Add($"{(c - 630) * 60:0} s {e.Leg.Callsign} {e.Text} for {e.Who}");
+            foreach (var e in sep.Update(c, 40, -95, new[] { ai }, obs)) evs.Add($"{(c - 645) * 60:0} s {e.Leg.Callsign} {e.Text} for {e.Who}");
             notice ??= sep.UserNotice?.text;
             if (NetworkModel.At(ai, c) is { } a)
             {

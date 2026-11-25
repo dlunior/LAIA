@@ -682,7 +682,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         foreach (var e in _sep.Update(NetClock, sim.Lat, sim.Lon, legs, obs))
         {
             if (_drawnLast.Contains(e.Leg.Id) || e.Who.Contains("(you)") || e.Text.Contains("(you)"))
-                log.LogInformation("En route: {cs} {what} for {who}", e.Leg.Callsign, e.Text, e.Who);
+                log.LogInformation("En route: {cs} {what}{who}", e.Leg.Callsign, e.Text, e.Who.Length > 0 ? " for " + e.Who : "");
             if (NetworkModel.At(e.Leg, NetClock) is { } ep && Geo2.DistanceNm(sim.Lat, sim.Lon, ep.Lat, ep.Lon) < 60)
                 TrackRecorder.Instance.EnRouteEvent(e.Leg.Callsign, ep.Lat, ep.Lon, NetAlt(e.Leg, NetClock, ep.AltFt), $"{e.Text}{(e.Who.Length > 0 ? $" for {e.Who}" : "")}");
         }

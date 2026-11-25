@@ -347,7 +347,7 @@ public sealed class EnRouteSeparation
             var l = legs[i];
             if (Math.Abs(newSpd[i] - l.SpdKt) >= 10 || (newSpd[i] != 0 && l.SpdKt == 0))
             {
-                if (newSpd[i] != 0) { Limits++; events.Add(new Event(l, $"{(newSpd[i] > 0 ? "speeds up" : "slows")} {Math.Abs(newSpd[i]):0} kt (about Mach {(newSpd[i] > 0 ? "+" : "−")}{Math.Abs(newSpd[i]) / 575:.00}) — {spdWhy[i]}", spdWhy[i] ?? "")); }
+                if (newSpd[i] != 0) { Limits++; events.Add(new Event(l, $"{(newSpd[i] > 0 ? "speeds up" : "slows")} {Math.Abs(newSpd[i]):0} kt (about Mach {(newSpd[i] > 0 ? "+" : "−")}{Math.Abs(newSpd[i]) / 575:.00}) — {spdWhy[i]}", "")); }
                 else events.Add(new Event(l, "back to its normal speed", ""));
             }
             l.SpdKt = newSpd[i];
