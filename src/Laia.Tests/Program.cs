@@ -378,6 +378,14 @@ Console.WriteLine("== Crossing runways at Busy for an hour: land 27, depart 36 a
     Check(conflicts.Count == 0, "no departure through the intersection while an arrival is over the threshold or rolling towards it");
     Check(maxHold < 600, $"no departure held at 36 for 10 minutes or more ({maxHold:0} s)");
     Check(gaXing <= 1, $"go-arounds for a crossing departure stay rare ({gaXing})");
+    // Traffic management is for overload only (user, 26 Nov: "how can we make it so LAIA doesn't abuse it?"): an hour at
+    // Busy sets no miles-in-trail, and gives few vectors.
+    var tmi = log.Count(l => l.Contains("Traffic management:") && !l.Contains("lifted"));
+    var vecs = log.Count(l => l.Contains("vectors for spacing"));
+    var landings = Math.Max(1, log.Count(l => l.Contains(": landed runway")));
+    Console.WriteLine($"  traffic management restrictions {tmi}; vectors for spacing {vecs} for {landings} landings");
+    Check(tmi == 0, "an hour at Busy needs no miles-in-trail");
+    Check(vecs * 10.0 / landings <= 2, "and at most 2 vectors for spacing per 10 landings");
 }
 
 Console.WriteLine("== Crossing a runway between departures (23 Nov, KATL: JBU1798 held short of 27R for 12+ minutes behind line up and wait)");

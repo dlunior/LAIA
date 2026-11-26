@@ -185,6 +185,7 @@ public sealed class Flight
     public bool Rejoin;
     /// <summary>Sequenced behind the user (it takes the delay; kept there unless the user falls clearly behind it).</summary>
     public bool BehindUser;
+    public double BehindUserReleased = double.NegativeInfinity;
     /// <summary>The real tracks off its STAR (shortest to longest), which one it flies, and where that one leaves the STAR.</summary>
     public List<(int cut, List<V2> pts, double lenNm)>? Fan;
     public int FanIdx = -1;
@@ -204,6 +205,10 @@ public sealed class Flight
     /// is doing with it (for the map), the gap to the one ahead, and when it was last vectored.</summary>
     public double SlowDv, SlowAt = -99, FrozenSlot, LastVector = -999, GapNm = double.NaN, GapSec = double.NaN;
     public bool Frozen;
+    /// <summary>In the landing sequence: within 40 nm of its runway's approach end and at or below 8,000 ft above the
+    /// field (or the lowest its procedure still requires there + 500 ft). Before that: spacing only.</summary>
+    public bool InSeq;
+    public string? MitBehind;
     public string Mgr = "";
     /// <summary>Cruise level of a flight handed over from the whole sky (0 for one started near the airport).</summary>
     public double CruiseFt;
@@ -746,6 +751,7 @@ public sealed partial class TrafficWorld
         // far out with speed (cruise and descent slower), so it reaches the approach already spaced instead of holding.
         // The user takes part with a generous planned slot (M8): LAIA's arrivals space around it.
         try { UpdateUserArrival(); } catch { UserArr = null; }
+        if (Time - _lastTmi >= 60) { _lastTmi = Time; try { TrafficManagement(); } catch { } }
         // Every 30 s, and at once when an arrival it hasn't planned yet appears (before its delay is taken anywhere).
         if (Time - _lastPlan >= 30 || Flights.Any(f => f.Kind == "arrival" && !f.Planned && !f.Done && !f.OnGround && !double.IsNaN(f.EtaNominal)))
         { _lastPlan = Time; try { PlanRunways(); } catch (Exception ex) { Log("Runway planning failed: " + ex.Message); } }
@@ -760,7 +766,20 @@ public sealed partial class TrafficWorld
             // behind aircraft 60 nm behind them, held, vectored and broken off). A new arrival is placed by its own
             // unhindered time among the others' slots; an arrival that can no longer make its slot (its unhindered time
             // is past the next one's) drops back. The user is placed by their predicted time.
-            foreach (var f in g) if (f == UserArr || double.IsNaN(f.OrderKey) || !f.Frozen) f.OrderKey = f.EtaNominal;
+            // In the landing sequence only close to the approach (user, 26 Nov: "planes outside a certain range of the
+            // approach should not be given a landing sequence, just spacing; sequencing for the approach should only happen
+            // close to the assigned approach" — "8,000 ft AGL and less than 40 miles from the approach end of the runway",
+            // both together; over high terrain, the lowest its STAR still requires there + 500 ft when that's higher).
+            // Further out its place follows its own predicted time (nothing to hold, swap or vector into an order) and
+            // it's spaced in its stream (miles-in-trail, by speed); once in, its place is kept as before.
+            foreach (var f in g)
+            {
+                if (f == UserArr || f.InSeq || f.Path is null || f.Rwy is null) continue;
+                if (SequencePoint(f) is { } why) { f.InSeq = true; Log($"{f.Callsign}: in the landing sequence for {f.Rwy.Ident} ({why})"); }
+            }
+            // (The order itself is kept from 60 flying miles in, or once in the sequence if sooner, so the approach can plan
+            // its downwinds; further out it simply follows each one's predicted time.)
+            foreach (var f in g) if (f == UserArr || double.IsNaN(f.OrderKey) || !f.Frozen || !(f.InSeq || f.Path is null || (f.ThrS - f.S) / Geo2.MPerNm <= 60)) f.OrderKey = f.EtaNominal;
             // One coming back round (a break-off, a go-around) goes behind every arrival nearer the runway than it — never
             // in front of one already on its way in, which would then be broken off in turn (KORD Peak, 18 Nov: AAL1974
             // broke off, then AAL2616 and UAL415 behind it, each "200+ s short" behind the one before).
@@ -2422,7 +2441,7 @@ public sealed partial class TrafficWorld
     /// wake turbulence time by CWT category (7110.65 3-9-6), and radar separation once airborne — 1 nm when the
     /// two courses diverge by 15° or more right after takeoff (5-8-3), else 3 nm.
     /// </summary>
-    private double WakeRemaining(Flight f)
+    private double WakeRemaining(Flight f, bool plan = true)
     {
         var l = f.Rwy is null ? null : _lastDep.GetValueOrDefault(f.Rwy.Runway);
         if (l is null || l.Done || l.Rwy is null || f.Rwy is null || l.Rwy.Runway != f.Rwy.Runway) return 0;
@@ -2438,7 +2457,7 @@ public sealed partial class TrafficWorld
         }
         var since = Time - l.LiftoffTime;
         var wake = Cwt.DepartureSeconds(l.Wake, f.Wake) - since;
-        EnsureDeparturePlan(f);
+        if (plan) EnsureDeparturePlan(f);
         var diverging = !double.IsNaN(l.DepCourse) && !double.IsNaN(f.DepCourse) && Math.Abs(Geo2.Diff(l.DepCourse, f.DepCourse)) >= 15;
         // The follower gets airborne about 35 s after starting its roll, by when the leader has gained more distance.
         var needNm = diverging ? 0.4 : 2.0;
@@ -5479,6 +5498,80 @@ public sealed partial class TrafficWorld
         : $"on their slot (±30 s) at 40 nm {(_dev40.Count == 0 ? 0 : 100.0 * _dev40.Count(d => d <= 30) / _dev40.Count):0}%, at 20 nm {(_dev20.Count == 0 ? 0 : 100.0 * _dev20.Count(d => d <= 30) / _dev20.Count):0}% (last {Math.Max(_dev40.Count, _dev20.Count)} landings)";
 
     /// <summary>
+    /// Traffic management (user, 26 Nov: "how could LAIA talk to LAIA that maybe it needs more MIT into a TRACON?" —
+    /// and "how can we make it so LAIA doesn't abuse it?"). Every minute, per landing runway: the delay the approach is
+    /// actually absorbing (its sequenced arrivals) and the arrivals due in the next 25 minutes against the slots the runway
+    /// has. Only when both say "too much" for 5 minutes are miles-in-trail set on the streams feeding it — 10 nm, then up
+    /// 5 nm at most every 20 minutes, never past 25 — and each step lapses 30 minutes after the evidence stops. None by
+    /// default; set and lifted in the log and counted for the self-test.
+    /// </summary>
+    private void TrafficManagement()
+    {
+        foreach (var rw in ArrRwys)
+        {
+            var st = _mit.TryGetValue(rw.Runway, out var x) ? x : (nm: 0.0, setAt: double.NegativeInfinity, evidSince: double.NaN, lastEvid: double.NegativeInfinity);
+            var seq = Flights.Where(f => f.Kind == "arrival" && !f.Done && !f.OnGround && f.InSeq && f.Rwy?.Runway == rw.Runway).ToList();
+            var approachDelay = seq.Count == 0 ? 0 : seq.Average(f => Math.Max(0, f.Delay));
+            var gap = 95.0;
+            var demand = Flights.Count(f => f.Kind == "arrival" && !f.Done && !f.OnGround && !f.InSeq && f.Rwy?.Runway == rw.Runway && f.EtaNominal - Time is > 0 and < 1500);
+            var slots = 1500 / gap;
+            var evidence = approachDelay >= 120 && demand > slots;
+            if (evidence)
+            {
+                if (double.IsNaN(st.evidSince)) st.evidSince = Time;
+                st.lastEvid = Time;
+                if (Time - st.evidSince >= 300 && st.nm < 25 && Time - st.setAt >= 1200)
+                {
+                    st.nm = st.nm == 0 ? 10 : st.nm + 5; st.setAt = Time; TmiSet++;
+                    Log($"Traffic management: {st.nm:0} MIT for {rw.Ident} on every stream feeding it — the approach is absorbing {approachDelay / 60:0.0} min of delay, {demand} arrivals due in the next 25 min for {slots:0} slots");
+                }
+            }
+            else
+            {
+                st.evidSince = double.NaN;
+                if (st.nm > 0 && Time - st.lastEvid >= 1800 && Time - st.setAt >= 1800)
+                {
+                    st.nm = st.nm <= 10 ? 0 : st.nm - 5; st.setAt = Time;
+                    Log(st.nm == 0 ? $"Traffic management: miles-in-trail for {rw.Ident} lifted (quiet for 30 minutes)" : $"Traffic management: {st.nm:0} MIT for {rw.Ident} (eased: quiet for 30 minutes)");
+                }
+            }
+            _mit[rw.Runway] = st;
+        }
+    }
+    private readonly Dictionary<int, (double nm, double setAt, double evidSince, double lastEvid)> _mit = new();
+    private double _lastTmi;
+    public int TmiSet;
+
+    /// <summary>The miles-in-trail on an arrival's stream (its STAR to its runway), and the gap to the one ahead of it there.</summary>
+    private (double nm, double gapNm, string ahead)? MitFor(Flight f)
+    {
+        if (f.Rwy is null || f.Path is null || !_mit.TryGetValue(f.Rwy.Runway, out var st) || st.nm <= 0) return null;
+        var star = f.StarPick?.p.Name ?? "";
+        var mine = (f.ThrS - f.S) / Geo2.MPerNm;
+        Flight? best = null; var bestGap = double.PositiveInfinity;
+        foreach (var o in Flights)
+        {
+            if (o == f || o.Done || o.OnGround || o.Kind != "arrival" || o.Rwy?.Runway != f.Rwy.Runway || o.Path is null || (o.StarPick?.p.Name ?? "") != star) continue;
+            var gap = mine - (o.ThrS - o.S) / Geo2.MPerNm;
+            if (gap > 0 && gap < bestGap) { bestGap = gap; best = o; }
+        }
+        return best is null ? null : (st.nm, bestGap, best.Callsign);
+    }
+
+    /// <summary>Whether an arrival has reached the point its landing sequence starts (and why), or null.</summary>
+    internal string? SequencePoint(Flight f)
+    {
+        if (f.Rwy is not { } r) return null;
+        var d = (f.Pos - r.Threshold).Length / Geo2.MPerNm;
+        if (d > 40) return null;
+        var elev = Apt.ElevationFt;
+        var floorAhead = f.AltLimits.Where(c => c.S > f.S && c.Min > 0).Select(c => c.Min).DefaultIfEmpty(0).Max();
+        var limit = Math.Max(elev + 8000, floorAhead + 500);
+        if (f.AltFt > limit + 50) return null;
+        return $"{d:0} nm from the runway, {f.AltFt - elev:N0} ft above the field" + (limit > elev + 8000 ? $" — its procedure keeps it at {floorAhead:N0} ft or above" : "");
+    }
+
+    /// <summary>
     /// The user among LAIA's arrivals to their runway (user, 24 Nov, KIAH–KMSP: DAL2654 and the user abreast 150 nm out
     /// on routes that merge; the order flipped as the user crossed 150 nm, so DAL2654 stayed slowed for the user and the
     /// user was told to slow behind it — both lost the time; later the user was clearly ahead of DAL2654 and still
@@ -5502,7 +5595,7 @@ public sealed partial class TrafficWorld
             {
                 if (meEta - own > 180 || (d < du - 15 && d < 40) || o.Rejoin)
                 {
-                    o.BehindUser = false; o.OrderKey = o.EtaNominal;
+                    o.BehindUser = false; o.OrderKey = o.EtaNominal; o.BehindUserReleased = Time;
                     Log($"{o.Callsign}: no longer kept behind {me.Callsign} (you) — {(meEta - own > 180 ? $"you're {(meEta - own) / 60:0.0} min later than it would land" : "it's well ahead of you now")}");
                 }
                 else if (o.OrderKey <= me.OrderKey) o.OrderKey = me.OrderKey + 1;
@@ -5511,7 +5604,9 @@ public sealed partial class TrafficWorld
             if (o.OrderKey > me.OrderKey)
             {
                 // Behind the user now: kept there from here on (the hysteresis), when the two are close in the order.
-                if (o.OrderKey - me.OrderKey < 300) o.BehindUser = true;
+                // (Not again for 10 minutes once let go — 25 Nov, KEWR: UAL2480 was let go and kept again every pass, 189
+                // times, the user's number flipping 6 ↔ 5.)
+                if (o.OrderKey - me.OrderKey < 300 && Time - o.BehindUserReleased > 600) o.BehindUser = true;
                 continue;
             }
         }
@@ -5530,7 +5625,7 @@ public sealed partial class TrafficWorld
         // 2.2 s a mile beyond 20 nm: 280 → 240 kt high, 250 → 210 low) with the downwind's give (a minute).
         var lose = meEta + ThresholdGapNeeded(me, ahead, forDepartures: false) - ownA;
         var canLose = Math.Max(0, da - 20) * 2.2 + (ahead.Fan is { Count: >= 3 } || !double.IsNaN(ahead.BaseTurnNm) ? 60 : 0);
-        if (meEta <= ownA + 30 && du <= da + 10 && lose <= canLose)
+        if (meEta <= ownA + 30 && du <= da + 10 && lose <= canLose && Time - ahead.BehindUserReleased > 600)
         {
             ahead.OrderKey = me.OrderKey + 1;
             ahead.BehindUser = true;
@@ -5552,6 +5647,14 @@ public sealed partial class TrafficWorld
         // reduction for the slot at the same time; otherwise the slot's delay stands — merging streams need it.)
         var tactical = dth <= 45 && f.LeaderCs is not null && Time - f.LastTrombone < 20 && !double.IsNaN(f.TromboneLeft) && f.TromboneAdd < -25;
         var delay = tactical ? Math.Max(0, f.TromboneLeft) : f.Delay;
+        // Before its sequence: miles-in-trail in its stream (its STAR to its runway) when traffic management has set
+        // them — taken by speed like any delay.
+        if (!f.InSeq && MitFor(f) is { } mit && mit.gapNm < mit.nm)
+        {
+            var mitDelay = (mit.nm - mit.gapNm) * 3600 / Math.Max(200, f.Gs);
+            if (mitDelay > delay) { delay = mitDelay; f.MitBehind = mit.ahead; }
+        }
+        else f.MitBehind = null;
         if (dth <= 22 || delay < 10) { if (delay < 5 || dth <= 22) f.SlowDv = 0; }
         else
         {
@@ -5586,7 +5689,7 @@ public sealed partial class TrafficWorld
             // With the runway planner on, only straight after a planning pass (it runs just before), so the runway is the
             // one the plan has just confirmed — the planner won't move it once it's on a delay vector.
             var planOk = !Planner || ArrRwys.Count < 2 || Time == _lastPlan;
-            if (!tactical && dv >= 40 && dth > 40 && Time - f.LastVector > 180 && f.DelayVectors < 3 && planOk)
+            if (!tactical && !f.InSeq && dv >= 40 && dth > 40 && Time - f.LastVector > 180 && f.DelayVectors < 2 && planOk)   // before its sequence only, two at most (user, 25 Nov: vectors "way over used")
             {
                 var bySpeed = EtaToThreshold(f, dth) - base0;
                 var tromb = Trombone(f, 0, "");
@@ -5604,7 +5707,9 @@ public sealed partial class TrafficWorld
         if (f.SlowDv > 0 && (old == 0 || Math.Abs(f.SlowDv - old) >= 10))
         {
             _speedAssigns++;
-            Log($"{f.Callsign}: reduce speed {f.SlowDv:0} kt for the sequence (number {f.Seq} for {f.Rwy.Ident}, {delay:0} s to lose{(tactical ? $", behind {f.LeaderCs} after the base turn's share" : "")})");
+            Log(f.InSeq
+                ? $"{f.Callsign}: reduce speed {f.SlowDv:0} kt for the sequence (number {f.Seq} for {f.Rwy.Ident}, {delay:0} s to lose{(tactical ? $", behind {f.LeaderCs} after the base turn's share" : "")})"
+                : $"{f.Callsign}: reduce speed {f.SlowDv:0} kt for spacing ({delay:0} s to lose for {f.Rwy.Ident}{(f.MitBehind is { } mb && _mit.TryGetValue(f.Rwy.Runway, out var mt) ? $", {mt.nm:0} nm in trail behind {mb}" : "")})");
         }
         f.Mgr = f.Phase == "holding" ? "holding" : f.SlowDv > 0 ? $"slowed {f.SlowDv:0} kt" : f.Frozen ? "sequenced" : "";
     }
