@@ -775,7 +775,7 @@ public sealed partial class TrafficWorld
             foreach (var f in g)
             {
                 if (f == UserArr || f.InSeq || f.Path is null || f.Rwy is null) continue;
-                if (SequencePoint(f) is { } why) { f.InSeq = true; f.Frozen = false; Log($"{f.Callsign}: in the landing sequence for {f.Rwy.Ident} ({why})"); }
+                if (SequencePoint(f) is { } why) { f.InSeq = true; f.OrderKey = f.EtaNominal; Log($"{f.Callsign}: in the landing sequence for {f.Rwy.Ident} ({why})"); }
             }
             foreach (var f in g) if (f == UserArr || double.IsNaN(f.OrderKey) || !f.Frozen || !f.InSeq) f.OrderKey = f.EtaNominal;
             // One coming back round (a break-off, a go-around) goes behind every arrival nearer the runway than it — never
@@ -866,7 +866,7 @@ public sealed partial class TrafficWorld
                     try { BalanceRunway(f); } catch { }
                     if (f.Rwy != was0) { f.RwyCheckAt = Time; continue; }   // placed on its new runway next pass
                 }
-                f.Frozen = f.InSeq; f.FrozenSlot = slot;
+                f.Frozen = true; f.FrozenSlot = slot;
                 TrackSlot(f, slot);
                 if (Time - f.RwyCheckAt >= 30 && !(Planner && ArrRwys.Count >= 2)) { f.RwyCheckAt = Time; try { BalanceRunway(f); } catch { } }
                 if (Time - f.SlowAt >= 5) { f.SlowAt = Time; try { AssignSequenceSpeed(f); } catch (Exception ex) { Log($"{f.Callsign}: speed planning failed: {ex.Message}"); } }
