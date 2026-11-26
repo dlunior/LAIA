@@ -511,7 +511,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
             $"trombones {Per(C("downwind extended"))}; holds {C("holding for")}, 360s {C("making a 360")}; separation warnings {C("SEPARATION")}; " +
             $"restrictions {met} of {tot} met; landings short of the gap needed {shortGaps}" + (extra.Count > 0 ? $", median {extra[extra.Count / 2]} s beyond it" : "") +
             $"; take-overs {takeovers.Count} ({(takeovers.Count > 0 ? 100 * real / takeovers.Count : 0)}% on real tracks, {C("sequenced: starts")} moved back, {tooHigh} too high); " +
-            $"failures {C("failed")}, removed {C("removed after")}" + (sh.SlotSummary is { } slotS ? $"; {slotS}" : ""),
+            $"failures {C("failed")}, removed {C("removed after")}; traffic management: {C("Traffic management:") - C("lifted") - C("eased")} restrictions set" + (sh.SlotSummary is { } slotS ? $"; {slotS}" : ""),
         };
         foreach (var l in lines.Where(l => l.Contains("breaking off") || l.Contains("going around") || l.Contains("SEPARATION") || l.Contains("failed")).Take(8))
             res.Add("Self-test   " + l);

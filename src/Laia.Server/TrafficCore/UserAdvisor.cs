@@ -7,7 +7,7 @@ public sealed record Notice(string Id, string Text, bool Warning, bool Clear = f
 
 /// <summary>The user's place in the arrival sequence as the traffic manager plans it.</summary>
 public sealed record UserSequence(string Runway, int Number, string? AheadCallsign, string? AheadType, string? AheadWhere,
-    string? BehindCallsign, string? BehindType, bool Replanned, double EtaSec, string? SpeedAdvice = null);
+    string? BehindCallsign, string? BehindType, bool Replanned, double EtaSec, string? SpeedAdvice = null, bool InSeq = true);
 
 /// <summary>
 /// M8 — Smart traffic mode for the user (user, 12 Nov): no directives, only notices that matter. On the ground: traffic on
@@ -84,6 +84,7 @@ public sealed partial class TrafficWorld
     private readonly Dictionary<RunwayEnd, List<(double nm, double kt)>> _userLimits = new();
     private List<(double nm, double kt)> _routeLimits = new();
     private List<AirPoint> _lastUserStarPts = new();
+    private bool _userInSeq;
 
     /// <summary>The speed limits along a route the user flies (points with a published speed), as miles to go.</summary>
     private static List<(double nm, double kt)> LimitsAlong(List<V2> pts, List<AirPoint> star, V2 thr)
@@ -323,6 +324,7 @@ public sealed partial class TrafficWorld
         if (!UserArriving() || UserPos is not { } u)
         {
             if (UserArr is not null) foreach (var o in Flights) o.BehindUser = false;
+            _userInSeq = false;
             UserArr = null; Sequence = null; _userSlot = double.NaN; _userEtaAbs = double.NaN; _etaScale = 1; _etaSamples.Clear(); _seqSig = ""; _userRwyChanges = 0; _userHoldLogged = false; return;
         }
         var arrs = ArrRwys.Count > 0 ? ArrRwys : ArrRwy is null ? new List<RunwayEnd>() : new() { ArrRwy };
@@ -472,11 +474,28 @@ public sealed partial class TrafficWorld
         // shown, not flown (user, 25 Nov: "separation should be between me and the aircraft around me before my sequence
         // to the runway"): the aircraft around the user are kept apart en route (and the user asked in the notices when one
         // catches them up); any delay for the runway is said once as minutes to expect, absorbed later.
-        var onArrival = toGoNm <= 150 || UserAltFt < 24000 || UserVs < -800;
+        // The same point LAIA's own arrivals join the landing sequence (user, 26 Nov): within 40 nm of the runway's
+        // approach end and at or below 8,000 ft above the field — kept once reached.
+        var dThr = me.Rwy is { } mr ? (u - mr.Threshold).Length / Geo2.MPerNm : double.PositiveInfinity;
+        if (dThr <= 40 && UserAltFt <= Apt.ElevationFt + 8050) _userInSeq = true;
+        var onArrival = _userInSeq;
         var delayMin = double.IsNaN(_userSlot) || double.IsNaN(me.EtaSec) ? 0 : (_userSlot - (Time + me.EtaSec)) / 60;
         if (!onArrival)
         {
-            if (delayMin >= 2) advice = $"expect about {Math.Round(delayMin):0} min of delay for {me.Rwy?.Ident} — LAIA will take it in the descent and on the arrival, nothing to do now";
+            // Spacing in the user's stream: the nearest of LAIA's arrivals ahead on the same STAR to the same runway.
+            var star = UserStar ?? "";
+            var ahead0 = Flights.Where(o => o.Kind == "arrival" && !o.Done && !o.OnGround && o.Path is not null && o.Rwy?.Runway == me.Rwy?.Runway
+                    && star.Length > 0 && string.Equals(o.StarPick?.p.Name, star, StringComparison.OrdinalIgnoreCase) && (o.ThrS - o.S) / Geo2.MPerNm < toGoNm)
+                .OrderByDescending(o => (o.ThrS - o.S)).FirstOrDefault();
+            var parts = new List<string>();
+            if (ahead0 is not null)
+            {
+                var gapNm = toGoNm - (ahead0.ThrS - ahead0.S) / Geo2.MPerNm;
+                var mit = me.Rwy is { } rr && _mit.TryGetValue(rr.Runway, out var mt) && mt.nm > 0 ? mt.nm : 0;
+                parts.Add($"spacing: {gapNm:0} nm behind {ahead0.Callsign} ({ahead0.Type}) on {star}" + (mit > 0 ? $" — {mit:0} nm in trail asked into {Apt.Icao}{(gapNm < mit - 1 ? $", about {Math.Ceiling((mit - gapNm) * 3600 / Math.Max(200, UserGs) / 60):0} min to lose" : "")}" : ""));
+            }
+            if (delayMin >= 2) parts.Add($"expect about {Math.Round(delayMin):0} min of delay for {me.Rwy?.Ident} — LAIA will take it in the descent and on the arrival");
+            advice = parts.Count == 0 ? null : string.Join("; ", parts);
         }
         else if (ahead is not null && !double.IsNaN(ahead.EtaSec) && !double.IsNaN(me.EtaSec) && me.EtaSec - ahead.EtaSec < 0)
         {
@@ -529,8 +548,8 @@ public sealed partial class TrafficWorld
             }
         }
         Sequence = new UserSequence(me.Rwy!.Ident, me.Seq, ahead?.Callsign, ahead?.Type, ahead is null || !onArrival ? null : Where(ahead),
-            behind?.Callsign, behind?.Type, changed, me.EtaSec, advice);
-        if (logNow) Log($"{me.Callsign} (you): new sequence — number {me.Seq} for {me.Rwy.Ident}, between {ahead?.Callsign ?? "nobody"} and {behind?.Callsign ?? "nobody"}");
+            behind?.Callsign, behind?.Type, changed && onArrival, me.EtaSec, advice, onArrival);
+        if (logNow && onArrival) Log($"{me.Callsign} (you): new sequence — number {me.Seq} for {me.Rwy.Ident}, between {ahead?.Callsign ?? "nobody"} and {behind?.Callsign ?? "nobody"}");
     }
 
     /// <summary>
@@ -589,7 +608,10 @@ public sealed partial class TrafficWorld
         }
         if (!UserOnGround)
         {
-            if (Sequence is { } sq)
+            if (Sequence is { InSeq: false } sq0)
+                list.Add(new Notice("seq", $"Landing {sq0.Runway} — the landing sequence starts within 40 nm and 8,000 ft of the field" +
+                    (sq0.SpeedAdvice is null ? "" : $". {char.ToUpper(sq0.SpeedAdvice[0])}{sq0.SpeedAdvice[1..]}"), false));
+            else if (Sequence is { } sq)
             {
                 var between = sq.AheadCallsign is null && sq.BehindCallsign is null ? "no traffic either side"
                     : $"between {sq.AheadCallsign ?? "—"}{(sq.AheadType is null ? "" : " (" + sq.AheadType + ")")} and {sq.BehindCallsign ?? "—"}{(sq.BehindType is null ? "" : " (" + sq.BehindType + ")")}";
@@ -614,7 +636,7 @@ public sealed partial class TrafficWorld
                 var same = o.Rwy.Runway == r.Runway;
                 if (o.Kind == "arrival" && !o.OnGround && same && o.Phase is "final" or "approach" or "flare" && (o.ThrS - o.S) / nm < 4)
                     list.Add(new Notice("final-" + o.Id, $"Traffic on {(o.ThrS - o.S) / nm:0.0} nm final for {o.Rwy.Ident}: {o.Callsign} ({o.Type}) — don't line up or take off", true));
-                else if (o.OnGround && same && o.Phase is "landing roll" or "takeoff roll" or "lined up")
+                else if (o.OnGround && same && o.Phase is "landing roll" or "takeoff roll" or "lined up" && UserGs > 5)   // stopped at it: UserRunway says what to do
                     list.Add(new Notice("rwy-" + o.Id, $"Traffic {(o.Phase == "lined up" ? "lined up" : "rolling")} on {o.Rwy.Ident}: {o.Callsign} ({o.Type})", true));
             }
             // Ground traffic crossing this runway further down (on the strip, not aligned with it, beyond the user).
@@ -750,26 +772,88 @@ public sealed partial class TrafficWorld
         if (Time < _clearUntil && warns.Count == 0) list.Add(new Notice("clear-taxi", _clearText, false, true));
         // The runway: lined up on it, or stopped holding short near its end.
         if (UserGs > 5) return;
-        var nm = Geo2.MPerNm;
         foreach (var r in Apt.Ends)
         {
             var along = r.Along(u); var off = Math.Abs(r.Offset(u));
-            var lined = off < 30 && along > -60 && along < r.LengthM / 2 && Math.Abs(Geo2.Diff(UserTrack, r.Heading)) < 30;
-            var holding = !lined && off >= 30 && off < 110 && along > -150 && along < r.LengthM / 3;
+            var lined = off < r.WidthM / 2 + 10 && along > -60 && along < r.LengthM / 2 && Math.Abs(Geo2.Diff(UserTrack, r.Heading)) < 30;
+            var holding = !lined && off >= r.WidthM / 2 + 10 && off < 110 && along > -150 && along < r.LengthM / 3;
             if (!lined && !holding) continue;
-            if (list.Any(n => n.Warning && (n.Id.StartsWith("final-") || n.Id.StartsWith("rwy-") || n.Id.StartsWith("cross-") || n.Id == "hs-" + r.Runway))) return;
-            var busy = Flights.Any(o => !o.Done && o.Rwy?.Runway == r.Runway && (
-                (o.Kind == "arrival" && !o.OnGround && o.Phase is "final" or "approach" or "flare" && (o.ThrS - o.S) / nm < 6)
-                || (o.OnGround && o.Phase is "landing roll" or "takeoff roll" or "lined up" or "lining up")))
-                || Flights.Any(o => !o.Done && o.OnGround && o != null && Math.Abs(r.Offset(o.Pos)) < 35 && r.Along(o.Pos) > -60 && r.Along(o.Pos) < r.LengthM + 60 && o.Phase is not ("landing roll" or "takeoff roll"));
-            if (busy) return;
-            // Facing this end's direction when lined up; holding short, the end nearer to the user.
+            // Holding short: the end nearer to the user is the one they'd depart from.
             if (holding && Apt.Ends.Any(e => e.Runway == r.Runway && e != r && e.Along(u) > -150 && e.Along(u) < along)) continue;
-            list.Add(new Notice("clear-rwy-" + r.Runway, lined
-                ? $"Runway {r.Ident} clear — nothing on final within 6 nm, safe to take off"
-                : $"Runway {r.Ident}{RunwayPair(r)} clear — nothing on final within 6 nm, safe to line up", false, true));
+            if (UserRunway(r, u, lined) is { } n) list.Add(n);
             return;
         }
+    }
+
+    /// <summary>
+    /// The user at a runway to depart (user, 26 Nov: "it seems to think traffic has cleared when it hasn't, and never asks
+    /// the user to line up and wait after a departure, only hold short"): judged by the same rules as LAIA's own
+    /// departures — an aircraft on the runway, the wake and 6,000 ft behind the departure ahead (3-9-6), the next arrival
+    /// (airborne and 6,000 ft down before it crosses the threshold, 3-10-3), a go-around over the runway, arrivals to a
+    /// crossing runway (3-9-8) — and line up and wait behind a departure on its roll, or a landing rolling out with safety
+    /// logic in fair weather (3-9-4), when the user is first in line. Advice from LAIA's traffic, not a clearance.
+    /// </summary>
+    private Notice? UserRunway(RunwayEnd r, V2 u, bool lined)
+    {
+        var type = UserType.Length > 0 ? UserType : "A320";
+        var me = new Flight
+        {
+            Id = "user", Callsign = (UserCallsign.Length > 0 ? UserCallsign : "you") + " (you)", Airline = "", Type = type, Kind = "departure", P = Perf.For(type),
+            Rwy = r, Pos = u, Phase = lined ? "lined up" : "holding short", DepCourse = r.Heading, DepPlanRwy = r,
+        };
+        var mineAlong = r.Along(u);
+        // First in line: none of LAIA's departures for this runway lined up, lining up, or holding short before the user.
+        if (!lined && Flights.FirstOrDefault(o => o.Kind == "departure" && !o.Done && o.Rwy?.Runway == r.Runway && o.Phase is "lined up" or "lining up") is { } lu)
+            return new Notice("rwy-user", $"Hold short of {r.Ident}: {lu.Callsign} ({lu.Type}) {(lu.Phase == "lined up" ? "lined up" : "lining up")} ahead of you", true);
+        // Whoever is on the runway, and whether the user could line up behind them.
+        Flight? blocker = null, rolling = null;
+        foreach (var o in Flights)
+        {
+            if (o.Done || o == me) continue;
+            var onIt = o.OnRunway == r.Runway || o.Reserve == r.Runway;
+            if (!onIt || (o.Kind == "departure" && !o.OnGround)) continue;
+            var ahead = r.Along(o.Pos) > mineAlong + 300 && Math.Abs(Geo2.Diff(o.Rwy?.Heading ?? o.Heading, r.Heading)) < 90;
+            var canBehind = ahead && ((o.Kind == "departure" && o.Phase == "takeoff roll") || (o.Kind == "arrival" && o.Phase == "landing roll" && SafetyLogic && !LowWeather));
+            if (canBehind) rolling ??= o; else blocker ??= o;
+        }
+        var nm = Geo2.MPerNm;
+        var eta = ArrivalEta(r.Runway);
+        string etaTxt() => double.IsInfinity(eta) ? "no arrival due" : $"next arrival {eta:0} s out";
+        if (blocker is not null)
+            return new Notice("rwy-user", $"{(lined ? "Wait on the runway" : $"Hold short of {r.Ident}")}: {blocker.Callsign} ({blocker.Type}) {(blocker.Kind == "arrival" ? (blocker.OnGround ? "on the runway" : "landing") : "on the runway")}", true);
+        if (GoAroundAhead(me) is { } ga)
+            return new Notice("rwy-user", $"{(lined ? "Wait on the runway" : $"Hold short of {r.Ident}")}: {ga.Callsign} going around over the runway", true);
+        var clearFor = TimeToClearForArrival(me);
+        var wake = rolling is not null ? double.PositiveInfinity : WakeRemaining(me, plan: false);
+        var crossingOk = CrossingRunwayClearForTakeoff(me);
+        var lineUpSec = lined ? 0 : Math.Max(15, (off(u) / 4.0) + 7);
+        // Take-off now: nobody on it, the wake and 6,000 ft done, the next arrival far enough, the crossing runway clear.
+        if (rolling is null && wake <= 0 && eta >= clearFor + lineUpSec + 5 && crossingOk)
+            return new Notice("rwy-user", lined
+                ? $"Runway {r.Ident} clear — safe to take off ({etaTxt()})"
+                : $"Runway {r.Ident}{RunwayPair(r)} clear — safe to line up and take off ({etaTxt()})", false, true);
+        // Line up and wait: behind a departure on its roll (or a landing rolling out), or while the wake time runs —
+        // with room before the next arrival for the line-up, the wait and the take-off.
+        var wait = rolling is not null ? Math.Max(30, WakeAfterRoll(rolling, me)) : Math.Max(0, wake);
+        if (!lined && eta >= Math.Max(lineUpSec, wait) + clearFor + 10 && CrossingRunwayClearForTakeoff(me, extraSec: 30))
+        {
+            var who = rolling ?? Flights.Where(o => o.Kind == "departure" && !o.Done && o.Rwy?.Runway == r.Runway && !o.OnGround).OrderByDescending(o => o.LiftoffTime).FirstOrDefault();
+            return new Notice("rwy-user", $"Line up and wait on {r.Ident}{(who is null ? "" : $" behind {who.Callsign} ({who.Type}) {(who.Kind == "arrival" ? "rolling out" : who.OnGround ? "departing" : "just airborne")}")} — take-off in about {Math.Ceiling(wait / 10) * 10:0} s", false, true);
+        }
+        // Not yet: why.
+        string why = eta < clearFor + lineUpSec + 5 ? $"arrival {eta:0} s out" : !crossingOk ? "traffic for the crossing runway" : wait > 0 ? $"wake and spacing behind the departure ahead, about {Math.Ceiling(wait / 10) * 10:0} s" : "traffic";
+        return new Notice("rwy-user", $"{(lined ? "Wait on the runway" : $"Hold short of {r.Ident}")}: {why}", true);
+
+        double off(V2 p) => Math.Abs(r.Offset(p));
+    }
+
+    /// <summary>Seconds until the user could roll behind a departure still on its roll: its lift-off, then the wake time.</summary>
+    private double WakeAfterRoll(Flight l, Flight me)
+    {
+        if (l.Kind != "departure") return 30;
+        var acc = Math.Max(0.5, l.P.RollAccel * 0.5144);
+        var toLift = Math.Max(0, ((l.P.Vr + 7) * 0.5144 - l.Gs * 0.5144) / acc);
+        return toLift + Cwt.DepartureSeconds(l.Wake, me.Wake);
     }
     private double _clearUntil;
     private string _clearText = "";
