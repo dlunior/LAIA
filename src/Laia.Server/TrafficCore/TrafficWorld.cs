@@ -775,9 +775,9 @@ public sealed partial class TrafficWorld
             foreach (var f in g)
             {
                 if (f == UserArr || f.InSeq || f.Path is null || f.Rwy is null) continue;
-                if (SequencePoint(f) is { } why) { f.InSeq = true; f.OrderKey = f.EtaNominal; Log($"{f.Callsign}: in the landing sequence for {f.Rwy.Ident} ({why})"); }
+                if (SequencePoint(f) is { } why) { f.InSeq = true; Log($"{f.Callsign}: in the landing sequence for {f.Rwy.Ident} ({why})"); }
             }
-            foreach (var f in g) if (f == UserArr || double.IsNaN(f.OrderKey) || !f.Frozen || !f.InSeq) f.OrderKey = f.EtaNominal;
+            foreach (var f in g) if (f == UserArr || double.IsNaN(f.OrderKey) || !f.Frozen) f.OrderKey = f.EtaNominal;
             // One coming back round (a break-off, a go-around) goes behind every arrival nearer the runway than it — never
             // in front of one already on its way in, which would then be broken off in turn (KORD Peak, 18 Nov: AAL1974
             // broke off, then AAL2616 and UAL415 behind it, each "200+ s short" behind the one before).
