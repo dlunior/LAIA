@@ -487,15 +487,15 @@ public sealed partial class TrafficWorld
             var ahead0 = Flights.Where(o => o.Kind == "arrival" && !o.Done && !o.OnGround && o.Path is not null && o.Rwy?.Runway == me.Rwy?.Runway
                     && star.Length > 0 && string.Equals(o.StarPick?.p.Name, star, StringComparison.OrdinalIgnoreCase) && (o.ThrS - o.S) / Geo2.MPerNm < toGoNm)
                 .OrderByDescending(o => (o.ThrS - o.S)).FirstOrDefault();
-            var parts = new List<string>();
+            var bits = new List<string>();
             if (ahead0 is not null)
             {
                 var gapNm = toGoNm - (ahead0.ThrS - ahead0.S) / Geo2.MPerNm;
                 var mit = me.Rwy is { } rr && _mit.TryGetValue(rr.Runway, out var mt) && mt.nm > 0 ? mt.nm : 0;
-                parts.Add($"spacing: {gapNm:0} nm behind {ahead0.Callsign} ({ahead0.Type}) on {star}" + (mit > 0 ? $" — {mit:0} nm in trail asked into {Apt.Icao}{(gapNm < mit - 1 ? $", about {Math.Ceiling((mit - gapNm) * 3600 / Math.Max(200, UserGs) / 60):0} min to lose" : "")}" : ""));
+                bits.Add($"spacing: {gapNm:0} nm behind {ahead0.Callsign} ({ahead0.Type}) on {star}" + (mit > 0 ? $" — {mit:0} nm in trail asked into {Apt.Icao}{(gapNm < mit - 1 ? $", about {Math.Ceiling((mit - gapNm) * 3600 / Math.Max(200, UserGs) / 60):0} min to lose" : "")}" : ""));
             }
-            if (delayMin >= 2) parts.Add($"expect about {Math.Round(delayMin):0} min of delay for {me.Rwy?.Ident} — LAIA will take it in the descent and on the arrival");
-            advice = parts.Count == 0 ? null : string.Join("; ", parts);
+            if (delayMin >= 2) bits.Add($"expect about {Math.Round(delayMin):0} min of delay for {me.Rwy?.Ident} — LAIA will take it in the descent and on the arrival");
+            advice = bits.Count == 0 ? null : string.Join("; ", bits);
         }
         else if (ahead is not null && !double.IsNaN(ahead.EtaSec) && !double.IsNaN(me.EtaSec) && me.EtaSec - ahead.EtaSec < 0)
         {
