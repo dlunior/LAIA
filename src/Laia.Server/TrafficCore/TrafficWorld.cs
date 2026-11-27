@@ -801,8 +801,12 @@ public sealed partial class TrafficWorld
             var od = (o.ThrS - o.S) / Geo2.MPerNm;
             var tO = user ? (double.IsNaN(o.EtaSec) ? double.NaN : Time + o.EtaSec) : Time + EtaToThreshold(o, od);
             if (double.IsNaN(tO)) continue;
-            // Who lands first: the user always; between LAIA's own, the planned order.
-            var first = user || (o.Frozen && f.Frozen ? o.FrozenSlot < f.FrozenSlot : tO < myT);
+            // Who lands first: the user always; between LAIA's own, the planned order — unless one of the two is off its
+            // plan (vectored, broken off, gone around, rejoining): then the other goes first and it fits in behind (the
+            // offline test, 27 Nov: AAL724 for 27 vectored off late for spacing, SWA770 for 36 still waiting for it,
+            // reached its threshold first anyway and AAL724 had to go around).
+            var oOff = OffPlan(o); var fOff = OffPlan(f);
+            var first = user || (oOff != fOff ? fOff : o.Frozen && f.Frozen ? o.FrozenSlot < f.FrozenSlot : tO < myT);
             if (first) list.Add((oe, tO, o));
         }
         if (list.Count == 0) return (0, null);
@@ -812,6 +816,9 @@ public sealed partial class TrafficWorld
         var what = Crossing(me, lead.end) is not null ? "on the crossing runway" : "on the close parallel";
         return (need, $"{(lead.f == UserArr ? lead.f.Callsign + " (you)" : lead.f.Callsign)} {what} {lead.end.Ident}");
     }
+
+    /// <summary>Off its planned way in: on vectors, broken off or gone around and coming back round, or on a delay detour.</summary>
+    private bool OffPlan(Flight x) => x != UserArr && (x.Mgr is "vectored" or "vectored around" || x.Rejoin || x.WentAround || Time - x.LastVector < 240);
 
     /// <summary>Margin (s) after the first arrival is through the intersection before the second may cross its threshold.</summary>
     private const double CrossingMarginSec = 25;
@@ -835,6 +842,8 @@ public sealed partial class TrafficWorld
         foreach (var (oe, ts, o) in placed)
         {
             if (oe.Runway == me.Runway || o == f || double.IsNaN(ts)) continue;
+            // One off its plan doesn't hold up one on it (it fits in behind, close in).
+            if (OffPlan(o) && !OffPlan(f)) continue;
             if (Crossing(me, oe) is { } x)
             {
                 var po = LandingTimeTo(oe, o.P, x.alongB) + CrossingMarginSec;   // it first: this one waits for it to pass
