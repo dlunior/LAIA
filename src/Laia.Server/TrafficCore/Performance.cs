@@ -117,6 +117,9 @@ public static class Cwt
         /* I */ { 0, 0, 0, 0, 0, 0, 0, 0, 0 },
     };
 
+    /// <summary>The wake minimum alone (nm), 0 when the pair has none — for close parallels, one runway for wake (5-5-4 g).</summary>
+    public static double WakeMiles(char leader, char follower) => InTrail[Math.Clamp(leader - 'A', 0, 8), Math.Clamp(follower - 'A', 0, 8)];
+
     /// <summary>Minimum distance on final behind the leader (nm): the wake minimum, or 3 nm radar separation.</summary>
     public static double MilesBehind(char leader, char follower)
     {
