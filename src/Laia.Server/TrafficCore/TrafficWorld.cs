@@ -801,12 +801,11 @@ public sealed partial class TrafficWorld
             var od = (o.ThrS - o.S) / Geo2.MPerNm;
             var tO = user ? (double.IsNaN(o.EtaSec) ? double.NaN : Time + o.EtaSec) : Time + EtaToThreshold(o, od);
             if (double.IsNaN(tO)) continue;
-            // Who lands first: the user always; between LAIA's own, the planned order — unless one of the two is off its
-            // plan (vectored, broken off, gone around, rejoining): then the other goes first and it fits in behind (the
-            // offline test, 27 Nov: AAL724 for 27 vectored off late for spacing, SWA770 for 36 still waiting for it,
-            // reached its threshold first anyway and AAL724 had to go around).
-            var oOff = OffPlan(o); var fOff = OffPlan(f);
-            var first = user || (oOff != fOff ? fOff : o.Frozen && f.Frozen ? o.FrozenSlot < f.FrozenSlot : tO < myT);
+            // Who lands first: the user always; between LAIA's own, whichever will be there first now — the plan sets
+            // that order far out and speed flies it, but close in it's how they're really flying that counts (the offline
+            // test, 27 Nov: AAL724 for 27, vectored off late for spacing, was still "first" by its slot; SWA770 for 36
+            // waited for it, got to its threshold first anyway, and one of them had to go around).
+            var first = user || tO < myT;
             if (first) list.Add((oe, tO, o));
         }
         if (list.Count == 0) return (0, null);
@@ -7737,6 +7736,14 @@ public sealed partial class TrafficWorld
                 f.TromboneAdd = depAdd;
                 f.TromboneLeft = Trombone(f, depAdd, $"landing after {depWho}, {depAdd:0} s to lose");
                 if (double.IsNaN(f.TromboneLeft) && f.Fan is not null) f.TromboneLeft = FanPick(f, depAdd, $"landing after {depWho}, {depAdd:0} s to lose");
+                // Nothing to stretch (straight in): vectors while there's room, else an early break-off rather than a
+                // go-around at half a mile.
+                if (double.IsNaN(f.TromboneLeft) || f.TromboneLeft > 40)
+                {
+                    var onFin = Math.Abs(rwy.Offset(f.Pos)) < 0.6 * Geo2.MPerNm && rwy.Along(f.Pos) < 0;
+                    if (dth > 13 && depAdd > 30 && Time - f.LastVector > 240 && Vector(f, depAdd + 15, $"landing after {depWho}, {depAdd:0} s short")) return;
+                    if (dth is > 5 and <= 12 && depAdd > 20 && onFin && Time - f.LastOrbit > 240) { BreakOff(f, $"landing after {depWho}, {depAdd:0} s short"); return; }
+                }
             }
             f.LeaderCs = leader?.Callsign;
             if (leader is not null && !leader.OnGround && dth < 45)
@@ -7765,6 +7772,8 @@ public sealed partial class TrafficWorld
                 // Only for real spacing (wake, radar, runway occupancy): gaps for departures are made with speed, never
                 // by breaking someone off.
                 var short_ = ThresholdGapNeeded(leader, f, forDepartures: false) - gapSec;
+                // The stagger with an arrival to a crossing runway or close parallel counts as spacing too.
+                if (depAdd > 0) short_ = Math.Max(short_, depAdd);
                 // What speed control can still absorb before 20 nm (250 → 210 kt) and inside it (down to the 170 kt
                 // floor): a hold only when the shortfall is more than that.
                 if (!(gap > 0 && tooCloseNow(gap, needNm))) short_ -= Math.Max(0, dth - 20) * (3600 / 210.0 - 3600 / 250.0) + (dth > 12 ? 10 : 0);
