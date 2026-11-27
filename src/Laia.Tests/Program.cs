@@ -435,6 +435,67 @@ Console.WriteLine("== Landing on two crossing runways (27 Nov, KPIT: AAL814 on 3
     Check(gaX <= 1, $"the approach sequencing staggers the two streams: go-arounds for a crossing arrival stay rare ({gaX})");
 }
 
+Console.WriteLine("== The user landing 27 with LAIA's arrivals for the crossing runway 36 timed to meet them (the KPIT case)");
+{
+    var nm = Geo2.MPerNm;
+    var data = TestAirport.Build(false);
+    var map = new LocalMap(40, -75);
+    var (clat, clon) = map.ToLatLon(new V2(1200, 0));
+    data.Runways.Add(new AirportRunway { Lat = clat, Lon = clon, ElevationM = 10, Heading = 0, LengthM = 2500, WidthM = 45, PrimaryNumber = 36, SecondaryNumber = 18 });
+    var apt = new AirportModel(data);
+    var world = new TrafficWorld(apt, new TestSource(), seed: 31) { Automatic = false, Wind = new Wind(320, 8) };
+    var log = new List<string>(); world.Log = l => log.Add($"{world.Time:0} {l}");
+    world.AtisText = "TEST ARR INFO Q. ILS RWY 27 AND RWY 36 APCHS IN USE. DEPG RWY 27.";
+    world.SelectRunways(true);
+    var e27 = apt.Ends.First(e => e.Ident == "27"); var e36 = apt.Ends.First(e => e.Ident == "36");
+    var xing = new V2(1200, 0);
+    var u = e27.Threshold - e27.Dir * (20 * nm);
+    world.UserCallsign = "UAL1196"; world.UserType = "B738"; world.UserDestination = "TEST";
+    world.UserOnGround = false; world.UserTrack = e27.Heading; world.UserGs = 160; world.UserAltFt = 6000; world.UserPos = u;
+    var ais = new List<Flight>();
+    foreach (var d in new[] { 12.0, 15, 18, 21, 24 })
+        if (world.SpawnArrival(d, false, null, (e36, null)) is { } a) ais.Add(a);
+    double userThr = -1, userPass = -1;
+    var thr = new Dictionary<string, double>(); var pass = new Dictionary<string, double>(); var prev = new Dictionary<string, double>();
+    for (var t = 0.0; t < 2400; t += 0.5)
+    {
+        if (userThr < 0 || userPass < 0)
+        {
+            var left = -e27.Along(u) / nm;
+            var kt = left > 6 ? 160 : left > 0 ? 135 : 120;
+            u += e27.Dir * (kt * Geo2.MpsPerKt * 0.5);
+            world.UserGs = kt; world.UserAltFt = Math.Max(apt.ElevationFt, Math.Min(6000, apt.ElevationFt + left * 318));
+            if (userThr < 0 && e27.Along(u) >= 0) userThr = world.Time;
+            if (userPass < 0 && e27.Along(u) > e27.Along(xing) + 30) { userPass = world.Time; world.UserOnGround = true; }
+        }
+        world.UserPos = u;
+        world.Step(0.5);
+        foreach (var f in ais.Where(f => !f.Done && f.Rwy == e36))
+        {
+            var key = f.Callsign + (f.WentAround ? "#2" : "");
+            var al = e36.Along(f.Pos);
+            if (prev.TryGetValue(key, out var pa) && pa < 0 && al >= 0 && f.AltFt - apt.ElevationFt < 200) thr[key] = world.Time;
+            if (thr.ContainsKey(key) && !pass.ContainsKey(key) && (al > e36.Along(xing) + 30 || (f.OnGround && f.OnRunway != e36.Runway))) pass[key] = world.Time;
+            prev[key] = al;
+        }
+        if (userPass > 0 && ais.All(f => f.Done || f.OnGround)) break;
+    }
+    var bad = new List<string>();
+    foreach (var (k, t36) in thr)
+    {
+        // It went first: through the intersection before the user crossed the 27 threshold; or after: the user was through first.
+        var p36 = pass.TryGetValue(k, out var pp) ? pp : double.PositiveInfinity;
+        if (!(p36 <= userThr || (userPass > 0 && userPass <= t36))) bad.Add($"{k}: 36 threshold {t36:0}, through {p36:0}; you: 27 threshold {userThr:0}, through {userPass:0}");
+    }
+    var ga = log.Count(l => l.Contains("landing the crossing runway"));
+    Console.WriteLine($"  you over the 27 threshold at {userThr:0}; 36 thresholds: {string.Join(", ", thr.Select(x => $"{x.Key} {x.Value:0}"))}; go-arounds for you {ga}");
+    foreach (var l in log.Where(l => l.Contains("landing after") || l.Contains("crossing runway")).Take(8)) Console.WriteLine("    " + l);
+    foreach (var b in bad) Console.WriteLine("    " + b);
+    Check(userThr > 0 && thr.Count >= 3, $"you and LAIA's arrivals to 36 all land ({thr.Count} on 36)");
+    Check(bad.Count == 0, "none of LAIA's arrivals to 36 meets you at the intersection: each is through it before you reach the 27 threshold, or crosses its threshold after you're through");
+    Check(ga == 0, $"it's done on the approach, not by go-arounds ({ga})");
+}
+
 Console.WriteLine("== Close parallels under 2,500 ft: one runway for wake (7110.65 3-9-6 f)");
 {
     var data = TestAirport.Build(false);
