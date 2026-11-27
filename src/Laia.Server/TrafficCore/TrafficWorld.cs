@@ -91,6 +91,8 @@ public sealed class Flight
     public bool JunctionHeld, GoFirstFailed;
     public HashSet<int> LeftRunways = new();
     public string? LeaderCs;
+    /// <summary>The last arrival on a crossing runway or close parallel its landing slot was moved behind (logged once).</summary>
+    public string? DepNote;
     public double GoFirstAt = -1, JhCheckAt = -1e9, JunctionHeldSince = -1e9, JunctionFreeUntil = -1e9;
     public (string name, Flight ahead)? JhLast;
     public string ExitNote = "";
@@ -821,11 +823,14 @@ public sealed partial class TrafficWorld
     /// parallel, the wake minimum behind a heavy or B757 as for one runway and a 1.5 nm stagger otherwise (dependent
     /// approaches). Fitted ahead of one where it fits, else after it.
     /// </summary>
-    private double DependentSlot(Flight f, double slot, List<(RunwayEnd end, double slot, Flight f)> placed)
+    private double DependentSlot(Flight f, double slot, List<(RunwayEnd end, double slot, Flight f)> placed) => DependentSlot(f, slot, placed, out _);
+
+    private double DependentSlot(Flight f, double slot, List<(RunwayEnd end, double slot, Flight f)> placed, out string? after)
     {
+        after = null;
         var me = f.Rwy!;
         if (placed.Count == 0) return slot;
-        var deps = new List<(double lo, double hi)>();   // forbidden windows for this arrival's threshold time
+        var deps = new List<(double lo, double hi, string who)>();   // forbidden windows for this arrival's threshold time
         var gs = Math.Max(90, f.P.Vapp - WindAt(me.ElevationFt + 1000).Headwind(me.Heading)) / 3600.0;   // nm/s
         foreach (var (oe, ts, o) in placed)
         {
@@ -834,24 +839,26 @@ public sealed partial class TrafficWorld
             {
                 var po = LandingTimeTo(oe, o.P, x.alongB) + CrossingMarginSec;   // it first: this one waits for it to pass
                 var pf = LandingTimeTo(me, f.P, x.alongA) + CrossingMarginSec;   // this one first: it must be through before
-                deps.Add((ts - pf, ts + po));
+                deps.Add((ts - pf, ts + po, $"{Who(o)} on the crossing runway {oe.Ident}"));
             }
             else if (CloseParallel(me, oe))
             {
                 var stagger = 1.5 / gs;
                 var behind = Math.Max(stagger, Cwt.WakeMiles(o.Wake, f.Wake) / gs);
                 var ahead = Math.Max(stagger, Cwt.WakeMiles(f.Wake, o.Wake) / gs);
-                deps.Add((ts - ahead, ts + behind));
+                deps.Add((ts - ahead, ts + behind, $"{Who(o)} on the close parallel {oe.Ident}"));
             }
         }
         if (deps.Count == 0) return slot;
         for (var it = 0; it < 50; it++)
         {
-            var hit = deps.Where(w => slot > w.lo && slot < w.hi).Select(w => w.hi).DefaultIfEmpty(double.NaN).Max();
-            if (double.IsNaN(hit)) break;
-            slot = hit;
+            var hits = deps.Where(w => slot > w.lo && slot < w.hi).ToList();
+            if (hits.Count == 0) break;
+            var top = hits.MaxBy(w => w.hi);
+            slot = top.hi; after = top.who;
         }
         return slot;
+        string Who(Flight o) => o == UserArr ? $"{o.Callsign} (you)" : o.Callsign;
     }
 
     // ------------------------------------------------------------------ main step
@@ -998,7 +1005,16 @@ public sealed partial class TrafficWorld
                     if (f == UserArr) _userAheadSlot = prevSlot + gapNeed + 15;
                 }
                 else if (f == UserArr) _userNoneAhead = true;
-                if (f != UserArr && f.Rwy is not null) slot = DependentSlot(f, slot, placedAll);
+                if (f != UserArr && f.Rwy is not null)
+                {
+                    var s0 = slot;
+                    slot = DependentSlot(f, slot, placedAll, out var after);
+                    if (slot - s0 > 20 && after is not null && f.DepNote != after)
+                    {
+                        f.DepNote = after;
+                        Log($"{f.Callsign}: planned to land {slot - s0:0} s later on {f.Rwy.Ident}, after {after}");
+                    }
+                }
                 var outNm = f.Path is null ? 0 : (f.ThrS - f.S) / Geo2.MPerNm;
                 // Left out further in too (overload, KATL 21 Nov on a stale ATIS: break-off after break-off close in):
                 // 15 minutes late down to 60 nm out, before it's in the sequence near the field, where the only tools

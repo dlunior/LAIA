@@ -449,11 +449,11 @@ Console.WriteLine("== The user landing 27 with LAIA's arrivals for the crossing 
     world.SelectRunways(true);
     var e27 = apt.Ends.First(e => e.Ident == "27"); var e36 = apt.Ends.First(e => e.Ident == "36");
     var xing = new V2(1200, 0);
-    var u = e27.Threshold - e27.Dir * (20 * nm);
+    var u = e27.Threshold - e27.Dir * (38 * nm);
     world.UserCallsign = "UAL1196"; world.UserType = "B738"; world.UserDestination = "TEST";
     world.UserOnGround = false; world.UserTrack = e27.Heading; world.UserGs = 160; world.UserAltFt = 6000; world.UserPos = u;
     var ais = new List<Flight>();
-    foreach (var d in new[] { 12.0, 15, 18, 21, 24 })
+    foreach (var d in new[] { 40.0, 46, 52, 58, 64 })
         if (world.SpawnArrival(d, false, null, (e36, null)) is { } a) ais.Add(a);
     double userThr = -1, userPass = -1;
     var thr = new Dictionary<string, double>(); var pass = new Dictionary<string, double>(); var prev = new Dictionary<string, double>();
@@ -462,7 +462,7 @@ Console.WriteLine("== The user landing 27 with LAIA's arrivals for the crossing 
         if (userThr < 0 || userPass < 0)
         {
             var left = -e27.Along(u) / nm;
-            var kt = left > 6 ? 160 : left > 0 ? 135 : 120;
+            var kt = left > 20 ? 230 : left > 6 ? 170 : left > 0 ? 135 : 120;
             u += e27.Dir * (kt * Geo2.MpsPerKt * 0.5);
             world.UserGs = kt; world.UserAltFt = Math.Max(apt.ElevationFt, Math.Min(6000, apt.ElevationFt + left * 318));
             if (userThr < 0 && e27.Along(u) >= 0) userThr = world.Time;
@@ -489,9 +489,9 @@ Console.WriteLine("== The user landing 27 with LAIA's arrivals for the crossing 
     }
     var ga = log.Count(l => l.Contains("landing the crossing runway"));
     Console.WriteLine($"  you over the 27 threshold at {userThr:0}; 36 thresholds: {string.Join(", ", thr.Select(x => $"{x.Key} {x.Value:0}"))}; go-arounds for you {ga}");
-    foreach (var l in log.Where(l => l.Contains("landing after") || l.Contains("crossing runway")).Take(8)) Console.WriteLine("    " + l);
+    foreach (var l in log.Where(l => l.Contains("landing after") || l.Contains("crossing runway") || l.Contains("later on 36")).Take(12)) Console.WriteLine("    " + l);
     foreach (var b in bad) Console.WriteLine("    " + b);
-    Check(userThr > 0 && thr.Count >= 3, $"you and LAIA's arrivals to 36 all land ({thr.Count} on 36)");
+    Check(userThr > 0 && thr.Count >= 4, $"you and LAIA's arrivals to 36 all land ({thr.Count} on 36)");
     Check(bad.Count == 0, "none of LAIA's arrivals to 36 meets you at the intersection: each is through it before you reach the 27 threshold, or crosses its threshold after you're through");
     Check(ga == 0, $"it's done on the approach, not by go-arounds ({ga})");
 }
