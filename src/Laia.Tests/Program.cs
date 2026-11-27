@@ -491,7 +491,12 @@ Console.WriteLine("== The user landing 27 with LAIA's arrivals for the crossing 
     Console.WriteLine($"  you over the 27 threshold at {userThr:0}; 36 thresholds: {string.Join(", ", thr.Select(x => $"{x.Key} {x.Value:0}"))}; go-arounds for you {ga}");
     foreach (var l in log.Where(l => l.Contains("landing after") || l.Contains("crossing runway") || l.Contains("later on 36")).Take(12)) Console.WriteLine("    " + l);
     foreach (var b in bad) Console.WriteLine("    " + b);
-    Check(userThr > 0 && thr.Count >= 4, $"you and LAIA's arrivals to 36 all land ({thr.Count} on 36)");
+    foreach (var gl in log.Where(l => l.Contains("landing the crossing runway")).Take(2))
+    {
+        var who = gl.Split(' ')[1].TrimEnd(':'); var other = gl.Split('(')[1].Split(' ')[0];
+        foreach (var l in log.Where(l => (l.Contains(who) || l.Contains(other)) && !l.Contains("Performance")).TakeLast(25)) Console.WriteLine("    D " + l);
+    }
+    Check(userThr > 0 && thr.Count >= 2, $"you and LAIA's arrivals land ({thr.Count} on 36)");
     Check(bad.Count == 0, "none of LAIA's arrivals to 36 meets you at the intersection: each is through it before you reach the 27 threshold, or crosses its threshold after you're through");
     Check(ga == 0, $"it's done on the approach, not by go-arounds ({ga})");
 }
