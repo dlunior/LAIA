@@ -388,6 +388,159 @@ Console.WriteLine("== Crossing runways at Busy for an hour: land 27, depart 36 a
     Check(vecs * 10.0 / landings <= 2, "and at most 2 vectors for spacing per 10 landings");
 }
 
+Console.WriteLine("== Landing on two crossing runways (27 Nov, KPIT: AAL814 on 32 crossed its threshold 4 s after the user passed the 28L/32 intersection)");
+{
+    var data = TestAirport.Build(false);
+    var map = new LocalMap(40, -75);
+    // Runway 18/36 crossing 27 300 m past 27's threshold (as 32 crosses 28L at Pittsburgh); both used for landings.
+    var (clat, clon) = map.ToLatLon(new V2(1200, 0));
+    data.Runways.Add(new AirportRunway { Lat = clat, Lon = clon, ElevationM = 10, Heading = 0, LengthM = 2500, WidthM = 45, PrimaryNumber = 36, SecondaryNumber = 18 });
+    var apt = new AirportModel(data);
+    var world = new TrafficWorld(apt, new TestSource(), seed: 27) { Level = TrafficLevel.Busy, Wind = new Wind(320, 8) };
+    var log = new List<string>(); world.Log = l => log.Add($"{world.Time:0} {l}");
+    world.AtisText = "TEST ARR INFO Q. ILS RWY 27 AND RWY 36 APCHS IN USE. DEPG RWY 27.";
+    world.SelectRunways(true);
+    var e27 = apt.Ends.First(e => e.Ident == "27"); var e36 = apt.Ends.First(e => e.Ident == "36");
+    var xing = new V2(1200, 0);
+    Console.WriteLine($"  landing {string.Join(", ", world.ArrRwys.Select(e => e.Ident))}");
+    // Each arrival's threshold time, and when it passed the intersection (or left the runway before it).
+    var thr = new Dictionary<string, (string rwy, double t)>(); var passed = new Dictionary<string, double>();
+    var prevAlong = new Dictionary<string, double>();
+    for (var t = 0.0; t < 3600; t += 0.5)
+    {
+        world.Step(0.5);
+        foreach (var f in world.Flights.Where(f => f.Kind == "arrival" && f.Rwy is not null && (f.Rwy == e27 || f.Rwy == e36)))
+        {
+            var along = f.Rwy!.Along(f.Pos);
+            var key = f.Callsign + "#" + (f.WentAround ? "2" : "1");
+            if (prevAlong.TryGetValue(key, out var pa) && pa < 0 && along >= 0 && Math.Abs(f.Rwy.Offset(f.Pos)) < 200 && f.AltFt - apt.ElevationFt < 200) thr[key] = (f.Rwy.Ident, world.Time);
+            var x = f.Rwy == e27 ? e27.Along(xing) : e36.Along(xing);
+            if (thr.ContainsKey(key) && !passed.ContainsKey(key) && (along > x + 30 || (f.OnGround && f.OnRunway != f.Rwy.Runway))) passed[key] = world.Time;
+            prevAlong[key] = along;
+        }
+    }
+    // 3-10-4: when an arrival crosses its threshold, every arrival that crossed the other runway's threshold before it
+    // has passed the intersection (or turned off before it).
+    var conflicts = new List<string>();
+    foreach (var (k, a) in thr)
+        foreach (var (k2, b) in thr)
+            if (a.rwy != b.rwy && b.t <= a.t && (!passed.TryGetValue(k2, out var pt) || pt > a.t))
+                conflicts.Add($"{k.Split('#')[0]} over the {a.rwy} threshold at {a.t:0} with {k2.Split('#')[0]} ({b.rwy}, threshold {b.t:0}) not yet through the intersection");
+    var on27 = thr.Count(x => x.Value.rwy == "27"); var on36 = thr.Count(x => x.Value.rwy == "36");
+    var gaX = log.Count(l => l.Contains("landing the crossing runway"));
+    Console.WriteLine($"  {on27} landed on 27, {on36} on 36; conflicts {conflicts.Count}; go-arounds for a crossing arrival {gaX}");
+    foreach (var c in conflicts.Take(4)) Console.WriteLine("    " + c);
+    Check(on27 >= 6 && on36 >= 4, $"both runways take landings ({on27} on 27, {on36} on 36)");
+    Check(conflicts.Count == 0, "no arrival crosses its threshold before one landing the crossing runway ahead of it is through the intersection");
+    Check(gaX <= 1, $"the approach sequencing staggers the two streams: go-arounds for a crossing arrival stay rare ({gaX})");
+}
+
+Console.WriteLine("== The user landing 27 with LAIA's arrivals for the crossing runway 36 timed to meet them (the KPIT case)");
+{
+    var nm = Geo2.MPerNm;
+    var data = TestAirport.Build(false);
+    var map = new LocalMap(40, -75);
+    var (clat, clon) = map.ToLatLon(new V2(1200, 0));
+    data.Runways.Add(new AirportRunway { Lat = clat, Lon = clon, ElevationM = 10, Heading = 0, LengthM = 2500, WidthM = 45, PrimaryNumber = 36, SecondaryNumber = 18 });
+    var apt = new AirportModel(data);
+    var world = new TrafficWorld(apt, new TestSource(), seed: 31) { Automatic = false, Wind = new Wind(320, 8) };
+    var log = new List<string>(); world.Log = l => log.Add($"{world.Time:0} {l}");
+    world.AtisText = "TEST ARR INFO Q. ILS RWY 27 AND RWY 36 APCHS IN USE. DEPG RWY 27.";
+    world.SelectRunways(true);
+    var e27 = apt.Ends.First(e => e.Ident == "27"); var e36 = apt.Ends.First(e => e.Ident == "36");
+    var xing = new V2(1200, 0);
+    var u = e27.Threshold - e27.Dir * (38 * nm);
+    world.UserCallsign = "UAL1196"; world.UserType = "B738"; world.UserDestination = "TEST";
+    world.UserOnGround = false; world.UserTrack = e27.Heading; world.UserGs = 160; world.UserAltFt = 6000; world.UserPos = u;
+    var ais = new List<Flight>();
+    foreach (var d in new[] { 40.0, 46, 52, 58, 64 })
+        if (world.SpawnArrival(d, false, null, (e36, null)) is { } a) ais.Add(a);
+    double userThr = -1, userPass = -1;
+    var thr = new Dictionary<string, double>(); var pass = new Dictionary<string, double>(); var prev = new Dictionary<string, double>();
+    for (var t = 0.0; t < 2400; t += 0.5)
+    {
+        if (userThr < 0 || userPass < 0)
+        {
+            var left = -e27.Along(u) / nm;
+            var kt = left > 20 ? 230 : left > 6 ? 170 : left > 0 ? 135 : 120;
+            u += e27.Dir * (kt * Geo2.MpsPerKt * 0.5);
+            world.UserGs = kt; world.UserAltFt = Math.Max(apt.ElevationFt, Math.Min(6000, apt.ElevationFt + left * 318));
+            if (userThr < 0 && e27.Along(u) >= 0) userThr = world.Time;
+            if (userPass < 0 && e27.Along(u) > e27.Along(xing) + 30) { userPass = world.Time; world.UserOnGround = true; }
+        }
+        world.UserPos = u;
+        world.Step(0.5);
+        foreach (var f in ais.Where(f => !f.Done && f.Rwy == e36))
+        {
+            var key = f.Callsign + (f.WentAround ? "#2" : "");
+            var al = e36.Along(f.Pos);
+            if (prev.TryGetValue(key, out var pa) && pa < 0 && al >= 0 && f.AltFt - apt.ElevationFt < 200) thr[key] = world.Time;
+            if (thr.ContainsKey(key) && !pass.ContainsKey(key) && (al > e36.Along(xing) + 30 || (f.OnGround && f.OnRunway != e36.Runway))) pass[key] = world.Time;
+            prev[key] = al;
+        }
+        if (userPass > 0 && ais.All(f => f.Done || f.OnGround)) break;
+    }
+    var bad = new List<string>();
+    foreach (var (k, t36) in thr)
+    {
+        // It went first: through the intersection before the user crossed the 27 threshold; or after: the user was through first.
+        var p36 = pass.TryGetValue(k, out var pp) ? pp : double.PositiveInfinity;
+        if (!(p36 <= userThr || (userPass > 0 && userPass <= t36))) bad.Add($"{k}: 36 threshold {t36:0}, through {p36:0}; you: 27 threshold {userThr:0}, through {userPass:0}");
+    }
+    var ga = log.Count(l => l.Contains("landing the crossing runway"));
+    Console.WriteLine($"  you over the 27 threshold at {userThr:0}; 36 thresholds: {string.Join(", ", thr.Select(x => $"{x.Key} {x.Value:0}"))}; go-arounds for you {ga}");
+    foreach (var l in log.Where(l => l.Contains("landing after") || l.Contains("crossing runway") || l.Contains("later on 36")).Take(12)) Console.WriteLine("    " + l);
+    foreach (var b in bad) Console.WriteLine("    " + b);
+    foreach (var gl in log.Where(l => l.Contains("landing the crossing runway")).Take(2))
+    {
+        var who = gl.Split(' ')[1].TrimEnd(':'); var other = gl.Split('(')[1].Split(' ')[0];
+        foreach (var l in log.Where(l => (l.Contains(who) || l.Contains(other)) && !l.Contains("Performance")).TakeLast(25)) Console.WriteLine("    D " + l);
+    }
+    Check(userThr > 0 && thr.Count >= 2, $"you and LAIA's arrivals land ({thr.Count} on 36)");
+    Check(bad.Count == 0, "none of LAIA's arrivals to 36 meets you at the intersection: each is through it before you reach the 27 threshold, or crosses its threshold after you're through");
+    Check(ga == 0, $"it's done on the approach, not by go-arounds ({ga})");
+}
+
+Console.WriteLine("== Close parallels under 2,500 ft: one runway for wake (7110.65 3-9-6 f)");
+{
+    var data = TestAirport.Build(false);
+    var map = new LocalMap(40, -75);
+    var (pla, plo) = map.ToLatLon(new V2(0, 300));    // 300 m (about 1,000 ft) north
+    data.Runways.Add(new AirportRunway { Lat = pla, Lon = plo, ElevationM = 10, Heading = 90, LengthM = 3000, WidthM = 45, PrimaryNumber = 9, PrimaryDesignator = 1, SecondaryNumber = 27, SecondaryDesignator = 2 });
+    var (fla, flo) = map.ToLatLon(new V2(0, 1500));   // and one 1,500 m north
+    data.Runways.Add(new AirportRunway { Lat = fla, Lon = flo, ElevationM = 10, Heading = 90, LengthM = 3000, WidthM = 45, PrimaryNumber = 8, SecondaryNumber = 26 });
+    var apt = new AirportModel(data);
+    var w = new TrafficWorld(apt, new TestSource(), seed: 5) { Automatic = false, Wind = new Wind(270, 10) };
+    var e27 = apt.Ends.First(e => e.Ident == "27"); var e27R = apt.Ends.First(e => e.Ident == "27R"); var e26 = apt.Ends.First(e => e.Ident == "26");
+    Check(TrafficWorld.CloseParallel(e27, e27R) && !TrafficWorld.CloseParallel(e27, e26), "27/27R 300 m apart are close parallels; 26, 1,500 m away, is not");
+    var heavy = new Flight { Id = "H1", Callsign = "HVY1", Airline = "DAL", Type = "B77W", Kind = "departure", P = Perf.For("B77W"), Rwy = e27R, Pos = e27R.Threshold, OnGround = false, LiftoffTime = w.Time - 30 };
+    w.NoteDeparture(heavy);
+    var next = new Flight { Id = "N1", Callsign = "NXT1", Airline = "DAL", Type = "B738", Kind = "departure", P = Perf.For("B738"), Rwy = e27, Pos = e27.Threshold };
+    var far = new Flight { Id = "N2", Callsign = "NXT2", Airline = "DAL", Type = "B738", Kind = "departure", P = Perf.For("B738"), Rwy = e26, Pos = e26.Threshold };
+    var wk = w.OtherRunwayWake(next);
+    Check(wk is > 80 and <= 90, $"a 737 off 27 waits the heavy's 2 minutes after it lifted off the close parallel 27R ({wk:0} s left)");
+    Check(w.OtherRunwayWake(far) == 0, "not off the parallel 1,500 m away");
+}
+
+Console.WriteLine("== Crossing-runway wake (7110.65 3-9-8): 2 minutes behind a heavy departing a crossing runway");
+{
+    var data = TestAirport.Build(false);
+    var map = new LocalMap(40, -75);
+    var (clat, clon) = map.ToLatLon(new V2(0, 0));
+    data.Runways.Add(new AirportRunway { Lat = clat, Lon = clon, ElevationM = 10, Heading = 0, LengthM = 2500, WidthM = 45, PrimaryNumber = 36, SecondaryNumber = 18 });
+    var apt = new AirportModel(data);
+    var w = new TrafficWorld(apt, new TestSource(), seed: 6) { Automatic = false, Wind = new Wind(300, 10) };
+    var e27 = apt.Ends.First(e => e.Ident == "27"); var e36 = apt.Ends.First(e => e.Ident == "36");
+    var heavy = new Flight { Id = "H2", Callsign = "HVY2", Airline = "DAL", Type = "B744", Kind = "departure", P = Perf.For("B744"), Rwy = e36, Pos = e36.Threshold, OnGround = false, LiftoffTime = w.Time - 60 };
+    w.NoteDeparture(heavy);
+    var next = new Flight { Id = "N3", Callsign = "NXT3", Airline = "DAL", Type = "A320", Kind = "departure", P = Perf.For("A320"), Rwy = e27, Pos = e27.Threshold };
+    var wk = w.OtherRunwayWake(next);
+    Check(wk is > 50 and <= 60, $"an A320 off 27 waits out 2 minutes behind a 747 that lifted off the crossing runway 36 ({wk:0} s left)");
+    var med = new Flight { Id = "M1", Callsign = "MED1", Airline = "DAL", Type = "B738", Kind = "departure", P = Perf.For("B738"), Rwy = e36, Pos = e36.Threshold, OnGround = false, LiftoffTime = w.Time - 10 };
+    w.NoteDeparture(med);
+    Check(w.OtherRunwayWake(next) == 0, "no wake time behind a 737 on the crossing runway");
+}
+
 Console.WriteLine("== Crossing a runway between departures (23 Nov, KATL: JBU1798 held short of 27R for 12+ minutes behind line up and wait)");
 {
     var data = TestAirport.Build(false);

@@ -91,6 +91,8 @@ public sealed class Flight
     public bool JunctionHeld, GoFirstFailed;
     public HashSet<int> LeftRunways = new();
     public string? LeaderCs;
+    /// <summary>The last arrival on a crossing runway or close parallel its landing slot was moved behind (logged once).</summary>
+    public string? DepNote;
     public double GoFirstAt = -1, JhCheckAt = -1e9, JunctionHeldSince = -1e9, JunctionFreeUntil = -1e9;
     public (string name, Flight ahead)? JhLast;
     public string ExitNote = "";
@@ -705,6 +707,168 @@ public sealed partial class TrafficWorld
         return (a.Along(x), b.Along(x));
     }
 
+    /// <summary>
+    /// Parallel runways, same direction, whose centrelines are less than 2,500 ft (762 m) apart and overlap: one runway
+    /// for wake turbulence (7110.65 3-9-6 f, 5-5-4 g, 6-1-5).
+    /// </summary>
+    internal static bool CloseParallel(RunwayEnd a, RunwayEnd b) =>
+        a.Runway != b.Runway && Math.Abs(Geo2.Diff(a.Heading, b.Heading)) < 15 && Math.Abs(a.Offset(b.Threshold)) < 762
+        && a.Along(b.Threshold) < a.LengthM && a.Along(b.FarEnd) > 0;
+
+    /// <summary>
+    /// Seconds from crossing the threshold until a landing aircraft has passed a point this far down the runway — or has
+    /// turned off before it, whichever comes first: about 400 m to touchdown at the approach speed, then braking at about
+    /// 2.4 m/s² down to taxi speed.
+    /// </summary>
+    private double LandingTimeTo(RunwayEnd end, Perf p, double along)
+    {
+        var v0 = Math.Max(55, (p.Vapp - 5) * Kt);
+        double t;
+        if (along <= 400) t = Math.Max(0, along) / v0;
+        else
+        {
+            const double a = 2.4, vMin = 10;
+            var d = along - 400;
+            var dSlow = (v0 * v0 - vMin * vMin) / (2 * a);
+            t = 400 / v0 + (d <= dSlow ? (v0 - Math.Sqrt(v0 * v0 - 2 * a * d)) / a : (v0 - vMin) / a + (d - dSlow) / vMin);
+        }
+        return Math.Min(t, RunwayOccupancy(end, p));
+    }
+
+    /// <summary>
+    /// An arrival to <paramref name="end"/> (crossing this arrival's runway <paramref name="alongX"/> m past its
+    /// threshold) that is first to its threshold and won't be through the intersection, or off the runway before it,
+    /// <see cref="CrossingMarginSec"/> before this one reaches its threshold in <paramref name="toThr"/> s. Its callsign, or null.
+    /// </summary>
+    private string? CrossingArrivalAhead(Flight f, RunwayEnd mine, RunwayEnd end, double alongX, double toThr)
+    {
+        // Seconds until it has passed the intersection: NaN if it isn't landing there or is already through.
+        double Pass(V2 pos, double gs, double heading, bool onGround, double altFt, Perf p, out bool first)
+        {
+            first = false;
+            if (Math.Abs(Geo2.Diff(heading, end.Heading)) > 35) return double.NaN;
+            var along = end.Along(pos);
+            if (Math.Abs(end.Offset(pos)) > (along < 0 ? 900 : end.WidthM / 2 + 30)) return double.NaN;
+            if (along >= alongX - 30) return double.NaN;   // through it (or at it)
+            if (along < 0)
+            {
+                if (onGround || along < -4 * Geo2.MPerNm || altFt - end.ElevationFt > 1500) return double.NaN;
+                var toIts = -along / Math.Max(30, gs * Kt);
+                first = toIts < toThr;
+                return toIts + LandingTimeTo(end, p, alongX);
+            }
+            // On the runway, rolling out: it may turn off before the intersection.
+            first = true;
+            if (onGround && gs < 40 && alongX - along > 300) return double.NaN;
+            var v = Math.Max(5, gs * Kt);
+            return Math.Min((alongX - along) / v * 1.3, RunwayOccupancy(end, p));
+        }
+        foreach (var o in Flights)
+        {
+            if (o == f || o.Done || o.Kind != "arrival" || o.Rwy?.Runway != end.Runway || o.Phase is "go-around") continue;
+            var t = Pass(o.Pos, o.Gs, o.Heading, o.OnGround, o.AltFt, o.P, out var first);
+            if (first && !double.IsNaN(t) && t + CrossingMarginSec > toThr) return o.Callsign;
+        }
+        if (UserPos is { } u && UserArr is { } me0)
+        {
+            var t = Pass(u, UserGs, UserTrack, UserOnGround, UserAltFt, me0.P, out var first);
+            if (first && !double.IsNaN(t) && t + CrossingMarginSec > toThr) return $"{me0.Callsign} (you)";
+        }
+        else if (UserPos is { } u2 && UserOnGround)
+        {
+            var t = Pass(u2, UserGs, UserTrack, true, UserAltFt, Perf.For(UserType.Length > 0 ? UserType : "A320"), out var first);
+            if (first && !double.IsNaN(t) && UserGs > 30 && t + CrossingMarginSec > toThr) return "you";
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Close in: how much later (s) this arrival must land to keep the stagger with the arrivals to runways that depend on
+    /// its own that land before it — the user always, LAIA's own by the planned order (slot) — from the live predicted
+    /// times of both; and who that is. 0 when it fits.
+    /// </summary>
+    private (double add, string? who) DependentAdd(Flight f, double dth)
+    {
+        if (f.Rwy is not { } me) return (0, null);
+        var myT = Time + EtaToThreshold(f, dth);
+        var list = new List<(RunwayEnd end, double slot, Flight f)>();
+        var pool = UserArr is { } ua ? Flights.Append(ua) : Flights;
+        foreach (var o in pool)
+        {
+            if (o == f || o.Done || o.OnGround || o.Kind != "arrival" || o.Rwy is not { } oe || oe.Runway == me.Runway || o.Phase == "go-around") continue;
+            if (Crossing(me, oe) is null && !CloseParallel(me, oe)) continue;
+            var user = o == UserArr;
+            var od = (o.ThrS - o.S) / Geo2.MPerNm;
+            var tO = user ? (double.IsNaN(o.EtaSec) ? double.NaN : Time + o.EtaSec) : Time + EtaToThreshold(o, od);
+            if (double.IsNaN(tO)) continue;
+            // Who lands first: the user always; between LAIA's own, whichever will be there first now — the plan sets
+            // that order far out and speed flies it, but close in it's how they're really flying that counts (the offline
+            // test, 27 Nov: AAL724 for 27, vectored off late for spacing, was still "first" by its slot; SWA770 for 36
+            // waited for it, got to its threshold first anyway, and one of them had to go around).
+            var first = user || tO < myT;
+            if (first) list.Add((oe, tO, o));
+        }
+        if (list.Count == 0) return (0, null);
+        var need = DependentSlot(f, myT, list) - myT;
+        if (need <= 0) return (0, null);
+        var lead = list.Where(x => x.slot <= myT + need).OrderByDescending(x => x.slot).First();
+        var what = Crossing(me, lead.end) is not null ? "on the crossing runway" : "on the close parallel";
+        return (need, $"{(lead.f == UserArr ? lead.f.Callsign + " (you)" : lead.f.Callsign)} {what} {lead.end.Ident}");
+    }
+
+    /// <summary>Off its planned way in: on vectors, broken off or gone around and coming back round, or on a delay detour.</summary>
+    private bool OffPlan(Flight x) => x != UserArr && (x.Mgr is "vectored" or "vectored around" || x.Rejoin || x.WentAround || Time - x.LastVector < 240);
+
+    /// <summary>Margin (s) after the first arrival is through the intersection before the second may cross its threshold.</summary>
+    private const double CrossingMarginSec = 25;
+
+    /// <summary>
+    /// The earliest slot (threshold time) at or after <paramref name="slot"/> that keeps this arrival clear of the arrivals
+    /// already planned on runways that depend on its own: on a crossing runway, whoever is second may not cross its
+    /// threshold until the first has passed the intersection (or turned off before it), with a margin (3-10-4); on a close
+    /// parallel, the wake minimum behind a heavy or B757 as for one runway and a 1.5 nm stagger otherwise (dependent
+    /// approaches). Fitted ahead of one where it fits, else after it.
+    /// </summary>
+    private double DependentSlot(Flight f, double slot, List<(RunwayEnd end, double slot, Flight f)> placed) => DependentSlot(f, slot, placed, out _);
+
+    private double DependentSlot(Flight f, double slot, List<(RunwayEnd end, double slot, Flight f)> placed, out string? after)
+    {
+        after = null;
+        var me = f.Rwy!;
+        if (placed.Count == 0) return slot;
+        var deps = new List<(double lo, double hi, string who)>();   // forbidden windows for this arrival's threshold time
+        var gs = Math.Max(90, f.P.Vapp - WindAt(me.ElevationFt + 1000).Headwind(me.Heading)) / 3600.0;   // nm/s
+        foreach (var (oe, ts, o) in placed)
+        {
+            if (oe.Runway == me.Runway || o == f || double.IsNaN(ts)) continue;
+            // One off its plan doesn't hold up one on it (it fits in behind, close in).
+            if (OffPlan(o) && !OffPlan(f)) continue;
+            if (Crossing(me, oe) is { } x)
+            {
+                var po = LandingTimeTo(oe, o.P, x.alongB) + CrossingMarginSec;   // it first: this one waits for it to pass
+                var pf = LandingTimeTo(me, f.P, x.alongA) + CrossingMarginSec;   // this one first: it must be through before
+                deps.Add((ts - pf, ts + po, $"{Who(o)} on the crossing runway {oe.Ident}"));
+            }
+            else if (CloseParallel(me, oe))
+            {
+                var stagger = 1.5 / gs;
+                var behind = Math.Max(stagger, Cwt.WakeMiles(o.Wake, f.Wake) / gs);
+                var ahead = Math.Max(stagger, Cwt.WakeMiles(f.Wake, o.Wake) / gs);
+                deps.Add((ts - ahead, ts + behind, $"{Who(o)} on the close parallel {oe.Ident}"));
+            }
+        }
+        if (deps.Count == 0) return slot;
+        for (var it = 0; it < 50; it++)
+        {
+            var hits = deps.Where(w => slot > w.lo && slot < w.hi).ToList();
+            if (hits.Count == 0) break;
+            var top = hits.MaxBy(w => w.hi);
+            slot = top.hi; after = top.who;
+        }
+        return slot;
+        string Who(Flight o) => o == UserArr ? $"{o.Callsign} (you)" : o.Callsign;
+    }
+
     // ------------------------------------------------------------------ main step
 
     private double _userMovedAt = -1e9;
@@ -757,7 +921,15 @@ public sealed partial class TrafficWorld
         { _lastPlan = Time; try { PlanRunways(); } catch (Exception ex) { Log("Runway planning failed: " + ex.Message); } }
         var sequenced = Flights.Where(f => f.Kind == "arrival" && !f.OnGround && !f.Done && !double.IsNaN(f.EtaSec) && f.Rwy is not null && f.Phase != "go-around").ToList();
         if (UserArr is { } ua) sequenced.Add(ua);
-        foreach (var g in sequenced.GroupBy(f => f.Rwy!.Runway))
+        // Runways that depend on each other — two that cross (7110.65 3-10-4), or close parallels less than 2,500 ft
+        // apart (one runway for wake, 5-5-4) — are sequenced together (user, 27 Nov, KPIT: AAL814 landing 32 crossed its
+        // threshold 4 s after the user passed over the 28L/32 intersection: each runway had been planned on its own; "crossing
+        // runways needs proper approach sequencing as well"). The user's runway is planned first, then the busiest: each
+        // arrival on a runway planned later is fitted into the gaps the runways planned before it leave, so speed and the
+        // downwind take the stagger from far out, as for any slot.
+        var placedAll = new List<(RunwayEnd end, double slot, Flight f)>();
+        _userAheadSlot = double.NaN; _userNoneAhead = false;
+        foreach (var g in sequenced.GroupBy(f => f.Rwy!.Runway).OrderByDescending(g => UserArr is not null && g.Contains(UserArr)).ThenByDescending(g => g.Count()).ThenBy(g => g.Key))
         {
             var i = 0;
             Flight? prev = null; double prevSlot = 0;
@@ -838,6 +1010,18 @@ public sealed partial class TrafficWorld
                         pending--;
                     }
                     slot = Math.Max(slot, prevSlot + gapNeed + 15);
+                    if (f == UserArr) _userAheadSlot = prevSlot + gapNeed + 15;
+                }
+                else if (f == UserArr) _userNoneAhead = true;
+                if (f != UserArr && f.Rwy is not null)
+                {
+                    var s0 = slot;
+                    slot = DependentSlot(f, slot, placedAll, out var after);
+                    if (slot - s0 > 20 && after is not null && f.DepNote != after)
+                    {
+                        f.DepNote = after;
+                        Log($"{f.Callsign}: planned to land {slot - s0:0} s later on {f.Rwy.Ident}, after {after}");
+                    }
                 }
                 var outNm = f.Path is null ? 0 : (f.ThrS - f.S) / Geo2.MPerNm;
                 // Left out further in too (overload, KATL 21 Nov on a stale ATIS: break-off after break-off close in):
@@ -860,6 +1044,8 @@ public sealed partial class TrafficWorld
                     }
                 }
                 _timeline[g.Key].Add((slot, f));
+                // The user's actual predicted time (not their held place) for the runways that depend on theirs.
+                if (f.Rwy is not null) placedAll.Add((f.Rwy, f == UserArr && !double.IsNaN(f.EtaSec) ? Time + f.EtaSec : slot, f));
                 if (f == UserArr) { prev = f; prevSlot = slot; continue; }
                 f.Delay = slot - f.EtaNominal;
                 if (!f.Frozen && f.Delay >= 60 && !f.Test && !(Planner && ArrRwys.Count >= 2))
@@ -2441,7 +2627,47 @@ public sealed partial class TrafficWorld
     /// wake turbulence time by CWT category (7110.65 3-9-6), and radar separation once airborne — 1 nm when the
     /// two courses diverge by 15° or more right after takeoff (5-8-3), else 3 nm.
     /// </summary>
-    private double WakeRemaining(Flight f, bool plan = true)
+    private double WakeRemaining(Flight f, bool plan = true) => Math.Max(SameRunwayWake(f, plan), OtherRunwayWake(f));
+
+    /// <summary>
+    /// Wake time behind a heavy, B757 or super on another runway (seconds still to wait): one departing a close parallel
+    /// less than 2,500 ft away — one runway for wake (7110.65 3-9-6 f) — or departing a crossing runway (3-9-8: projected
+    /// flight paths cross), counted from its lift-off; and one that landed on a crossing runway whose airborne path this
+    /// departure will fly through (the intersection short of its touchdown), counted from its touchdown — 2 minutes (3).
+    /// </summary>
+    internal double OtherRunwayWake(Flight f)
+    {
+        if (f.Rwy is not { } d) return 0;
+        var wait = 0.0;
+        foreach (var e in Apt.Ends)
+        {
+            if (e.Runway == d.Runway) continue;
+            var close = CloseParallel(d, e);
+            var x = close ? null : Crossing(d, e);
+            if (!close && x is null) continue;
+            if (_lastDep.GetValueOrDefault(e.Runway) is { Done: false } l && l.Rwy?.Runway == e.Runway && Cwt.DepartureSeconds(l.Wake, f.Wake) is > 0 and var secs)
+            {
+                if (l.OnGround && l.Phase is "takeoff roll" or "lined up")
+                {
+                    var acc = Math.Max(0.5, l.P.RollAccel * 0.5144);
+                    var toLift = Math.Max(0, ((l.P.Vr + 7) * 0.5144 - l.Gs * 0.5144) / acc) + (l.Phase == "takeoff roll" ? 0 : 10);
+                    wait = Math.Max(wait, toLift + secs);
+                }
+                else if (!l.OnGround && !double.IsNaN(l.LiftoffTime)) wait = Math.Max(wait, secs - (Time - l.LiftoffTime));
+            }
+            if (x is { } xx && _lastLanding.TryGetValue(e.Runway, out var ll) && ll.f.Rwy is { } le && Cwt.DepartureSeconds(ll.f.Wake, f.Wake) is > 0 and var s2)
+            {
+                var alongOnArr = le == e ? xx.alongB : e.LengthM - xx.alongB;
+                if (alongOnArr < 450) wait = Math.Max(wait, s2 - (Time - ll.t));
+            }
+        }
+        return Math.Max(0, wait);
+    }
+
+    /// <summary>For the tests: the last departure from its runway.</summary>
+    internal void NoteDeparture(Flight f) { if (f.Rwy is not null) _lastDep[f.Rwy.Runway] = f; }
+
+    private double SameRunwayWake(Flight f, bool plan)
     {
         var l = f.Rwy is null ? null : _lastDep.GetValueOrDefault(f.Rwy.Runway);
         if (l is null || l.Done || l.Rwy is null || f.Rwy is null || l.Rwy.Runway != f.Rwy.Runway) return 0;
@@ -3966,9 +4192,15 @@ public sealed partial class TrafficWorld
             var nmR = Geo2.MPerNm;
             for (var sR = 0.0; sR < f.ThrS - 8 * nmR; sR += 3 * nmR)
             {
-                var alt = RealAltAt(rwy, f.Path.At(sR).p);
+                var at = f.Path.At(sR);
+                var alt = RealAltAt(rwy, at.p, at.dir);
                 if (double.IsNaN(alt)) continue;
                 var ceil = Math.Ceiling((alt + 500) / 100) * 100;
+                // Never one far under this arrival's own descent for the miles it still has to fly (27 Nov, KJFK: the
+                // real-track downwind for 22L crosses the final 2 nm out; the real arrivals' altitude there — on short
+                // final — became a ceiling 25 flying miles from landing, and AAL234, JBU1119, AAL307 and JBU2824 came down
+                // to 853 ft, flew the downwind level there and went around "not stable, 12 nm out at 855 ft").
+                if (ceil < ProfileLow(rwy, (f.ThrS - sR) / nmR) - 1500) continue;
                 // Published restrictions win (user, 19 Nov: "make sure STAR altitude restrictions trump ADSB data"): no
                 // real-traffic ceiling under a published floor still ahead, none near a published limit, and none
                 // tighter than the 3:1 descent to a published "at or below" ahead would allow anyway is needed.
@@ -4251,8 +4483,13 @@ public sealed partial class TrafficWorld
         return new AirPoint(q, "", 0, double.IsNaN(ceil) ? 0 : Math.Ceiling((ceil + 500) / 100) * 100);
     }
     private AirportProfile? _altGridFor;
-    private readonly Dictionary<string, Dictionary<(int, int), List<double>>> _altGrid = new();
-    private double RealAltAt(RunwayEnd rwy, V2 q)
+    private readonly Dictionary<string, Dictionary<(int, int), List<(double alt, double brg)>>> _altGrid = new();
+    /// <summary>
+    /// The median altitude of real arrivals to this runway within about a mile of <paramref name="q"/> (five or more) —
+    /// only those going the same way (within 60°) when <paramref name="dir"/> is given: a path that crosses the final
+    /// on its downwind isn't flying the final there.
+    /// </summary>
+    private double RealAltAt(RunwayEnd rwy, V2 q, double dir = double.NaN)
     {
         if (Learned is not { Samples.Count: > 0 } prof) return double.NaN;
         if (!ReferenceEquals(_altGridFor, prof)) { _altGrid.Clear(); _altGridFor = prof; }
@@ -4264,14 +4501,17 @@ public sealed partial class TrafficWorld
             {
                 if (smp.Kind != "arrival" || smp.Runway != rwy.Ident) continue;
                 var seen = new HashSet<(int, int)>();
+                V2? prevXy = null;
                 foreach (var pt in smp.Points)
                 {
                     if (pt.Length < 3 || pt[2] <= 0) continue;
                     var xy = Apt.Map.ToXY(pt[0], pt[1]);
+                    var brg = prevXy is { } pv && (xy - pv).Length > 50 ? (xy - pv).Bearing : double.NaN;
+                    prevXy = xy;
                     var key = ((int)Math.Floor(xy.X / nm), (int)Math.Floor(xy.Y / nm));
                     if (!seen.Add(key)) continue;   // each real aircraft once per cell
-                    if (!grid.TryGetValue(key, out var l)) grid[key] = l = new List<double>();
-                    l.Add(pt[2]);
+                    if (!grid.TryGetValue(key, out var l)) grid[key] = l = new List<(double, double)>();
+                    l.Add((pt[2], brg));
                 }
             }
             _altGrid[rwy.Ident] = grid;
@@ -4279,7 +4519,8 @@ public sealed partial class TrafficWorld
         var c = ((int)Math.Floor(q.X / nm), (int)Math.Floor(q.Y / nm));
         var alts = new List<double>();
         for (var dx = -1; dx <= 1; dx++) for (var dy = -1; dy <= 1; dy++)
-            if (grid.TryGetValue((c.Item1 + dx, c.Item2 + dy), out var l)) alts.AddRange(l);
+            if (grid.TryGetValue((c.Item1 + dx, c.Item2 + dy), out var l))
+                alts.AddRange(l.Where(x => double.IsNaN(dir) || double.IsNaN(x.brg) || Math.Abs(Geo2.Diff(x.brg, dir)) <= 60).Select(x => x.alt));
         if (alts.Count < 5) return double.NaN;
         alts.Sort();
         return alts[alts.Count / 2];
@@ -7479,6 +7720,31 @@ public sealed partial class TrafficWorld
                 var od = o.OnGround ? -1 : (o.ThrS - o.S) / Geo2.MPerNm;
                 if (od < dth && od > leaderD) { leaderD = od; leader = o; }
             }
+            // Arrivals to a crossing runway or a close parallel (sequenced together; user, 27 Nov: "crossing runways needs
+            // proper approach sequencing as well"): close in, the base turn and speed also keep the stagger with the one
+            // this arrival lands after there — from both aircraft's live predicted times, as for the one ahead.
+            var (depAdd, depWho) = dth > 4 && dth < 45 && Time - f.LastTrombone > 8 ? DependentAdd(f, dth) : (0.0, (string?)null);
+            if (depAdd > 15 && dth > 5)
+            {
+                var jet = f.P.Family != "turboprop";
+                var floor = dth > 20 ? (jet ? 210 : 200) : (jet ? 170 : 150);
+                target = Math.Min(target, Math.Round(Math.Max(floor, f.P.Vapp) / 5) * 5);
+            }
+            if (depAdd > 10 && (leader is null || leader.OnGround || dth >= 45) && Time - f.LastVector > 30)
+            {
+                f.LastTrombone = Time;
+                f.TromboneAdd = depAdd;
+                f.TromboneLeft = Trombone(f, depAdd, $"landing after {depWho}, {depAdd:0} s to lose");
+                if (double.IsNaN(f.TromboneLeft) && f.Fan is not null) f.TromboneLeft = FanPick(f, depAdd, $"landing after {depWho}, {depAdd:0} s to lose");
+                // Nothing to stretch (straight in): vectors while there's room, else an early break-off rather than a
+                // go-around at half a mile.
+                if (double.IsNaN(f.TromboneLeft) || f.TromboneLeft > 40)
+                {
+                    var onFin = Math.Abs(rwy.Offset(f.Pos)) < 0.6 * Geo2.MPerNm && rwy.Along(f.Pos) < 0;
+                    if (dth > 13 && depAdd > 30 && Time - f.LastVector > 240 && Vector(f, depAdd + 15, $"landing after {depWho}, {depAdd:0} s short")) return;
+                    if (dth is > 5 and <= 12 && depAdd > 20 && onFin && Time - f.LastOrbit > 240) { BreakOff(f, $"landing after {depWho}, {depAdd:0} s short"); return; }
+                }
+            }
             f.LeaderCs = leader?.Callsign;
             if (leader is not null && !leader.OnGround && dth < 45)
             {
@@ -7506,6 +7772,8 @@ public sealed partial class TrafficWorld
                 // Only for real spacing (wake, radar, runway occupancy): gaps for departures are made with speed, never
                 // by breaking someone off.
                 var short_ = ThresholdGapNeeded(leader, f, forDepartures: false) - gapSec;
+                // The stagger with an arrival to a crossing runway or close parallel counts as spacing too.
+                if (depAdd > 0) short_ = Math.Max(short_, depAdd);
                 // What speed control can still absorb before 20 nm (250 → 210 kt) and inside it (down to the 170 kt
                 // floor): a hold only when the shortfall is more than that.
                 if (!(gap > 0 && tooCloseNow(gap, needNm))) short_ -= Math.Max(0, dth - 20) * (3600 / 210.0 - 3600 / 250.0) + (dth > 12 ? 10 : 0);
@@ -7526,7 +7794,7 @@ public sealed partial class TrafficWorld
                 {
                     f.LastTrombone = Time;
                     var wantGap = ThresholdGapNeeded(leader, f, forDepartures: false) + 10;
-                    var add = wantGap - gapSec;
+                    var add = Math.Max(wantGap - gapSec, depAdd);
                     // Never catching up on a leader that isn't on its plan — broken off, rejoining, on vectors or just
                     // gone around: its predicted time is far too late (21 Nov, KATL: SWA727 took a shorter real track to
                     // close "405 s behind DAL3127" while DAL3127 was on its second break-off loop; DAL3127 landed first
@@ -7673,6 +7941,10 @@ public sealed partial class TrafficWorld
                     var dep = Flights.FirstOrDefault(o => o.Phase == "takeoff roll" && o.Rwy == end && o.Rwy.Along(o.Pos) < x.Value.alongB + 30 &&
                         RollTime(o, x.Value.alongB) - (Time - o.PhaseTime) + 10 > tArr);
                     if (dep is not null) { GoAround(f, $"{dep.Callsign} departing the crossing runway {end.Ident}"); return; }
+                    // An arrival to the crossing runway — LAIA's or the user's — that crosses its threshold first and won't
+                    // have passed the intersection (or turned off before it) by the time this one crosses its threshold
+                    // (3-10-4). The approach sequencing staggers the two streams; this is the safety net.
+                    if (CrossingArrivalAhead(f, rwy, end, x.Value.alongB, toThreshold) is { } who) { GoAround(f, $"{who} landing the crossing runway {end.Ident}"); return; }
                 }
             }
             if (f.Phase == "flare" && f.AltFt <= rwy.ElevationFt)

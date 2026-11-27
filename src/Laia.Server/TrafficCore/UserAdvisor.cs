@@ -39,6 +39,10 @@ public sealed partial class TrafficWorld
     private readonly List<(double t, double eta)> _etaSamples = new();
     private bool _userReplanned;
     private double _userSlotRaw, _userResAt = double.NegativeInfinity;
+    /// <summary>From the last sequencing pass: the earliest the traffic ahead lets the user land (NaN when nobody is
+    /// ahead), and whether nobody is ahead of them on their runway.</summary>
+    private double _userAheadSlot = double.NaN;
+    private bool _userNoneAhead;
     private int _userRwyChanges;
     private string _seqSig = "";
     private double _seqSince, _seqNewUntil = double.MinValue;
@@ -402,7 +406,14 @@ public sealed partial class TrafficWorld
             var dScaled = eta - _userSlot; var dRaw = rawAbs - _userSlotRaw;
             var diff = Math.Sign(dScaled) == Math.Sign(dRaw) ? Math.Sign(dScaled) * Math.Min(Math.Abs(dScaled), Math.Abs(dRaw)) : 0;
             var limit = nm > 30 ? 120 : 180;
-            if (Math.Abs(diff) <= limit) _userOffSince = double.NaN;
+            // Nobody ahead and running early: the held place follows the user smoothly (nothing to keep it for, and the
+            // traffic behind should plan on when the user will really land).
+            if (_userNoneAhead && diff < -15)
+            {
+                var step = Math.Min(1, (Time - _userSlotAt) / 45);
+                _userSlot += (eta - _userSlot) * step; _userSlotRaw = rawAbs; _userOffSince = double.NaN;
+            }
+            else if (Math.Abs(diff) <= limit) _userOffSince = double.NaN;
             else if (double.IsNaN(_userOffSince)) _userOffSince = Time;
             else if (Time - _userOffSince >= 60)
             {
@@ -479,7 +490,10 @@ public sealed partial class TrafficWorld
         var dThr = me.Rwy is { } mr ? (u - mr.Threshold).Length / Geo2.MPerNm : double.PositiveInfinity;
         if (dThr <= 40 && UserAltFt <= Apt.ElevationFt + 8050) _userInSeq = true;
         var onArrival = _userInSeq;
-        var delayMin = double.IsNaN(_userSlot) || double.IsNaN(me.EtaSec) ? 0 : (_userSlot - (Time + me.EtaSec)) / 60;
+        // Delay is what the traffic ahead imposes: the earliest it lets the user land against when they would land on
+        // their own — none when nobody is ahead (user, 27 Nov, KPIT: "expect about 8 min of delay for 28L" as number 1
+        // with nobody ahead: it was the held place in the sequence against a newer, earlier estimate).
+        var delayMin = _userNoneAhead || double.IsNaN(_userAheadSlot) || double.IsNaN(me.EtaSec) ? 0 : Math.Max(0, (_userAheadSlot - (Time + me.EtaSec)) / 60);
         if (!onArrival)
         {
             // Spacing in the user's stream: the nearest of LAIA's arrivals ahead on the same STAR to the same runway.
