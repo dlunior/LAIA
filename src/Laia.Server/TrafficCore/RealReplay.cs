@@ -99,9 +99,10 @@ public static class RealReplay
 
         public string Line() =>
             $"{Airport} {Window}: {Landed} of {Scored} real arrivals flown to the runway (of {Spawned} brought in) — landing order as real {Pct(OrderSame)}, " +
-            $"landing time ±{TimeErr:0} s ({TimeBias:+0;-0} s on average), track miles {MilesDiff:+0.0;-0.0} nm against the real ones, path {PathNm:0.0} nm from the real one; " +
+            $"landing time ±{TimeErr:0} s ({Sg(TimeBias, "0")} s on average), track miles {Sg(MilesDiff, "0.0")} nm against the real ones, path {PathNm:0.0} nm from the real one; " +
             $"per 10 landings — {string.Join(", ", Per10.Select(kv => $"{kv.Key} {kv.Value:0.0}"))}";
         private static string Pct(double x) => double.IsNaN(x) ? "–" : $"{100 * x:0}%";
+        public static string Sg(double x, string fmt) => double.IsNaN(x) ? "–" : (Math.Round(x, fmt.Length > 1 ? 1 : 0) > 0 ? "+" : Math.Round(x, fmt.Length > 1 ? 1 : 0) < 0 ? "-" : "") + Math.Abs(x).ToString(fmt);
     }
 
     /// <summary>
@@ -190,7 +191,7 @@ public static class RealReplay
                 }
             if (pairs > 0) score.OrderSame = (double)same / pairs;
             foreach (var kv in landed.OrderByDescending(kv => Math.Abs(cross[kv.Key] + t0 - kv.Value.ThrT)).Take(3))
-                score.Worst.Add($"{kv.Key.Callsign} on {kv.Value.Runway}: {cross[kv.Key] + t0 - kv.Value.ThrT:+0;-0} s against its real landing, {Len(path[kv.Key]) / Geo2.MPerNm - kv.Value.TrackNm:+0.0;-0.0} nm");
+                score.Worst.Add($"{kv.Key.Callsign} on {kv.Value.Runway}: {Score.Sg(cross[kv.Key] + t0 - kv.Value.ThrT, "0")} s against its real landing, {Score.Sg(Len(path[kv.Key]) / Geo2.MPerNm - kv.Value.TrackNm, "0.0")} nm");
         }
         var per = Math.Max(1, score.Landed) / 10.0;
         int C(string k) => lines.Count(l => l.Contains(k));

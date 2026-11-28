@@ -319,7 +319,7 @@ public sealed class LearningService(ILogger<LearningService> log, AirportStore a
     }
 
     private static string Summary(List<ScoreRec> rs) =>
-        $"landing order as real {100 * Med(rs.Select(r => r.Order)):0}%, landing time ±{Med(rs.Select(r => r.TimeErr)):0} s, track miles {Med(rs.Select(r => r.Miles)):+0.0;-0.0} nm, " +
+        $"landing order as real {100 * Med(rs.Select(r => r.Order)):0}%, landing time ±{Med(rs.Select(r => r.TimeErr)):0} s, track miles {RealReplay.Score.Sg(Med(rs.Select(r => r.Miles)), "0.0")} nm, " +
         $"path {Med(rs.Select(r => r.PathNm)):0.0} nm from the real one, flown to the runway {100.0 * rs.Sum(r => r.Landed) / Math.Max(1, rs.Sum(r => r.Scored)):0}%; per 10 landings " +
         string.Join(", ", new[] { "go-arounds", "break-offs", "vectors", "routes refused", "separation warnings" }.Select(k => $"{k} {Med(rs.Select(r => r.Per10.GetValueOrDefault(k, double.NaN))):0.0}"));
 
@@ -334,7 +334,7 @@ public sealed class LearningService(ILogger<LearningService> log, AirportStore a
         }
         return string.Join(", ", new[]
         {
-            D("order", r => r.Order * 100, "0", false), D("time ±s", r => r.TimeErr, "0", true), D("track miles", r => r.Miles, "+0.0;-0.0", true), D("path nm", r => r.PathNm, "0.0", true),
+            D("order", r => r.Order * 100, "0", false), D("time ±s", r => r.TimeErr, "0", true), D("track miles", r => r.Miles, "0.0", true), D("path nm", r => r.PathNm, "0.0", true),
         });
     }
 
