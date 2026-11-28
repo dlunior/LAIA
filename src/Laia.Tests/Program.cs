@@ -408,7 +408,7 @@ Console.WriteLine("== The route check (27 Nov, KSFO: UAL436 flew a circle by the
     var r2 = TrafficWorld.RouteProblem(loop, t2, e27);
     Check(r2 is not null, $"UAL436's circle by the final is refused ({r2})");
     // On the final, then off it and back.
-    var leave = new List<V2> { P(-25, 0), P(-15, 0), P(-12, 2.5), P(-9, 0), P(-5, 0) };
+    var leave = new List<V2> { P(-24, 0), P(-15, 0), P(-12, 2.5), P(-9, 0), P(-5, 0) };
     var t3 = leave.Count; leave.Add(thr);
     var r3 = TrafficWorld.RouteProblem(leave, t3, e27);
     Check(r3 is not null && r3.Contains("leaves its final"), $"leaving the final and coming back is refused ({r3})");
