@@ -116,25 +116,30 @@ public sealed class LearningService(ILogger<LearningService> log, AirportStore a
         catch (Exception ex) when (!ct.IsCancellationRequested) { log.LogInformation("Learning: days not read again ({msg})", ex.Message); }
 
         // 2. (0.1.333) No learned ways in: no flight flies a copied route (user, 28 Nov). The techniques are learned
-        // instead — first the pattern's shape, across the hubs, below; then sequencing, spacing and speed control.
+        // instead — the pattern's shape, across the hubs, below; and (Release 4b) the controller's sequencing, spacing
+        // and speed control, learned on the graphics card.
+        try { await ExportAtc(have, ct); await TrainAtcIfNeeded(ct); }
+        catch (Exception ex) when (!ct.IsCancellationRequested) { log.LogInformation("Learned ATC: not trained this round ({msg})", ex.Message); }
 
         // 3. The scoreboard for this version — the rules, and the learned ways in when there's a model — and which
         // airports the model is used at: only where it beats the rules on the held-back days.
         var ver = typeof(LearningService).Assembly.GetName().Version?.ToString(3) ?? "?";
         var results = new List<ScoreRec>();
         RouteModel? model = null;
-        var variants = new List<(string name, RouteModel? m)> { ("rules", null) };
-        if (model is not null) variants.Add(($"model {model.Id}", model));
+        var variants = new List<(string name, RouteModel? m, AtcModel? atc)> { ("rules", null, null) };
+        if (model is not null) variants.Add(($"model {model.Id}", model, null));
+        var atcModel = _atc;
+        if (atcModel is not null) variants.Add(($"learned ATC {atcModel.Id}", null, atcModel));
         foreach (var icao in have)
         {
             ct.ThrowIfCancellationRequested();
             var file = Path.Combine(ScoreDir, icao + ".json");
             var past = File.Exists(file) ? JsonSerializer.Deserialize<List<ScoreRec>>(await File.ReadAllTextAsync(file, ct), Json) ?? new() : new();
             foreach (var r in past) if (r.Variant.Length == 0) r.Variant = "rules";
-            foreach (var (vname, vm) in variants)
+            foreach (var (vname, vm, va) in variants)
             {
                 if (past.Any(r => r.Version == ver && r.Variant == vname)) { if (vname == "rules") results.AddRange(past.Where(r => r.Version == ver && r.Variant == vname)); continue; }
-                var mine = await ScoreAirport(icao, ver, vname, vm, ct);
+                var mine = await ScoreAirport(icao, ver, vname, vm, va, ct);
                 if (mine.Count == 0) continue;
                 past.AddRange(mine);
                 Directory.CreateDirectory(ScoreDir);
@@ -145,12 +150,23 @@ public sealed class LearningService(ILogger<LearningService> log, AirportStore a
                 if (vname == "rules" && before is { Count: > 0 })
                     log.LogInformation("Scoreboard {v}: {icao} against {old}: {cmp}", ver, icao, before[0].Version, Compare(before, mine));
             }
+            if (atcModel is not null)
+            {
+                var decided = _atcApproved.TryGetValue(icao, out var prevA) && prevA.Model == atcModel.Id && prevA.Why.Contains($"[{ver}]");
+                if (!decided) DecideAtc(icao, past.Where(r => r.Version == ver && r.Variant == "rules").ToList(), past.Where(r => r.Version == ver && r.Variant == $"learned ATC {atcModel.Id}").ToList(), atcModel, ver);
+            }
             if (model is not null) Decide(icao, past.Where(r => r.Version == ver && r.Variant == "rules").ToList(), past.Where(r => r.Version == ver && r.Variant == $"model {model.Id}").ToList(), model);
         }
         if (model is not null)
         {
             var use = _approved.Where(kv => kv.Value.ok).Select(kv => kv.Key).OrderBy(x => x).ToList();
             log.LogInformation("Learned ways in ({id}): used at {n} airport(s) where they beat the rules{list}", model.Id, use.Count, use.Count > 0 ? ": " + string.Join(" ", use) : "");
+        }
+        if (atcModel is not null)
+        {
+            List<string> use; string gen;
+            lock (_mgate) { use = _atcApproved.Where(kv => kv.Key != "general" && kv.Value.Ok && kv.Value.Model == atcModel.Id).Select(kv => kv.Key).OrderBy(x => x).ToList(); gen = _atcApproved.TryGetValue("general", out var g) ? (g.Ok ? "used" : "not used") + " (" + g.Why + ")" : "not decided yet"; }
+            log.LogInformation("Learned ATC ({id}): used at {n} hub(s) where it beat the rules{list}; at every other airport: {gen}", atcModel.Id, use.Count, use.Count > 0 ? ": " + string.Join(" ", use) : "", gen);
         }
         if (results.Count > 0)
         {
@@ -357,6 +373,7 @@ public sealed class LearningService(ILogger<LearningService> log, AirportStore a
             }
         }
         catch (Exception ex) { log.LogInformation("General pattern not loaded ({msg})", ex.Message); }
+        LoadAtc();
         return base.StartAsync(ct);
     }
 
@@ -571,11 +588,13 @@ public sealed class LearningService(ILogger<LearningService> log, AirportStore a
         public double Miles { get; set; } = double.NaN;
         public double PathNm { get; set; } = double.NaN;
         public Dictionary<string, double> Per10 { get; set; } = new();
+        /// <summary>Ground speed against the real one at 30/20/10 nm (median size, kt; from 0.1.334).</summary>
+        public double SpeedErr { get; set; } = double.NaN;
         public string Line { get; set; } = "";
         public DateTime At { get; set; }
     }
 
-    private async Task<List<ScoreRec>> ScoreAirport(string icao, string ver, string variant, RouteModel? model, CancellationToken ct)
+    private async Task<List<ScoreRec>> ScoreAirport(string icao, string ver, string variant, RouteModel? model, AtcModel? atc, CancellationToken ct)
     {
         var dayFiles = Directory.Exists(Path.Combine(DataDir, icao))
             ? Directory.GetFiles(Path.Combine(DataDir, icao), "*.json.gz").Select(f => Path.GetFileName(f)[..^".json.gz".Length]).OrderByDescending(d => d, StringComparer.Ordinal).ToList()
@@ -612,13 +631,13 @@ public sealed class LearningService(ILogger<LearningService> log, AirportStore a
             var score = await Task.Run(() =>
             {
                 Thread.CurrentThread.Priority = ThreadPriority.Lowest;
-                return RealReplay.Replay(apt2, prof, wind, arr, start, start + 3600, new ReplaySource(), keepGoing: () => !ct.IsCancellationRequested, model: model);
+                return RealReplay.Replay(apt2, prof, wind, arr, start, start + 3600, new ReplaySource(), keepGoing: () => !ct.IsCancellationRequested, model: model, atc: atc);
             }, ct);
             ct.ThrowIfCancellationRequested();
             var rec = new ScoreRec
             {
                 Version = ver, Variant = variant, Airport = icao, Day = day, Window = score.Window, Scored = score.Scored, Landed = score.Landed, Order = score.OrderSame,
-                TimeErr = score.TimeErr, TimeBias = score.TimeBias, Miles = score.MilesDiff, PathNm = score.PathNm, Per10 = score.Per10,
+                TimeErr = score.TimeErr, TimeBias = score.TimeBias, Miles = score.MilesDiff, PathNm = score.PathNm, Per10 = score.Per10, SpeedErr = score.SpeedErr,
                 Line = score.Line() + $" (wind {wind.FromDeg:000}/{wind.Kt:0}; {sw.Elapsed.TotalSeconds:0} s to run)" + (score.Worst.Count > 0 ? "; furthest out: " + string.Join("; ", score.Worst) : ""),
                 At = DateTime.UtcNow,
             };
@@ -635,7 +654,7 @@ public sealed class LearningService(ILogger<LearningService> log, AirportStore a
 
     private static string Summary(List<ScoreRec> rs) =>
         $"landing order as real {100 * Med(rs.Select(r => r.Order)):0}%, landing time ±{Med(rs.Select(r => r.TimeErr)):0} s, track miles {RealReplay.Score.Sg(Med(rs.Select(r => r.Miles)), "0.0")} nm, " +
-        $"path {Med(rs.Select(r => r.PathNm)):0.0} nm from the real one, flown to the runway {100.0 * rs.Sum(r => r.Landed) / Math.Max(1, rs.Sum(r => r.Scored)):0}%; per 10 landings " +
+        $"path {Med(rs.Select(r => r.PathNm)):0.0} nm from the real one, speeds ±{Med(rs.Select(r => r.SpeedErr)):0} kt at 30/20/10 nm, flown to the runway {100.0 * rs.Sum(r => r.Landed) / Math.Max(1, rs.Sum(r => r.Scored)):0}%; per 10 landings " +
         string.Join(", ", new[] { "go-arounds", "break-offs", "vectors", "routes refused", "separation warnings" }.Select(k => $"{k} {Med(rs.Select(r => r.Per10.GetValueOrDefault(k, double.NaN))):0.0}"));
 
     private static string Compare(List<ScoreRec> before, List<ScoreRec> now)

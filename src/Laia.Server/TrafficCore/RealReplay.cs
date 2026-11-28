@@ -130,13 +130,15 @@ public static class RealReplay
         public List<string> Worst = new();
         /// <summary>Minutes from coming in to the threshold: the real arrivals' (median) and LAIA's.</summary>
         public double RealMin = double.NaN, LaiaMin = double.NaN;
+        /// <summary>LAIA's ground speed against the real one at 30, 20 and 10 nm from the threshold (median size and sign, kt).</summary>
+        public double SpeedErr = double.NaN, SpeedBias = double.NaN;
         /// <summary>Why the route check refused ways in, and how many arrivals each time (one count per arrival and reason).</summary>
         public Dictionary<string, int> Refused = new();
 
         public string Line() =>
             $"{Airport} {Window}: {Landed} of {Scored} real arrivals flown to the runway (of {Spawned} brought in) — landing order as real {Pct(OrderSame)}, " +
             $"landing time ±{TimeErr:0} s ({Sg(TimeBias, "0")} s on average), track miles {Sg(MilesDiff, "0.0")} nm against the real ones, path {PathNm:0.0} nm from the real one; " +
-            $"{RealMin:0} min from coming in to landing against LAIA's {LaiaMin:0}; " +
+            $"{RealMin:0} min from coming in to landing against LAIA's {LaiaMin:0}; speeds at 30/20/10 nm ±{SpeedErr:0} kt ({Sg(SpeedBias, "0")} kt on average); " +
             $"per 10 landings — {string.Join(", ", Per10.Select(kv => $"{kv.Key} {kv.Value:0.0}"))}" +
             (Refused.Count > 0 ? $"; routes refused for: {string.Join(", ", Refused.OrderByDescending(kv => kv.Value).Take(4).Select(kv => $"{kv.Key} ({kv.Value})"))}" : "");
         private static string Pct(double x) => double.IsNaN(x) ? "–" : $"{100 * x:0}%";
@@ -151,7 +153,7 @@ public static class RealReplay
     /// the real ones.
     /// </summary>
     public static Score Replay(AirportModel apt, AirportProfile? learned, Wind wind, IReadOnlyList<RealArrival> real, double winStart, double winEnd,
-        IFlightSource source, Action<string>? log = null, Func<bool>? keepGoing = null, RouteModel? model = null)
+        IFlightSource source, Action<string>? log = null, Func<bool>? keepGoing = null, RouteModel? model = null, AtcModel? atc = null)
     {
         var score = new Score { Airport = apt.Icao, Window = $"{DateTimeOffset.FromUnixTimeSeconds((long)winStart):yyyy.MM.dd HH}Z" };
         var bring = real.Where(a => a.ThrT >= winStart - 1200 && a.ThrT < winEnd + 1200 && apt.Ends.Any(e => e.Ident == a.Runway)).OrderBy(a => a.EntryT).ToList();
@@ -162,6 +164,7 @@ public static class RealReplay
         w = new TrafficWorld(apt, source, seed: 11)
         {
             Automatic = false, GenericTraffic = false, HoldRunways = false, Wind = wind, Learned = learned, LearnedRoutes = model,
+            Atc = atc, AtcAirport = atc is not null && atc.KnowsAirport(apt.Icao) ? apt.Icao : "general",
             Log = l => { if (lines.Count < 50000) lines.Add($"{w!.Time,6:0} {l}"); log?.Invoke(l); },
         };
         var rwys = bring.Select(a => a.Runway).Distinct().ToList();
@@ -173,6 +176,8 @@ public static class RealReplay
         var path = new Dictionary<Flight, List<V2>>();
         var lastSample = new Dictionary<Flight, double>();
         var prevAlong = new Dictionary<Flight, double>();
+        // Ground speed as each first came within 30, 20 and 10 nm of its runway's threshold.
+        var gsAt = new Dictionary<Flight, double[]>();
         var end = winEnd + 2400 - t0;
         var n = 0;
         while (w.Time < end)
@@ -196,6 +201,9 @@ public static class RealReplay
             {
                 if (cross.ContainsKey(f) || f.Rwy is null) continue;
                 if (w.Time - lastSample[f] >= 10) { path[f].Add(f.Pos); lastSample[f] = w.Time; }
+                var g3 = gsAt.TryGetValue(f, out var gv) ? gv : gsAt[f] = new[] { double.NaN, double.NaN, double.NaN };
+                var dThr = (f.Pos - f.Rwy.Threshold).Length / Geo2.MPerNm;
+                for (var k = 0; k < 3; k++) if (double.IsNaN(g3[k]) && dThr <= SpeedMarks[k]) g3[k] = f.Gs;
                 var al = f.Rwy.Along(f.Pos);
                 if (prevAlong.TryGetValue(f, out var pa) && pa < 0 && al >= 0 && Math.Abs(f.Rwy.Offset(f.Pos)) < 400 && f.AltFt - f.Rwy.ElevationFt < 500)
                 {
@@ -228,6 +236,15 @@ public static class RealReplay
                     if (Math.Sign(ra.ThrT - rb.ThrT) == Math.Sign(cross[fa] - cross[fb])) same++;
                 }
             if (pairs > 0) score.OrderSame = (double)same / pairs;
+            var sp = new List<double>();
+            foreach (var (f, a) in landed)
+            {
+                if (!gsAt.TryGetValue(f, out var mine)) continue;
+                var real3 = RealGs(apt, a);
+                for (var k = 0; k < 3; k++) if (!double.IsNaN(mine[k]) && !double.IsNaN(real3[k])) sp.Add(mine[k] - real3[k]);
+            }
+            score.SpeedErr = Median(sp.Select(Math.Abs));
+            score.SpeedBias = Median(sp);
             score.RealMin = Median(landed.Select(kv => (kv.Value.ThrT - kv.Value.EntryT) / 60));
             score.LaiaMin = Median(landed.Select(kv => (cross[kv.Key] + t0 - kv.Value.EntryT) / 60));
             foreach (var kv in landed.OrderByDescending(kv => Math.Abs(cross[kv.Key] + t0 - kv.Value.ThrT)).Take(3))
@@ -250,6 +267,27 @@ public static class RealReplay
         }
         score.Per10["separation warnings"] = C("SEPARATION") / per;
         return score;
+    }
+
+    /// <summary>Distances (nm from the threshold) where speeds are compared.</summary>
+    public static readonly double[] SpeedMarks = { 30, 20, 10 };
+
+    /// <summary>A real arrival's ground speed (kt) as it first came within 30, 20 and 10 nm of its threshold (NaN where its track doesn't show it).</summary>
+    public static double[] RealGs(AirportModel apt, RealArrival a)
+    {
+        var res = new[] { double.NaN, double.NaN, double.NaN };
+        var e = apt.Ends.FirstOrDefault(x => x.Ident == a.Runway);
+        if (e is null || a.Pts.Count < 3) return res;
+        var xy = a.Pts.Select(p => apt.Map.ToXY(p.Lat, p.Lon)).ToList();
+        for (var k = 0; k < 3; k++)
+            for (var i = 1; i + 1 < xy.Count; i++)
+            {
+                if ((xy[i] - e.Threshold).Length / Geo2.MPerNm > SpeedMarks[k]) continue;
+                var dt = a.Pts[i + 1].T - a.Pts[i - 1].T;
+                if (dt > 5) res[k] = (xy[i + 1] - xy[i - 1]).Length / dt / 0.514444;
+                break;
+            }
+        return res;
     }
 
     private static double Len(List<V2> p) { double l = 0; for (var i = 1; i < p.Count; i++) l += (p[i] - p[i - 1]).Length; return l; }

@@ -459,6 +459,41 @@ Console.WriteLine("== The scoreboard: real arrivals read from their tracks and f
     Check(sc.TimeErr < 150 && sc.PathNm < 4, $"and lands them about when and where they flew ({sc.TimeErr:0} s, {sc.PathNm:0.0} nm)");
 }
 
+Console.WriteLine("== Learned ATC (Release 4b): speeds, landing order and gaps learned by learning/train_atc.py, flown by LAIA");
+if (Environment.GetEnvironmentVariable("LAIA_TEST_ATC") is { } apath && AtcModel.Load(apath) is { } atc)
+{
+    // The habits in the synthetic data: 250 kt beyond 20 nm, 210 to 12; 75 % of that with time to lose; heavies
+    // landing 2 minutes after their own time would put them; 90 s behind a narrowbody when pressed.
+    var v30 = atc.NominalIas("TEST", 1, 30); var v15 = atc.NominalIas("TEST", 1, 15); var vg = atc.NominalIas("ZZZZ", 1, 30);
+    Console.WriteLine($"  model {atc.Id}: unimpeded {v30:0} kt at 30 nm, {v15:0} at 15 (general {vg:0}); gap behind a narrowbody {atc.TargetGap("TEST", 1, 1):0} s");
+    Check(Math.Abs(v30 - 250) < 15 && Math.Abs(v15 - 210) < 15 && Math.Abs(vg - 250) < 15, "the unimpeded speeds are learned, per airport and across the hubs");
+    Check(Math.Abs(atc.TargetGap("TEST", 1, 1) - 90) < 10, "the gap real controllers leave behind a narrowbody when pressed is learned");
+    var rSlow = atc.SpeedRatio("TEST", 1, 30, 9000, 240, 10); var rFree = atc.SpeedRatio("TEST", 1, 30, 9000, 0, 10);
+    Console.WriteLine($"  speed control at 30 nm: {100 * rSlow:0}% of the unimpeded speed with 4 minutes to lose, {100 * rFree:0}% with none");
+    Check(rSlow < rFree - 0.08, "with time to lose, it's flown slower");
+    var oH = atc.OrderOffset("TEST", 2, 35, 10000, 300, 0, 1, 0, 10); var oN = atc.OrderOffset("TEST", 1, 35, 10000, 300, 0, 1, 0, 10);
+    Console.WriteLine($"  landing order: a heavy {oH:+0;-0} s on its own time, a narrowbody {oN:+0;-0} s");
+    Check(oH - oN > 45, "heavies are put later in the order, as the real controllers did");
+    // Flown: an hour at Busy with the learned controller, against the same hour by the rules.
+    var apt = new AirportModel(TestAirport.Build(false));
+    (int landed, int ga, int bo, List<string> log) Run(AtcModel? m)
+    {
+        var w = new TrafficWorld(apt, new TestSource(), seed: 23) { Level = TrafficLevel.Busy, Wind = new Wind(270, 8) };
+        var l = new List<string>(); w.Log = x => l.Add(x);
+        w.Atc = m; w.AtcAirport = "TEST";
+        w.SelectRunways(true);
+        for (var t = 0.0; t < 3600; t += 0.5) w.Step(0.5);
+        return (l.Count(x => x.Contains(": landed runway")), l.Count(x => x.Contains("going around")), l.Count(x => x.Contains("breaking off")), l);
+    }
+    var byRules = Run(null); var learned = Run(atc);
+    Console.WriteLine($"  an hour at Busy: by the rules {byRules.landed} landings, {byRules.ga} go-arounds, {byRules.bo} break-offs; learned ATC {learned.landed}, {learned.ga}, {learned.bo}");
+    Check(learned.log.Any(x => x.Contains("learned ATC") && x.Contains("in use")), "the world says the learned ATC is in use");
+    Check(learned.landed >= byRules.landed * 0.8, "the learned controller lands about as many");
+    Check(learned.ga + learned.bo <= byRules.ga + byRules.bo + 2, "with no more go-arounds and break-offs to speak of");
+    foreach (var x in learned.log.Where(x => x.Contains("going around") || x.Contains("breaking off") || x.Contains("SEPARATION")).Take(4)) Console.WriteLine("    " + x);
+}
+else Console.WriteLine("  (no trained test model — LAIA_TEST_ATC not set; skipped)");
+
 Console.WriteLine("== The route check (27 Nov, KSFO: UAL436 flew a circle by the 28R final; loops every release)");
 {
     var nm = Geo2.MPerNm;

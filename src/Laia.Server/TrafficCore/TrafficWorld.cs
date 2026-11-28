@@ -208,6 +208,10 @@ public sealed class Flight
     /// whether its landing order is fixed (frozen, inside ~15 minutes), the slot it was frozen with, what the manager
     /// is doing with it (for the map), the gap to the one ahead, and when it was last vectored.</summary>
     public double SlowDv, SlowAt = -99, FrozenSlot, LastVector = -999, GapNm = double.NaN, GapSec = double.NaN;
+    /// <summary>The learned controller's speed reduction by distance to go (Release 4b): how much of <see cref="SlowDv"/>
+    /// it takes at each nm from 20 to 45 out (1 = all of it), worked out for the delay it was last asked to lose.</summary>
+    public double[]? AtcSlowShape;
+    public double AtcSlowShapeFor = double.NaN;
     public bool Frozen;
     /// <summary>In the landing sequence: within 40 nm of its runway's approach end and at or below 8,000 ft above the
     /// field (or the lowest its procedure still requires there + 500 ft). Before that: spacing only.</summary>
@@ -793,6 +797,24 @@ public sealed partial class TrafficWorld
     public static VectorShape? GeneralShape { get; set; }
     /// <summary>The learned ways in (Step 6), when the model has beaten the rules on this airport's scoreboard; null otherwise.</summary>
     public RouteModel? LearnedRoutes { get; set; }
+    /// <summary>
+    /// The controller's techniques learned at the hubs (Release 4b) — the speeds at each distance to go, where speed is
+    /// taken off to lose time, the landing order, the gap at the threshold — when they beat the rules on the scoreboard
+    /// (at this airport, or across the hubs for one with no data of its own); null otherwise. Never a route.
+    /// </summary>
+    public AtcModel? Atc
+    {
+        get => _atc;
+        set
+        {
+            if (ReferenceEquals(value, _atc)) return;
+            _atc = value;
+            Log?.Invoke(value is null ? $"{Apt.Icao}: the standard speeds, landing order and gaps (no learned ATC)" : $"{Apt.Icao}: learned ATC {value.Id} in use — speeds, landing order and gaps as real controllers at the hubs");
+        }
+    }
+    private AtcModel? _atc;
+    /// <summary>Which airport's learned technique <see cref="Atc"/> uses: this one when it learned it, otherwise "general".</summary>
+    public string AtcAirport { get; set; } = "general";
     /// <summary>Which of the model's candidate ways in <see cref="BuildArrivalPath"/> tries (the next after a refusal).</summary>
     private int _routeModelTry;
     /// <summary>While set, <see cref="BuildArrivalPath"/> uses no real-track way in (the standard one).</summary>
@@ -1044,7 +1066,7 @@ public sealed partial class TrafficWorld
             }
             // (The order itself is kept from 60 flying miles in, or once in the sequence if sooner, so the approach can plan
             // its downwinds; further out it simply follows each one's predicted time.)
-            foreach (var f in g) if (f == UserArr || double.IsNaN(f.OrderKey) || !f.Frozen || !(f.InSeq || f.Path is null || (f.ThrS - f.S) / Geo2.MPerNm <= 60)) f.OrderKey = f.EtaNominal;
+            foreach (var f in g) if (f == UserArr || double.IsNaN(f.OrderKey) || !f.Frozen || !(f.InSeq || f.Path is null || (f.ThrS - f.S) / Geo2.MPerNm <= 60)) f.OrderKey = f.EtaNominal + (f == UserArr ? 0 : LearnedOrderOffset(f, g.Count()));
             // One coming back round (a break-off, a go-around) goes behind every arrival nearer the runway than it — never
             // in front of one already on its way in, which would then be broken off in turn (KORD Peak, 18 Nov: AAL1974
             // broke off, then AAL2616 and UAL415 behind it, each "200+ s short" behind the one before).
@@ -5323,11 +5345,18 @@ public sealed partial class TrafficWorld
     /// per nm on the glidepath, stable by 1,000 ft about 3 nm out). "170 to a 5-mile final" only fits jets whose
     /// approach speed is 150 kt or more.
     /// </summary>
-    private static double PlannedSpeed(Flight f, double d, bool nominal = false)
+    private double PlannedSpeed(Flight f, double d, bool nominal = false)
     {
         // Descent speed above 10,000 ft (about 280 kt for jets), slowing to 250 kt on the level piece at 10,000 ft.
         var high = f.Rwy is not null && d > D10(f.Rwy) + 4;
         double t = high ? (f.P.Family == "turboprop" ? 230 : 280) : d > 20 ? 250 : d > 12 ? 210 : d > 7 ? 180 : d > 5 ? 170 : f.P.Vapp;
+        // The learned way (Release 4b): below 10,000 ft, the speed real controllers have this kind of aircraft fly at
+        // this distance to go when nothing's in the way — within 40 kt of the standard steps, never over 250 kt.
+        if (!high && Atc is { } atc && d >= AtcModel.NomFrom)
+        {
+            var ls = atc.NominalIas(AtcAirport, AtcModel.Class(f.P), d);
+            if (!double.IsNaN(ls)) t = Math.Clamp(ls, Math.Max(f.P.Vapp, t - 40), Math.Min(250, t + 40));
+        }
         // Losing time for its slot (arrival manager): slower in the cruise and descent and 210 kt below 10,000 ft until
         // 20 nm — the controller's speed control far out (7110.65 5-7) instead of a hold.
         // The reduction is graded (5-kt steps, as much as the delay needs), never below 240 kt high / 210 kt low for
@@ -5335,7 +5364,10 @@ public sealed partial class TrafficWorld
         if (f.SlowDv > 0 && !nominal && d > 20)
         {
             var tp = f.P.Family == "turboprop";
-            t = high ? Math.Max(tp ? 200 : 240, t - f.SlowDv) : Math.Max(tp ? 180 : 210, Math.Min(t, 250 - f.SlowDv));
+            // Learned: where along the way real controllers take the speed off (more of it far out, or close in),
+            // for this much delay — the same floors.
+            var dv = f.SlowDv * SlowShare(f, d);
+            t = high ? Math.Max(tp ? 200 : 240, t - dv) : Math.Max(tp ? 180 : 210, Math.Min(t, (Atc is null ? 250 : t) - dv));
         }
         if (f.P.Family == "turboprop" && d <= 20) t = Math.Min(t, d > 5 ? 170 : f.P.Vapp);
         if (d < 12) t = Math.Min(t, f.P.Vapp + 10 * Math.Max(0, d - 3));
@@ -5393,6 +5425,43 @@ public sealed partial class TrafficWorld
     private int PendingDepartures(int runway) => Flights.Count(o => o.Kind == "departure" && !o.Done && o.OnGround && o.Rwy is not null && o.Rwy.Runway == runway
         && (!(o.Phase is "parked" or "boarding" or "at gate") || (!double.IsNaN(o.ReadyAt) && o.ReadyAt - Time < 1200)));
 
+    /// <summary>
+    /// How much of the speed reduction is taken at this distance to go (Release 4b): the learned controller's slowing
+    /// at each nm from 20 to 45 out, for the delay this arrival has, against its slowing at 30 nm (0.5–1.5); 1 without
+    /// the learned way.
+    /// </summary>
+    private double SlowShare(Flight f, double d)
+    {
+        if (Atc is not { } atc) return 1;
+        var lose = Math.Round(Math.Max(30, f.Delay) / 30) * 30;
+        if (f.AtcSlowShape is null || f.AtcSlowShapeFor != lose)
+        {
+            var cls = AtcModel.Class(f.P);
+            var sh = new double[26];
+            double Cut(int nm) => 1 - atc.SpeedRatio(AtcAirport, cls, nm, f.Rwy is null ? 10000 : Math.Min(Profile(f.Rwy, nm), 18000) - f.Rwy.ElevationFt, lose, Flights.Count(o => o.Kind == "arrival" && !o.Done));
+            var refCut = Cut(30);
+            for (var k = 0; k < sh.Length; k++) sh[k] = refCut <= 0.01 ? 1 : Math.Clamp(Cut(20 + k) / refCut, 0.5, 1.5);
+            f.AtcSlowShape = sh; f.AtcSlowShapeFor = lose;
+        }
+        return f.AtcSlowShape[Math.Clamp((int)Math.Round(d - 20), 0, f.AtcSlowShape.Length - 1)];
+    }
+
+    /// <summary>
+    /// The learned landing order (Release 4b): seconds added to (or taken from) an arrival's own landing time when the
+    /// order is set, the way real controllers order arrivals level with each other — from where it is (distance to go,
+    /// height, speed, the side it comes from, how far off the final's line) and what it is. Between −4 and +4 minutes;
+    /// 0 without the learned way.
+    /// </summary>
+    private double LearnedOrderOffset(Flight f, int load)
+    {
+        if (Atc is not { } atc || f.Rwy is not { } r || f.Path is null) return 0;
+        var nm = Geo2.MPerNm;
+        var dtg = (f.ThrS - f.S) / nm;
+        if (dtg > 60) return 0;
+        var side = Geo2.Diff(r.Heading + 180, (f.Pos - r.Threshold).Bearing) * Math.PI / 180;
+        return atc.OrderOffset(AtcAirport, AtcModel.Class(f.P), dtg, f.AltFt - r.ElevationFt, f.Gs, Math.Sin(side), Math.Cos(side), r.Offset(f.Pos) / nm, load);
+    }
+
     private double ThresholdGapNeeded(Flight leader, Flight f, bool forDepartures = true)
     {
         var gs = Math.Max(90, f.P.Vapp - WindAt(f.Rwy!.ElevationFt + 1000).Headwind(f.Rwy.Heading));
@@ -5406,6 +5475,13 @@ public sealed partial class TrafficWorld
         var mine = forDepartures && mixed && DeparturesFor(r => r == f.Rwy.Runway);
         var cross = forDepartures && !mine && crossing && DeparturesFor(r => deps.Any(d => d.Runway == r && Crossing(f.Rwy, d) is not null));
         var need = mine ? Math.Max(Math.Max(wake, occupancy) + 10, DepartureGap(occupancy)) : Math.Max(wake, occupancy) + 10 + (cross ? 30 : 0);
+        // The gap real controllers leave behind this kind of leader when the queue is pressed (Release 4b) — more than
+        // the minimums only, and at most a minute more.
+        if (Atc is { } atc && leader != UserArr && f != UserArr)
+        {
+            var lg = atc.TargetGap(AtcAirport, AtcModel.Class(leader.P), AtcModel.Class(f.P));
+            if (!double.IsNaN(lg)) need = Math.Max(need, Math.Min(lg, need + 60));
+        }
         // The human gets a generous gap either side (about 10–12 nm between the aircraft around them).
         return leader == UserArr || f == UserArr ? Math.Max(need, UserSideGapSec) : need;
     }

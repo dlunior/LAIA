@@ -43,6 +43,12 @@ jobs:
           python learning/test_train_routes.py --out "$env:RUNNER_TEMP\laia-test-model.json"
           if ($LASTEXITCODE) { throw "route model training failed" }
           "LAIA_TEST_MODEL=$env:RUNNER_TEMP\laia-test-model.json" >> $env:GITHUB_ENV
+      - name: Learn a small ATC model (sequencing, spacing and speed control, end to end on the processor)
+        shell: pwsh
+        run: |
+          python learning/test_train_atc.py --out "$env:RUNNER_TEMP\laia-test-atc.json"
+          if ($LASTEXITCODE) { throw "ATC model training failed" }
+          "LAIA_TEST_ATC=$env:RUNNER_TEMP\laia-test-atc.json" >> $env:GITHUB_ENV
       - name: Check traffic logic (offline simulation)
         shell: pwsh
         run: |
