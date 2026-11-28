@@ -135,7 +135,7 @@ public sealed class LearningService(ILogger<LearningService> log, AirportStore a
         if (results.Count > 0)
         {
             var allPast = Directory.Exists(ScoreDir)
-                ? Directory.GetFiles(ScoreDir, "*.json").SelectMany(f => { try { return JsonSerializer.Deserialize<List<ScoreRec>>(File.ReadAllText(f)) ?? new(); } catch { return new(); } }).ToList()
+                ? Directory.GetFiles(ScoreDir, "*.json").SelectMany(f => { try { return JsonSerializer.Deserialize<List<ScoreRec>>(File.ReadAllText(f)) ?? new List<ScoreRec>(); } catch { return new List<ScoreRec>(); } }).ToList()
                 : new();
             var prevVer = allPast.Where(r => r.Version != ver).GroupBy(r => r.Version).OrderByDescending(g => g.Max(r => r.At)).FirstOrDefault()?.ToList();
             log.LogInformation("Scoreboard {v}, all hubs ({n} airport-hours): {sum}{cmp}", ver, results.Count, Summary(results),
