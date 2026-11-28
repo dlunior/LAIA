@@ -779,6 +779,18 @@ public sealed partial class TrafficWorld
 
     /// <summary>Ways in refused by <see cref="RouteProblem"/> (and logged), for the self-test.</summary>
     private int _routesRefused;
+    /// <summary>
+    /// No flight flies a copied route (user, 28 Nov: "no flight should have a hard coded route. We want LAIA to learn the
+    /// techniques from those busy airports and apply that to all airports"): real tracks aren't stitched into ways in
+    /// ("vectors as real traffic flies them") or departures any more — every route is built by LAIA from the published
+    /// procedures and its own downwind, base and intercept, with the shape (base distance, downwind, intercept, final)
+    /// learned per airport, or across all the hubs where an airport has no data of its own. Kept as a switch for the tests
+    /// of the old behaviour only.
+    /// </summary>
+    public static bool CopyRealTracks { get; set; }
+    /// <summary>The pattern shape learned across all the hubs (median base, join, downwind, intercept), for airports
+    /// with no real traffic of their own learned; null until the learning service has it.</summary>
+    public static VectorShape? GeneralShape { get; set; }
     /// <summary>The learned ways in (Step 6), when the model has beaten the rules on this airport's scoreboard; null otherwise.</summary>
     public RouteModel? LearnedRoutes { get; set; }
     /// <summary>Which of the model's candidate ways in <see cref="BuildArrivalPath"/> tries (the next after a refusal).</summary>
@@ -3176,6 +3188,7 @@ public sealed partial class TrafficWorld
     /// <summary>The learned typical departure path off a runway nearest a direction (bearing from the airport), in map metres.</summary>
     private List<V2>? LearnedDeparture(RunwayEnd rwy, double bearing)
     {
+        if (!CopyRealTracks) return null;
         if (Learned?.Departures.TryGetValue(rwy.Ident, out var d) != true || d!.Paths.Count == 0) return null;
         var best = d.Paths.Where(p => p.Count >= 3).OrderBy(p => Math.Abs(Geo2.Diff(p.Bearing, bearing))).FirstOrDefault();
         if (best is null || Math.Abs(Geo2.Diff(best.Bearing, bearing)) > 60) return null;
@@ -4697,6 +4710,7 @@ public sealed partial class TrafficWorld
     /// </summary>
     private List<V2>? DirectionTrack(RunwayEnd rwy, V2 from, double dir = double.NaN)
     {
+        if (!CopyRealTracks) return null;
         if (Learned is not { Samples.Count: > 0 } prof) return null;
         var nm = Geo2.MPerNm;
         // Each runway's real arrivals in this airport's frame, worked out once per learned profile.
@@ -4759,6 +4773,7 @@ public sealed partial class TrafficWorld
     /// </summary>
     private List<(int cut, List<V2> pts, double lenNm)>? RealFan(RunwayEnd rwy, List<AirPoint> starPts)
     {
+        if (!CopyRealTracks) return null;
         if (RealVectors(rwy, starPts) is null || _fanFound is not { Count: >= 3 } found) return null;
         var star = starPts.Select(p => p.P).ToList();
         var nm = Geo2.MPerNm;
@@ -5178,7 +5193,10 @@ public sealed partial class TrafficWorld
     private VectorShape ShapeFor(RunwayEnd rwy, double? fixedJoin = null)
     {
         if (Learned?.Arrivals.TryGetValue(rwy.Ident, out var a) != true || a!.Count < 5 || double.IsNaN(a.JoinP50))
-            return fixedJoin is { } fj0 ? VectorShape.Default with { JoinNm = fj0, BaseNm = Math.Max(VectorShape.Default.BaseNm, fj0 + 2) } : VectorShape.Default;
+        {
+            var g = GeneralShape ?? VectorShape.Default;
+            return fixedJoin is { } fj0 ? g with { JoinNm = fj0, BaseNm = Math.Max(g.BaseNm, fj0 + 2) } : g;
+        }
         var join = fixedJoin ?? Math.Clamp(a.JoinP25 + (a.JoinP75 - a.JoinP25) * Rng.NextDouble(), 6, 16);
         var bas = double.IsNaN(a.BaseNm) ? join + 3 : Math.Clamp(a.BaseNm, join + 1.5, join + 10);
         var dw = double.IsNaN(a.DownwindNm) ? double.NaN : Math.Clamp(a.DownwindNm, 2, 10);
