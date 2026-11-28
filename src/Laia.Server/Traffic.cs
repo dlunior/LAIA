@@ -303,9 +303,44 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
     private double UserLevelFt(AircraftState sim) => sim.AltitudeFt - FlCorrection(sim.AltitudeFt);
     private void UpdateFlCorrection(AircraftState sim)
     {
+        LogAltitudes(sim);
         if (sim.PressureAltFt == 0) return;
         var raw = Math.Clamp(sim.AltitudeFt - sim.PressureAltFt, -3000, 3000);
         _trueMinusPressure += (raw - _trueMinusPressure) * 0.1;
+    }
+
+    /// <summary>
+    /// Every 5 minutes above 15,000 ft (user, 27 Nov: UAL436 and SKW4031 at FL360 shown +14 on the TCAS while the user,
+    /// at FL360 by Navigraph and Volanta too, and LAIA both had them level): what the sim says of the user's altitude
+    /// (true, standard-pressure, the altimeter and its setting, the outside temperature against standard), the correction
+    /// LAIA draws its flight levels with, and the nearest drawn airborne aircraft — its level and the altitude it's sent at.
+    /// </summary>
+    private double _altLogAt = double.NegativeInfinity;
+    private void LogAltitudes(AircraftState sim)
+    {
+        var now = Environment.TickCount64 / 1000.0;
+        if (sim.AltitudeFt < 15000 || now - _altLogAt < 300) return;
+        _altLogAt = now;
+        var isa = 15 - 1.98 * Math.Min(sim.PressureAltFt > 0 ? sim.PressureAltFt : sim.AltitudeFt, 36089) / 1000;
+        var near = "";
+        try
+        {
+            TrafficAircraft? best = null; double bd = double.MaxValue;
+            foreach (var a in Snapshot())
+            {
+                if (a.OnGround) continue;
+                var d = Laia.Server.TrafficCore.Geo2.DistanceNm(sim.Lat, sim.Lon, a.Lat, a.Lon);
+                if (d < bd) { bd = d; best = a; }
+            }
+            if (best is not null && bd < 60)
+            {
+                var corr = FlCorrection(best.AltFt);
+                near = $"; nearest drawn: {best.Callsign} {bd:0} nm away, at {best.AltFt - corr:0} ft on LAIA's scale, sent to the sim at {best.AltFt:0} ft true ({best.AltFt - sim.AltitudeFt:+0;-0} ft from your true altitude)";
+            }
+        }
+        catch { }
+        log.LogInformation("Altitudes: you at {t:0} ft true, {p:0} ft standard pressure, altimeter {i:0} ft at {k:0.00} inHg; outside {c:0}°C (standard {d:+0;-0}°C); LAIA draws flight levels {x:+0;-0} ft (true − pressure){near}",
+            sim.AltitudeFt, sim.PressureAltFt, sim.IndicatedAltFt, sim.AltimeterInHg, sim.OutsideTempC, sim.OutsideTempC - isa, _trueMinusPressure, near);
     }
 
     /// <summary>
@@ -507,7 +542,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
         {
             $"Self-test {sh.Apt.Icao} (Peak, {sh.Time / 60:0} min replayed offline in {realMin:0} min; landing {string.Join("/", sh.ArrRwys.Select(r => r.Ident))}): " +
             $"{landed.Count} landings, {C(": took off") + C(": airborne")} take-offs; per 10 landings — vectors for spacing {Per(spacing)}, delay vectors {Per(delay)}, " +
-            $"break-offs {Per(C("breaking off"))}, go-arounds {Per(C("going around"))}, runway switches {Per(C("for less delay") + C("lands about"))}, real-track moves {Per(C("real track off its STAR"))}, " +
+            $"break-offs {Per(C("breaking off"))}, go-arounds {Per(C("going around"))}, runway switches {Per(C("for less delay") + C("lands about"))}, real-track moves {Per(C("real track off its STAR"))}, routes refused {Per(C("route refused"))}, " +
             $"trombones {Per(C("downwind extended"))}; holds {C("holding for")}, 360s {C("making a 360")}; separation warnings {C("SEPARATION")}; " +
             $"restrictions {met} of {tot} met; landings short of the gap needed {shortGaps}" + (extra.Count > 0 ? $", median {extra[extra.Count / 2]} s beyond it" : "") +
             $"; take-overs {takeovers.Count} ({(takeovers.Count > 0 ? 100 * real / takeovers.Count : 0)}% on real tracks, {C("sequenced: starts")} moved back, {tooHigh} too high); " +

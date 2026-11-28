@@ -77,6 +77,10 @@ public sealed partial class TrafficWorld
         // CHPPR1 and a real track — "number 13, between DAL348 and SAS929", DAL348 64 nm behind).
         if (along < 0 && along > -40 * Geo2.MPerNm && off < 1.0 * Geo2.MPerNm && Math.Abs(Geo2.Diff(UserTrack, r.Heading)) < 30)
             return -along / Geo2.MPerNm;
+        // Over the runway, landing: there (27 Nov, KSFO: 10 s before touchdown the user's estimate went round a whole
+        // new way in — "you're 8.6 min later than it would land").
+        if (along >= 0 && along < r.LengthM && off < 0.5 * Geo2.MPerNm && Math.Abs(Geo2.Diff(UserTrack, r.Heading)) < 30)
+            return 0;
         var routed = UserRouteNm(r, u);
         if (!double.IsNaN(routed)) return routed;
         var join = r.Threshold - r.Dir * (11 * Geo2.MPerNm);

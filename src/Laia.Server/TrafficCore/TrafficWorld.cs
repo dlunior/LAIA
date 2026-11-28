@@ -708,6 +708,81 @@ public sealed partial class TrafficWorld
     }
 
     /// <summary>
+    /// The route check (user, 27 Nov: "we've been dealing with these loops every single release"): every way in an
+    /// arrival is given — built at the start, a real track picked off its STAR, a downwind stretched or brought in, a
+    /// vector — must be one an aircraft could sensibly fly, whichever part of LAIA built it. Checked from the first point
+    /// to the threshold (index <paramref name="thrIndex"/>): it never crosses its own track (a loop, by definition); it
+    /// doesn't turn through more than one and a half circles; once on its final (lined up within 0.3 nm, going the
+    /// runway's way) it doesn't leave it again (KSFO, 27 Nov: UAL436 4 nm from joining 28R taken north across the bay
+    /// and round again); and it isn't far longer than the way it has to go. The reason, or null when it passes.
+    /// </summary>
+    internal static string? RouteProblem(IReadOnlyList<V2> pts, int thrIndex, RunwayEnd rwy)
+    {
+        var nm = Geo2.MPerNm;
+        var n = Math.Min(thrIndex, pts.Count - 1);
+        if (n < 2) return null;
+        // Crossing itself (segments of 30 m or more; neighbours share a point and don't count).
+        var seg = new List<(V2 a, V2 b, int i)>();
+        for (var i = 0; i < n; i++) if ((pts[i + 1] - pts[i]).Length >= 30) seg.Add((pts[i], pts[i + 1], i));
+        for (var x = 0; x < seg.Count; x++)
+            for (var y = x + 2; y < seg.Count; y++)
+            {
+                if (seg[y].i - seg[x].i < 2) continue;
+                if (SegmentsCross(seg[x].a, seg[x].b, seg[y].a, seg[y].b, out var at))
+                    return $"it crosses its own track {(rwy.Threshold - at).Length / nm:0.0} nm from the runway";
+            }
+        // Turning.
+        double turn = 0; double? last = null;
+        for (var i = 0; i < n; i++)
+        {
+            var d = pts[i + 1] - pts[i];
+            if (d.Length < 30) continue;
+            if (last is { } lb) turn += Math.Abs(Geo2.Diff(lb, d.Bearing));
+            last = d.Bearing;
+        }
+        if (turn > 540) return $"it turns through {turn:0}°";
+        // Leaving its final.
+        var onFinal = false;
+        for (var i = 0; i <= n; i++)
+        {
+            var q = pts[i];
+            var along = rwy.Along(q); var off = Math.Abs(rwy.Offset(q));
+            if (!onFinal)
+            {
+                if (i < n && along < -0.5 * nm && along > -25 * nm && off < 0.3 * nm && (pts[i + 1] - q).Length > 30
+                    && Math.Abs(Geo2.Diff((pts[i + 1] - q).Bearing, rwy.Heading)) < 20) onFinal = true;
+            }
+            else if (along < 0 && off > 1.0 * nm) return $"it leaves its final {-along / nm:0.0} nm out";
+        }
+        // Far too long for where it starts.
+        double len = 0;
+        for (var i = 0; i < n; i++) len += (pts[i + 1] - pts[i]).Length;
+        len += (rwy.Threshold - pts[n]).Length;
+        var straight = (rwy.Threshold - pts[0]).Length;
+        if (len > 2 * straight + 40 * nm) return $"{len / nm:0} nm to fly from {straight / nm:0} nm out";
+        return null;
+    }
+
+    private static bool SegmentsCross(V2 a, V2 b, V2 c, V2 d, out V2 at)
+    {
+        at = default;
+        var r = b - a; var s = d - c;
+        var den = V2.Cross(r, s);
+        if (Math.Abs(den) < 1e-9) return false;
+        var t = V2.Cross(c - a, s) / den; var u = V2.Cross(c - a, r) / den;
+        if (t <= 1e-6 || t >= 1 - 1e-6 || u <= 1e-6 || u >= 1 - 1e-6) return false;
+        at = a + r * t;
+        return true;
+    }
+
+    /// <summary>Ways in refused by <see cref="RouteProblem"/> (and logged), for the self-test.</summary>
+    private int _routesRefused;
+    /// <summary>While set, <see cref="BuildArrivalPath"/> uses no real-track way in (the standard one).</summary>
+    private bool _noRealWay;
+    /// <summary>Set when the last <see cref="BuildArrivalPath"/> had to drop its real-track way in.</summary>
+    private bool _realWayRefused;
+
+    /// <summary>
     /// Parallel runways, same direction, whose centrelines are less than 2,500 ft (762 m) apart and overlap: one runway
     /// for wake turbulence (7110.65 3-9-6 f, 5-5-4 g, 6-1-5).
     /// </summary>
@@ -4043,7 +4118,7 @@ public sealed partial class TrafficWorld
             (int cut, List<V2> pts)? realVec = null;
             // The fan comes from the whole STAR (as far as 8 nm out), so an arrival that starts part-way along it, or
             // already past where real traffic turns off it, still flies the real tracks.
-            var fan = fullStar.Count >= 2 ? RealFan(rwy, fullStar) : null;
+            var fan = fullStar.Count >= 2 && !_noRealWay ? RealFan(rwy, fullStar) : null;
             var fanKey = $"{rwy.Ident}|{star?.Name}";
             f.Fan = null;
             if (fan is { Count: >= 3 })
@@ -4096,7 +4171,7 @@ public sealed partial class TrafficWorld
             // STAR round the east side and a built pattern back — SWA2522's loop — while real arrivals from there are
             // turned straight in): from the STAR's end back towards its start, the first point real arrivals to this
             // runway passed going its way, and the STAR is left there.
-            if (realVec is null && starPts.Count > 0)
+            if (realVec is null && starPts.Count > 0 && !_noRealWay)
             {
                 for (var k = starPts.Count - 1; k >= 0; k--)
                 {
@@ -4145,6 +4220,18 @@ public sealed partial class TrafficWorld
         var thrIndex = route.Count;
         route.Add(rwy.Threshold);
         route.Add(rwy.FarEnd);
+        // The route check: a real-track way in that fails it is dropped for the standard one (published arrival, then
+        // a downwind, base and final), and that's logged.
+        if (!_noRealWay) _realWayRefused = false;
+        if (from is null && !_noRealWay && RouteProblem(route, thrIndex, rwy) is { } why)
+        {
+            _routesRefused++;
+            Log($"{f.Callsign}: route refused — {why}; flies the standard way in instead");
+            _noRealWay = true;
+            try { BuildArrivalPath(f, from, entry); } finally { _noRealWay = false; }
+            _realWayRefused = true;
+            return;
+        }
         // Remove points that would make the aircraft double back near the runway.
         f.Route = string.Join(" → ", names);
         var temp = AirPath(route, _ => 200, 5000);
@@ -4605,6 +4692,13 @@ public sealed partial class TrafficWorld
         {
             var tr = found[(int)Math.Round(i * (found.Count - 1) / (double)Math.Max(1, n - 1))];
             var (cut, pts) = Fanned(tr, star);
+            // Real tracks that loop or were vectored round (crossing themselves, leaving the final) aren't ways in to
+            // copy: the route check applies to them before they're offered.
+            {
+                var whole = star.Take(Math.Min(cut + 1, star.Count)).Concat(pts).ToList();
+                var ti = whole.Count; whole.Add(rwy.Threshold);
+                if (RouteProblem(whole, ti, rwy) is not null) continue;
+            }
             double len = 0;
             for (var k = 0; k < cut && k + 1 < star.Count; k++) len += (star[k + 1] - star[k]).Length;
             var prev = star[Math.Min(cut, star.Count - 1)];
@@ -4612,6 +4706,7 @@ public sealed partial class TrafficWorld
             len += -rwy.Along(prev);
             res.Add((cut, pts, len / nm, _fanBusy.TryGetValue(tr.rest, out var bz) ? bz : 0));
         }
+        if (res.Count < 3) return null;
         res = res.OrderBy(x => x.lenNm).ToList();
         var medB = res.Select(x => x.busy).OrderBy(x => x).ElementAt(res.Count / 2);
         _fanQuiet = Math.Max(0, res.FindIndex(x => x.busy <= medB));
@@ -5687,6 +5782,12 @@ public sealed partial class TrafficWorld
         f.FanIdx = best;
         BuildArrivalPath(f, null, f.Pos);
         f.S = 0;
+        if (_realWayRefused)
+        {
+            f.FanIdx = was; f.Path = oldPath; f.S = oldS; f.ThrS = oldThr; f.Via = oldVia; f.Fan = oldFan; f.FanAt = Time;
+            (f.FanLeave, f.FanKey, f.Route, f.StarNm, f.AppNm, f.VectorRejoinS, f.DetourSec) = (oldLeave, oldKey, oldRoute, oldStarNm, oldAppNm, oldRejoin, oldDetour);
+            return double.NaN;
+        }
         // A rebuild that makes its way in much longer than the track change asked for, or that starts by turning
         // back, is thrown away (the old way is kept).
         var grown = (f.ThrS - f.S) / Geo2.MPerNm - toGo - (fan[best].lenNm - cur);
@@ -6001,6 +6102,13 @@ public sealed partial class TrafficWorld
         var rjIdx = 2 + added;
         var oldLimits = f.SpeedLimits.Where(l => l.S > oldS).Select(l => (off: l.S - oldS, l.Kt)).ToList();
         var thrIndex = pts.Count - 2;
+        if (RouteProblem(pts, thrIndex, f.Rwy!) is { } bad)
+        {
+            _routesRefused++;
+            Log($"{f.Callsign}: route refused — vectors for spacing: {bad}; keeps its way in");
+            f.LastVector = Time;
+            return false;
+        }
         f.Path = AirPath(pts, i => i >= thrIndex ? 1 : i <= rjIdx ? f.Ias : 180, f.AltFt);
         f.ThrS = f.Path.PointS[thrIndex];
         var at = f.Path.PointS[rjIdx];
@@ -6094,6 +6202,13 @@ public sealed partial class TrafficWorld
         if (newNm < baseNm && pts.Count > 1 && (pts[1] - pts[0]).Length > 300 && Math.Abs(Geo2.Diff((pts[1] - pts[0]).Bearing, f.Heading)) > 100) return addSec;
         var oldAS = keptS[ia];
         var thrIndex = pts.Count - 2;
+        if (RouteProblem(pts, thrIndex, rwy) is { } bad)
+        {
+            _routesRefused++;
+            Log($"{f.Callsign}: route refused — base turn at {newNm:0.0} nm: {bad}; keeps its way in");
+            f.LastTrombone = Time;
+            return double.NaN;
+        }
         var oldS = f.S;
         var oldLimits = f.SpeedLimits.Where(l => l.S > oldS).ToList();
         var oldAlt = f.AltLimits.Where(c => c.S > oldS).ToList();
