@@ -388,6 +388,42 @@ Console.WriteLine("== Crossing runways at Busy for an hour: land 27, depart 36 a
     Check(vecs * 10.0 / landings <= 2, "and at most 2 vectors for spacing per 10 landings");
 }
 
+Console.WriteLine("== The scoreboard: real arrivals read from their tracks and flown again by LAIA (Step 6)");
+{
+    var nm = Geo2.MPerNm;
+    var apt = new AirportModel(TestAirport.Build(false));
+    var world = new TrafficWorld(apt, new TestSource(), seed: 41) { Level = TrafficLevel.Busy, Wind = new Wind(270, 8) };
+    world.SelectRunways(true);
+    // "Real" tracks: LAIA's own arrivals for 90 minutes, as the Collector keeps them (45 nm, under 18,000 ft, every 5 s).
+    var t0 = 1795800000.0;
+    var tracks = new Dictionary<string, List<TrackPoint>>(); var lastT = new Dictionary<string, double>();
+    for (var t = 0.0; t < 5400; t += 0.5)
+    {
+        world.Step(0.5);
+        foreach (var f in world.Flights.Where(f => f.Kind == "arrival" && !f.Done && (!f.OnGround || f.Gs > 40)))
+        {
+            if (f.Pos.Length > 45 * nm || f.AltFt - apt.ElevationFt > 18000) continue;
+            if (lastT.TryGetValue(f.Id, out var lt) && world.Time - lt < 5) continue;
+            lastT[f.Id] = world.Time;
+            var (la, lo) = apt.Map.ToLatLon(f.Pos);
+            if (!tracks.TryGetValue(f.Id, out var tl)) tracks[f.Id] = tl = new();
+            tl.Add(new TrackPoint(t0 + world.Time, la, lo, f.OnGround ? apt.ElevationFt : f.AltFt, f.Heading));
+        }
+    }
+    var real = RealReplay.Arrivals(apt, tracks.Values.Cast<IReadOnlyList<TrackPoint>>().ToList());
+    var landedReal = world.Flights.Count(f => f.Kind == "arrival" && (f.OnGround || f.Done));
+    Console.WriteLine($"  {tracks.Count} tracks, {real.Count} read as arrivals ({string.Join(", ", real.GroupBy(a => a.Runway).Select(g => $"{g.Key}: {g.Count()}"))}); {landedReal} landed in the run");
+    Check(real.Count >= 8, $"the arrivals are read from their tracks ({real.Count})");
+    Check(real.All(a => a.TrackNm > 15 && a.ThrT > a.EntryT), "each with where it came in, its threshold time and its track miles");
+    var (start, count) = RealReplay.BusiestHour(real);
+    var sc = RealReplay.Replay(apt, null, new Wind(270, 8), real, start, start + 3600, new TestSource());
+    Console.WriteLine("  " + sc.Line());
+    foreach (var wl in sc.Worst) Console.WriteLine("    " + wl);
+    Check(sc.Scored >= 6 && sc.Landed >= sc.Scored - 1, $"flown again, they reach the runway ({sc.Landed} of {sc.Scored})");
+    Check(sc.OrderSame >= 0.75, $"LAIA flying its own traffic again puts most in the same order ({100 * sc.OrderSame:0}%)");
+    Check(sc.TimeErr < 150 && sc.PathNm < 4, $"and lands them about when and where they flew ({sc.TimeErr:0} s, {sc.PathNm:0.0} nm)");
+}
+
 Console.WriteLine("== The route check (27 Nov, KSFO: UAL436 flew a circle by the 28R final; loops every release)");
 {
     var nm = Geo2.MPerNm;

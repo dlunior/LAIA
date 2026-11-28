@@ -1187,7 +1187,10 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
             want.Add(n.ident.Length == 3 && n.ident.All(char.IsLetter) ? "K" + n.ident : n.ident);
         want.AddRange(_neighbourWant);
         want.AddRange(_aheadNeighbourWant);
-        return airports.Missing(want, sim.Simulator ?? "");
+        var res = airports.Missing(want, sim.Simulator ?? "");
+        // The hubs LAIA learns from whose layout it hasn't read yet (Step 6): two at a time, after anything the flight needs.
+        if (res.Count == 0) res.AddRange(airports.Missing(LearningService.MissingLayouts.Take(2), "").Take(2));
+        return res;
     }
 
     /// <summary>Real schedules wanted from LAIA Sim: the traffic airport and the flight plan's airports.</summary>

@@ -77,6 +77,9 @@ public sealed class AirportStore(ILogger<AirportStore> log)
         }
     }
 
+    /// <summary>An airport's layout as read from the simulator (for a model of its own, away from the live traffic's).</summary>
+    public AirportData? Data(string icao) { lock (_gate) { EnsureLoaded(); return _data.GetValueOrDefault(icao.Trim().ToUpperInvariant()); } }
+
     public AirportModel? Model(string icao)
     {
         lock (_gate)
