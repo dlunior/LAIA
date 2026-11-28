@@ -10,6 +10,11 @@ public sealed class AircraftState
     public double AltitudeFt { get; set; }
     /// <summary>Pressure altitude (standard 29.92): what flight levels are. 0 = not sent (older LAIA Sim).</summary>
     public double PressureAltFt { get; set; }
+    /// <summary>The altimeter's reading, its setting (inHg) and the outside air temperature — for the log that checks
+    /// the traffic's flight levels against the user's (27 Nov: traffic at FL360 shown +14 on the user's TCAS at FL360).</summary>
+    public double IndicatedAltFt { get; set; }
+    public double AltimeterInHg { get; set; }
+    public double OutsideTempC { get; set; }
     public double AglFt { get; set; }
     public double HeadingTrue { get; set; }
     public double HeadingMag { get; set; }

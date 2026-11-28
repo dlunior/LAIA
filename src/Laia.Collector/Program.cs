@@ -14,7 +14,9 @@ var options = new CollectorOptions(
     dataDir,
     KeepDays: Env("KEEP_DAYS", 90),
     FirstDays: Env("FIRST_DAYS", 14),
-    Countries: (Environment.GetEnvironmentVariable("COUNTRIES") ?? "US,CA").Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+    // The US includes its territories with airline service — Puerto Rico and the US Virgin Islands are their own
+    // countries in OurAirports' list (27 Nov: San Juan, a JetBlue and Delta focus city, had no tracks).
+    Countries: WithTerritories((Environment.GetEnvironmentVariable("COUNTRIES") ?? "US,CA").Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
         .Select(c => c.ToUpperInvariant()).ToHashSet());
 var version = Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion?.Split('+')[0] ?? "?";
 
@@ -99,5 +101,8 @@ app.MapGet("/", () =>
 });
 
 app.Run();
+
+static IEnumerable<string> WithTerritories(string[] countries) =>
+    countries.Any(c => c.Equals("US", StringComparison.OrdinalIgnoreCase)) ? countries.Concat(new[] { "PR", "VI" }) : countries;
 
 public sealed record CollectorOptions(string DataDir, int KeepDays, int FirstDays, HashSet<string> Countries);

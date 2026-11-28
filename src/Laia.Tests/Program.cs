@@ -388,6 +388,39 @@ Console.WriteLine("== Crossing runways at Busy for an hour: land 27, depart 36 a
     Check(vecs * 10.0 / landings <= 2, "and at most 2 vectors for spacing per 10 landings");
 }
 
+Console.WriteLine("== The route check (27 Nov, KSFO: UAL436 flew a circle by the 28R final; loops every release)");
+{
+    var nm = Geo2.MPerNm;
+    var apt = new AirportModel(TestAirport.Build(false));
+    var e27 = apt.Ends.First(e => e.Ident == "27");
+    var thr = e27.Threshold; var d = e27.Dir; var left = new V2(-d.Y, d.X);
+    V2 P(double alongNm, double leftNm) => thr + d * (alongNm * nm) + left * (leftNm * nm);
+    // A normal way in from the east: downwind beside the runway going east, base, final 10 nm out.
+    var normal = new List<V2> { P(-40, 15), P(-20, 5), P(0, 5), P(8, 5), P(12, 3), P(-11, 0), P(-6, 0) };
+    // (the downwind runs the opposite way to landing: along grows going east for a runway landing west)
+    normal = new List<V2> { P(25, 20), P(10, 5), P(-5, 5), P(-12, 5), P(-12, 0), P(-6, 0) };
+    var ti = normal.Count; normal.Add(thr);
+    var r1 = TrafficWorld.RouteProblem(normal, ti, e27);
+    Check(r1 is null, $"a downwind, base and final passes ({r1 ?? "ok"})");
+    // UAL436's: in towards the final, 4 nm out on it, then north across, east, south across its own way in, back on final 13 nm out.
+    var loop = new List<V2> { P(-30, -8), P(-8, -2), P(-4, 0), P(-4, 4), P(-12, 4), P(-14, -5), P(-13, 0), P(-6, 0) };
+    var t2 = loop.Count; loop.Add(thr);
+    var r2 = TrafficWorld.RouteProblem(loop, t2, e27);
+    Check(r2 is not null, $"UAL436's circle by the final is refused ({r2})");
+    // On the final, then off it and back.
+    var leave = new List<V2> { P(-24, 0), P(-15, 0), P(-12, 2.5), P(-9, 0), P(-5, 0) };
+    var t3 = leave.Count; leave.Add(thr);
+    var r3 = TrafficWorld.RouteProblem(leave, t3, e27);
+    Check(r3 is not null && r3.Contains("leaves its final"), $"leaving the final and coming back is refused ({r3})");
+    // Far too long: 30 nm out, 120 nm of zigzag.
+    var zig = new List<V2> { P(-30, 0) };
+    for (var k = 1; k <= 8; k++) zig.Add(P(-30 - (k % 2) * 14, (k % 2 == 0 ? 1 : -1) * 0.2 + k * 0.01));
+    zig.Add(P(-8, 0));
+    var t4 = zig.Count; zig.Add(thr);
+    var r4 = TrafficWorld.RouteProblem(zig, t4, e27);
+    Check(r4 is not null, $"a way in far longer than it needs is refused ({r4})");
+}
+
 Console.WriteLine("== Landing on two crossing runways (27 Nov, KPIT: AAL814 on 32 crossed its threshold 4 s after the user passed the 28L/32 intersection)");
 {
     var data = TestAirport.Build(false);
@@ -428,7 +461,9 @@ Console.WriteLine("== Landing on two crossing runways (27 Nov, KPIT: AAL814 on 3
                 conflicts.Add($"{k.Split('#')[0]} over the {a.rwy} threshold at {a.t:0} with {k2.Split('#')[0]} ({b.rwy}, threshold {b.t:0}) not yet through the intersection");
     var on27 = thr.Count(x => x.Value.rwy == "27"); var on36 = thr.Count(x => x.Value.rwy == "36");
     var gaX = log.Count(l => l.Contains("landing the crossing runway"));
-    Console.WriteLine($"  {on27} landed on 27, {on36} on 36; conflicts {conflicts.Count}; go-arounds for a crossing arrival {gaX}");
+    var refused = log.Count(l => l.Contains("route refused"));
+    Console.WriteLine($"  {on27} landed on 27, {on36} on 36; conflicts {conflicts.Count}; go-arounds for a crossing arrival {gaX}; routes refused {refused}");
+    foreach (var l in log.Where(l => l.Contains("route refused")).Take(5)) Console.WriteLine("    " + l);
     foreach (var c in conflicts.Take(4)) Console.WriteLine("    " + c);
     Check(on27 >= 6 && on36 >= 4, $"both runways take landings ({on27} on 27, {on36} on 36)");
     Check(conflicts.Count == 0, "no arrival crosses its threshold before one landing the crossing runway ahead of it is through the intersection");
