@@ -47,7 +47,13 @@ public sealed class PathGeom
     /// unwinds the same way, like a pilot feeding in and taking off nosewheel steering — the transition curve roads and
     /// railways use, instead of going from straight to full turn in an instant.
     /// </param>
-    public PathGeom(IList<V2> pts, Func<int, double> radius, double lateralAccel, bool ease = false)
+    /// <param name="startDir">
+    /// The way the aircraft is already going at the first point (an air route given in flight): the path starts with
+    /// the turn it can fly from there — an arc of <paramref name="startRadius"/> until it points at the first point it
+    /// can reach — instead of swinging round on the spot (user, 28 Nov: "Even one loop or unrealistic turn is a failure").
+    /// Points it can't reach inside that turn are passed by.
+    /// </param>
+    public PathGeom(IList<V2> pts, Func<int, double> radius, double lateralAccel, bool ease = false, double? startDir = null, double startRadius = 0)
     {
         var p = new List<V2>();
         var map = new List<int>(); // input index -> kept index
@@ -57,10 +63,51 @@ public sealed class PathGeom
             map.Add(p.Count - 1);
         }
         if (p.Count == 1) p.Add(p[0] + new V2(0, 0.6));
+        var rOverride = new Dictionary<int, double>();
+        var dropped0 = false;
+        if (!ease && startDir is { } sd && startRadius > 1 && p.Count >= 2)
+        {
+            var r0 = startRadius; var p0 = p[0];
+            V2 Centre(double dir, bool right) => p0 + V2.FromBearing(dir + (right ? 90 : -90), r0);
+            bool Unreachable(V2 t)
+            {
+                var right = Geo2.Diff(sd, (t - p0).Bearing) >= 0;
+                return (t - Centre(sd, right)).Length < 1.02 * r0;
+            }
+            var k = 1;
+            while (k < p.Count - 1 && Unreachable(p[k])) k++;
+            var turn0 = Geo2.Diff(sd, (p[k] - p0).Bearing);
+            if (Math.Abs(turn0) > 3)
+            {
+                var right = turn0 > 0;
+                var c = Centre(sd, right);
+                var arc = new List<V2>();
+                var h = sd;
+                for (var step = 0; step < 72; step++)
+                {
+                    var left = Geo2.Diff(h, (p[k] - (arc.Count > 0 ? arc[^1] : p0)).Bearing);
+                    if (Math.Abs(left) <= 5 || (right ? left < 0 : left > 0)) break;
+                    h += right ? 5 : -5;
+                    arc.Add(c + V2.FromBearing(h + (right ? -90 : 90), r0));
+                }
+                if (arc.Count > 0)
+                {
+                    var np = new List<V2> { p0 };
+                    np.AddRange(arc);
+                    for (var i = k; i < p.Count; i++) np.Add(p[i]);
+                    for (var j = 0; j < map.Count; j++)
+                        map[j] = map[j] == 0 ? 0 : map[j] < k ? arc.Count : map[j] - k + 1 + arc.Count;
+                    for (var i = 1; i <= arc.Count; i++) rOverride[i] = r0;
+                    p = np;
+                    dropped0 = true;
+                }
+            }
+        }
         // Taxiing: scenery often has many short segments around junctions (10–20 m), which would squeeze every turn
         // into a tight radius. Smooth the line first, never more than a few metres off the taxi line (still on the
         // pavement), so each turn has room to be a proper curve, as a pilot uses the fillet at a junction.
         var dropped = new HashSet<int>();
+        if (dropped0) dropped.Add(-1);
         if (ease && p.Count > 3)
         {
             var keep = Simplify(p, 6.0);
@@ -115,7 +162,7 @@ public sealed class PathGeom
             if (th < 0.5 || th > 179.5) continue; // straight on, or a complete reversal (no arc possible)
             turn[i] = th;
             var origIndex = map.IndexOf(i);
-            var r = Math.Max(1, radius(origIndex < 0 ? i : origIndex));
+            var r = rOverride.TryGetValue(i, out var ro) ? ro : Math.Max(1, radius(origIndex < 0 ? i : origIndex));
             var tanHalf = ease ? EasedTangent(th) : Math.Tan(th * Math.PI / 360);
             t[i] = r * tanHalf;
             rad[i] = r;

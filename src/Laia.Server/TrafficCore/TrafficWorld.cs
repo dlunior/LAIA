@@ -2146,7 +2146,8 @@ public sealed partial class TrafficWorld
             double sum = 0;
             for (var i = f.Flown.Count - 1; i > 0 && cur.t - f.Flown[i].t < 900; i--) sum += Geo2.Diff(f.Flown[i - 1].hdg, f.Flown[i].hdg);
             sum += dh;
-            if (Math.Abs(sum) >= 330) Fault("loop", $"a loop: turned {Math.Abs(sum):0}° {(sum > 0 ? "right" : "left")} within 15 minutes");
+            // After a go-around or a break-off the way back round to the final is one circuit (about 360°): more than that is a loop.
+            if (Math.Abs(sum) >= (f.WentAround || f.BreakOffs > 0 ? 420 : 330)) Fault("loop", $"a loop: turned {Math.Abs(sum):0}° {(sum > 0 ? "right" : "left")} within 15 minutes");
             // Crossing its own track (segments a minute or more old, within 2,000 ft).
             for (var i = 1; i < f.Flown.Count - 12; i++)
             {
@@ -3390,7 +3391,7 @@ public sealed partial class TrafficWorld
         // Keep going 30 nm past the last point so the path never runs out before the aircraft is removed.
         var last = pts[^1].P; var prev = pts[^2].P;
         pts.Add(new AirPoint(last + (last - prev).Unit * (30 * Geo2.MPerNm), ""));
-        f.Path = AirPath(pts.Select(p => p.P).ToList(), i => i <= 1 ? 1 : 190, f.AltFt + 2000);
+        f.Path = DeparturePath(pts.Select(p => p.P).ToList());
         CheckLoops(f, "departure route");
         SetSpeedLimits(f, pts);
         f.S = 0;
@@ -3967,13 +3968,44 @@ public sealed partial class TrafficWorld
     }
 
     /// <summary>An air route with corners sized for the speed flown there (25° bank).</summary>
-    private static PathGeom AirPath(List<V2> pts, Func<int, double> plannedIas, double altFt)
+    /// <param name="from">The aircraft it's for, when it's already flying: the new path begins with the turn it can
+    /// fly from the way it's going now, at its speed (25° of bank) — never a swing round on the spot.</param>
+    private static PathGeom AirPath(List<V2> pts, Func<int, double> plannedIas, double altFt, Flight? from = null, Func<int, double>? altAt = null)
     {
+        double? startDir = null; double startR = 0;
+        if (from is { OnGround: false, Path: { } old } && pts.Count > 0 && (pts[0] - from.Pos).Length < 100)
+        {
+            var d = old.At(Math.Clamp(from.S, 0, old.Length)).dir;
+            startDir = from.Reverse ? Geo2.Norm(d + 180) : d;
+            var v0 = Wind.Tas(Math.Max(from.Ias, 140), from.AltFt) * Kt;
+            startR = Math.Max(600, v0 * v0 / (G * Math.Tan(25 * Math.PI / 180)));
+        }
         return new PathGeom(pts, i =>
         {
             var ias = plannedIas(i);
             if (ias <= 1) return 30;
-            var v = Wind.Tas(ias, altFt) * Kt;
+            var v = Wind.Tas(ias, altAt?.Invoke(i) ?? altFt) * Kt;
+            return Math.Max(600, v * v / (G * Math.Tan(25 * Math.PI / 180)));
+        }, G * Math.Tan(25 * Math.PI / 180), startDir: startDir, startRadius: startR);
+    }
+
+    /// <summary>
+    /// A departure's corners sized for the speed it will really be flying there (user, 28 Nov: "Even one loop or
+    /// unrealistic turn is a failure" — the SID's corners were sized for 190 kt, and at 13 nm a jet is doing 250):
+    /// about 190 kt in the first 3 nm, 230 to 8 nm, 250 below 10,000 ft and 290 above, the height from a normal climb
+    /// (about 800 ft per nm), each at 25° of bank.
+    /// </summary>
+    private PathGeom DeparturePath(List<V2> pts)
+    {
+        var cum = new double[pts.Count];
+        for (var i = 1; i < pts.Count; i++) cum[i] = cum[i - 1] + (pts[i] - pts[i - 1]).Length / Geo2.MPerNm;
+        return new PathGeom(pts, i =>
+        {
+            if (i <= 1) return 30;
+            var dNm = cum[Math.Clamp(i, 0, cum.Length - 1)];
+            var alt = Math.Min(Apt.ElevationFt + 800 * dNm, 18000);
+            var ias = dNm < 3 ? 190 : dNm < 8 ? 230 : alt < 10000 ? 250 : 290;
+            var v = Wind.Tas(ias, alt) * Kt;
             return Math.Max(600, v * v / (G * Math.Tan(25 * Math.PI / 180)));
         }, G * Math.Tan(25 * Math.PI / 180));
     }
@@ -4441,8 +4473,8 @@ public sealed partial class TrafficWorld
         {
             if (i >= thrIndex) return 1;
             var d = (thrS - temp.PointS[i]) / Geo2.MPerNm;
-            return d > 20 ? 250 : d > 12 ? 210 : d > 7 ? 180 : 160;
-        }, 6000);
+            return d > 40 ? 290 : d > 20 ? 250 : d > 12 ? 210 : d > 7 ? 180 : 160;
+        }, 6000, from: f, altAt: i => i >= thrIndex ? 0 : Math.Clamp(rwy.ElevationFt + 300 * (thrS - temp.PointS[i]) / Geo2.MPerNm, 3000, 16000));
         f.ThrS = f.Path.PointS[thrIndex];
         f.StarNm = starIdx0 >= 0 && starIdx1 > starIdx0 ? (f.ThrS - f.Path.PointS[starIdx0]) / Geo2.MPerNm : 0;
         f.AppNm = starIdx1 >= 0 && starIdx1 < thrIndex ? (f.ThrS - f.Path.PointS[starIdx1]) / Geo2.MPerNm : f.ThrS / Geo2.MPerNm;
@@ -5003,7 +5035,11 @@ public sealed partial class TrafficWorld
                         {
                             var fix = app1[0];
                             var inbound = (app1[1].P - fix.P).Unit;
-                            var lead = fix.P - inbound * (3 * Geo2.MPerNm);
+                            // Joined at least 8 nm out (3 nm before the fix, further when the fix is close in), so the
+                            // final is intercepted at a controller's angle (30° at most, 7110.65 5-9-2) — never turned
+                            // onto from the side 6 nm out (28 Nov: DAL500–DAL510 joined the ILS 27 at 68–83°).
+                            var fixOut = -rwy.Along(fix.P) / Geo2.MPerNm;
+                            var lead = fix.P - inbound * (Math.Max(3, 8 - fixOut) * Geo2.MPerNm);
                             var route1 = new List<AirPoint>();
                             // Keep clear of the airport on the way there: go round its side, not over it.
                             var e = starPts[^1].P;
@@ -5662,7 +5698,7 @@ public sealed partial class TrafficWorld
         var thrIndex = bestPts.Count;
         bestPts.Add(best.Threshold); bestPts.Add(best.FarEnd);
         f.Rwy = best; f.Fan = null; f.FanKey = null;
-        f.Path = AirPath(bestPts, i => i >= thrIndex ? 1 : 200, f.AltFt);
+        f.Path = AirPath(bestPts, i => i >= thrIndex ? 1 : 200, f.AltFt, from: f);
         f.ThrS = f.Path.PointS[thrIndex];
         f.S = 0;
         f.SpeedLimits.Clear();
@@ -5704,7 +5740,7 @@ public sealed partial class TrafficWorld
         var thrIndex = pts.Count;
         pts.Add(rwy.Threshold);
         pts.Add(rwy.FarEnd);
-        f.Path = AirPath(pts, i => i >= thrIndex ? 1 : 200, f.AltFt);
+        f.Path = AirPath(pts, i => i >= thrIndex ? 1 : 200, f.AltFt, from: f);
         f.ThrS = f.Path.PointS[thrIndex];
         f.S = 0;
         f.SpeedLimits.Clear();
@@ -5744,7 +5780,7 @@ public sealed partial class TrafficWorld
         var pts = new List<V2> { p };
         pts.AddRange(f.Path!.Points);
         var thrIndex = pts.Count - 2;
-        f.Path = AirPath(pts, i => i >= thrIndex ? 1 : 180, 3000);
+        f.Path = AirPath(pts, i => i >= thrIndex ? 1 : 180, 3000, from: f);
         f.ThrS = f.Path.PointS[thrIndex];
         f.S = 0;
         f.LandingChecked = false;
@@ -6369,7 +6405,7 @@ public sealed partial class TrafficWorld
             f.LastVector = Time;
             return false;
         }
-        f.Path = AirPath(pts, i => i >= thrIndex ? 1 : i <= rjIdx ? f.Ias : 180, f.AltFt);
+        f.Path = AirPath(pts, i => i >= thrIndex ? 1 : i <= rjIdx ? f.Ias : 180, f.AltFt, from: f);
         f.ThrS = f.Path.PointS[thrIndex];
         var at = f.Path.PointS[rjIdx];
         f.VectorRejoinS = at;
@@ -6475,7 +6511,7 @@ public sealed partial class TrafficWorld
         var oldAlt = f.AltLimits.Where(c => c.S > oldS).ToList();
         var oldChecks = f.Checks.Where(c => c.S > oldS).ToList();
         var oldFixes = f.Fixes.Where(c => c.S > oldS).ToList();
-        f.Path = AirPath(pts, i => i >= thrIndex ? 1 : i == 0 ? Math.Max(f.Ias, 160) : 200, f.AltFt);
+        f.Path = AirPath(pts, i => i >= thrIndex ? 1 : i == 0 ? Math.Max(f.Ias, 160) : 200, f.AltFt, from: f);
         var newAS = f.Path.KeptS[newA];
         double Map(double sOld) => sOld <= oldAS ? sOld - oldS : sOld - oldAS + newAS;
         f.SpeedLimits = oldLimits.Select(l => (Map(l.S), l.Kt)).ToList();
@@ -6621,7 +6657,7 @@ public sealed partial class TrafficWorld
         pts.AddRange(remaining);
         var oldLimits = f.SpeedLimits.Where(l => l.S > f.S + 300).Select(l => (off: l.S - f.S, l.Kt)).ToList();
         var thrIndex = pts.Count - 2;
-        f.Path = AirPath(pts, i => i >= thrIndex ? 1 : i <= 8 ? f.Ias : 180, f.AltFt);
+        f.Path = AirPath(pts, i => i >= thrIndex ? 1 : i <= 8 ? f.Ias : 180, f.AltFt, from: f);
         f.ThrS = f.Path.PointS[thrIndex];
         var added = f.Path.PointS[Math.Min(8, f.Path.PointS.Length - 1)];
         f.SpeedLimits = oldLimits.Select(l => (added + l.off, l.Kt)).ToList();
@@ -6668,7 +6704,7 @@ public sealed partial class TrafficWorld
         var oldLimits = f.SpeedLimits.Where(l => l.S > f.S).Select(l => (off: l.S - f.S, l.Kt)).ToList();
         pts.AddRange(remaining);
         var thrIndex = pts.Count - 2;
-        f.Path = AirPath(pts, i => i >= thrIndex ? 1 : i < holdCount ? holdKt : 180, f.AltFt);
+        f.Path = AirPath(pts, i => i >= thrIndex ? 1 : i < holdCount ? holdKt : 180, f.AltFt, from: f);
         f.ThrS = f.Path.PointS[thrIndex];
         // The procedure's speed limits move with the route (they come after the hold now).
         var added = f.Path.PointS[holdCount - 1];
