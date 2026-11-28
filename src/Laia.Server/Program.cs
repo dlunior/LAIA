@@ -35,6 +35,8 @@ builder.Services.AddSingleton<RoutesDb>();
 builder.Services.AddHostedService<RoutesUpdater>();
 builder.Services.AddSingleton<NasrDb>();
 builder.Services.AddSingleton<AdsbHistory>();
+builder.Services.AddSingleton<LearningService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<LearningService>());
 builder.Services.AddSingleton<MetarReader>();
 builder.Services.AddSingleton<WindsAloftReader>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<WindsAloftReader>());
