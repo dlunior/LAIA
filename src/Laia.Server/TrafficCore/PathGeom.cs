@@ -53,7 +53,12 @@ public sealed class PathGeom
     /// can reach — instead of swinging round on the spot (user, 28 Nov: "Even one loop or unrealistic turn is a failure").
     /// Points it can't reach inside that turn are passed by.
     /// </param>
-    public PathGeom(IList<V2> pts, Func<int, double> radius, double lateralAccel, bool ease = false, double? startDir = null, double startRadius = 0)
+    /// <param name="flyBy">
+    /// An air route: two turns the same way too close together for the turn the aircraft flies there (the second
+    /// would have to start before the first has finished) become one turn where the line in and the line out meet —
+    /// as an airliner's navigation flies them — instead of being squeezed into turns tighter than it can fly.
+    /// </param>
+    public PathGeom(IList<V2> pts, Func<int, double> radius, double lateralAccel, bool ease = false, double? startDir = null, double startRadius = 0, bool flyBy = false)
     {
         var p = new List<V2>();
         var map = new List<int>(); // input index -> kept index
@@ -106,6 +111,38 @@ public sealed class PathGeom
         // Taxiing: scenery often has many short segments around junctions (10–20 m), which would squeeze every turn
         // into a tight radius. Smooth the line first, never more than a few metres off the taxi line (still on the
         // pavement), so each turn has room to be a proper curve, as a pilot uses the fillet at a junction.
+        if (flyBy && !ease)
+        {
+            double R(int i) { var oi = map.IndexOf(i); return rOverride.TryGetValue(i, out var ro) ? ro : Math.Max(1, radius(oi < 0 ? i : oi)); }
+            for (var pass = 0; pass < 40; pass++)
+            {
+                var merged = false;
+                for (var i = 1; i + 2 < p.Count; i++)
+                {
+                    if (rOverride.ContainsKey(i) || rOverride.ContainsKey(i + 1)) continue;
+                    var b0 = (p[i] - p[i - 1]).Bearing; var b1 = (p[i + 1] - p[i]).Bearing; var b2 = (p[i + 2] - p[i + 1]).Bearing;
+                    var thI = Geo2.Diff(b0, b1); var thJ = Geo2.Diff(b1, b2);
+                    if (Math.Abs(thI) < 0.5 || Math.Abs(thJ) < 0.5 || Math.Sign(thI) != Math.Sign(thJ) || Math.Abs(thI + thJ) >= 170) continue;
+                    // A shallow join (an intercept onto a final, 35° or less) stays shallow: the leg before it is kept.
+                    if (Math.Abs(thJ) <= 35 && Math.Abs(thI + thJ) > 35) continue;
+                    var seg = (p[i + 1] - p[i]).Length;
+                    var need = R(i) * Math.Tan(Math.Abs(thI) * Math.PI / 360) + R(i + 1) * Math.Tan(Math.Abs(thJ) * Math.PI / 360);
+                    if (need <= seg) continue;
+                    var rv = p[i] - p[i - 1]; var qv = p[i + 2] - p[i + 1];
+                    var den = V2.Cross(rv, qv);
+                    if (Math.Abs(den) < 1e-9) continue;
+                    var tm = V2.Cross(p[i + 1] - p[i - 1], qv) / den;
+                    if (tm <= 0) continue;
+                    p[i] = p[i - 1] + rv * tm;
+                    p.RemoveAt(i + 1);
+                    for (var j = 0; j < map.Count; j++) if (map[j] > i) map[j]--;
+                    dropped0 = true;
+                    merged = true;
+                    break;
+                }
+                if (!merged) break;
+            }
+        }
         var dropped = new HashSet<int>();
         if (dropped0) dropped.Add(-1);
         if (ease && p.Count > 3)
@@ -167,12 +204,20 @@ public sealed class PathGeom
             t[i] = r * tanHalf;
             rad[i] = r;
         }
+        var t0 = (double[])t.Clone();
         for (var i = 1; i < p.Count - 1; i++)
         {
             if (t[i] <= 0) continue;
             var lin = (p[i] - p[i - 1]).Length; var lout = (p[i + 1] - p[i]).Length;
             var maxIn = i - 1 == 0 ? lin * 0.95 : lin * 0.5;
             var maxOut = i + 1 == p.Count - 1 ? lout * 0.95 : lout * 0.5;
+            // An air route: a leg between two turns is shared as each needs it (a big turn and a small one), only
+            // squeezed in proportion when the two together don't fit.
+            if (flyBy)
+            {
+                if (i - 1 > 0) maxIn = t0[i - 1] + t0[i] <= lin ? t0[i] : lin * t0[i] / (t0[i - 1] + t0[i]);
+                if (i + 1 < p.Count - 1) maxOut = t0[i + 1] + t0[i] <= lout ? t0[i] : lout * t0[i] / (t0[i + 1] + t0[i]);
+            }
             var tt = Math.Min(t[i], Math.Min(maxIn, maxOut));
             if (tt < t[i]) { rad[i] = tt / (ease ? EasedTangent(turn[i]) : Math.Tan(turn[i] * Math.PI / 360)); t[i] = tt; }
         }

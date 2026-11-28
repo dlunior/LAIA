@@ -710,6 +710,25 @@ public sealed partial class TrafficWorld
         return (arr, dep, $"as real traffic used them on {Learned.Day} in a wind like today's (adsb.lol)");
     }
 
+    /// <summary>
+    /// The fastest it can be in the turns on its path in the next 20 s at 28° of bank (indicated, kt): an airliner
+    /// doesn't speed up through a turn it couldn't then fly — it finishes the turn first.
+    /// </summary>
+    private double CurveCapIas(Flight f)
+    {
+        if (f.Path is not { } p || f.OnGround) return double.MaxValue;
+        var minR = double.MaxValue;
+        var look = Math.Max(f.Gs, 150) * Kt * 20;
+        for (var d = 0.0; d <= look; d += 200)
+        {
+            var k = Math.Abs(p.At(Math.Min(p.Length, f.S + d)).k);
+            if (k > 1e-7) minR = Math.Min(minR, 1 / k);
+        }
+        if (minR == double.MaxValue) return double.MaxValue;
+        var tasKt = Math.Sqrt(G * Math.Tan(28 * Math.PI / 180) * minR) / Kt;
+        return tasKt * 100 / Math.Max(100, Wind.Tas(100, f.AltFt));
+    }
+
     private static bool SegmentsCross(V2 a0, V2 a1, V2 b0, V2 b1)
     {
         double C(V2 o, V2 a, V2 b) => V2.Cross(a - o, b - o);
@@ -2167,8 +2186,9 @@ public sealed partial class TrafficWorld
                 if (!f.FlownOnFinal && along is > -20 and < -0.5 && off < 0.3 && hd < 20)
                 {
                     f.FlownOnFinal = true;
-                    // The heading it came onto the final with: the largest difference in the last 40 s.
-                    var cut = f.Flown.Where(q => cur.t - q.t <= 40).Select(q => Math.Abs(Geo2.Diff(r.Heading, q.hdg))).DefaultIfEmpty(0).Max();
+                    // The heading it was intercepting on: as it came within 1 nm of the final's line (the last such sample).
+                    var near = f.Flown.Where(q => cur.t - q.t <= 90 && Math.Abs(r.Offset(q.p)) / nm is > 0.3 and < 1.0).ToList();
+                    var cut = near.Count > 0 ? Math.Abs(Geo2.Diff(r.Heading, near[^1].hdg)) : 0;
                     if (cut > 45 && cut < 135) Fault("intercept", $"joined its final at {cut:0}° ({-along:0.0} nm out) — controllers give 30° at most");
                 }
                 else if (f.FlownOnFinal && along < -0.3 && hd > 45 && !f.WentAround)
@@ -3991,7 +4011,7 @@ public sealed partial class TrafficWorld
             if (ias <= 1) return 30;
             var v = Wind.Tas(ias, altAt?.Invoke(i) ?? altFt) * Kt;
             return Math.Max(600, v * v / (G * Math.Tan(25 * Math.PI / 180)));
-        }, G * Math.Tan(25 * Math.PI / 180), startDir: startDir, startRadius: startR);
+        }, G * Math.Tan(25 * Math.PI / 180), startDir: startDir, startRadius: startR, flyBy: true);
     }
 
     /// <summary>
@@ -4012,7 +4032,7 @@ public sealed partial class TrafficWorld
             var ias = dNm < 3 ? 190 : dNm < 8 ? 230 : alt < 10000 ? 250 : 290;
             var v = Wind.Tas(ias, alt) * Kt;
             return Math.Max(600, v * v / (G * Math.Tan(25 * Math.PI / 180)));
-        }, G * Math.Tan(25 * Math.PI / 180));
+        }, G * Math.Tan(25 * Math.PI / 180), flyBy: true);
     }
 
     // ------------------------------------------------------------------ arrivals
@@ -5385,19 +5405,26 @@ public sealed partial class TrafficWorld
         // Generic: base 12.5 nm out, turning to intercept 1.6 nm from the course (≈ 28°); learned: the airport's own.
         var baseNm = sh.BaseNm;
         var endOfBaseNm = Math.Clamp((baseNm - JoinNm) * Math.Tan(sh.InterceptDeg * Math.PI / 180), 0.8, 4);
+        // Room on the base leg for the two turns an airliner flies at about 200 kt (25° of bank, about 1.4 nm radius):
+        // onto the base, and from it onto the intercept heading (user, 28 Nov: "Even one loop or unrealistic turn is a
+        // failure" — a 1.4 nm base between a 3 nm downwind and a 1.6 nm intercept couldn't be flown).
+        const double turnNm = 1.45;
+        var baseRoom = turnNm * (1 + Math.Tan((90 - sh.InterceptDeg) * Math.PI / 360));
         if (along > -baseNm * nm)
         {
             var dw = double.IsNaN(sh.DownwindNm) ? Math.Clamp(Math.Abs(off), 3 * nm, 6 * nm) : sh.DownwindNm * nm;
-            // From beyond the airport, close to its extended centreline: go round its side first.
+            dw = Math.Max(dw, (endOfBaseNm + baseRoom) * nm);
+            // From beyond the airport, close to its extended centreline: go round its side first — out to the downwind
+            // itself, not further out and back in.
             if (along > 3 * nm && Math.Abs(off) < 5 * nm)
-                pts.Add(thr + left * (side * 5 * nm) + dir * Math.Min(along, 12 * nm));
+                pts.Add(thr + left * (side * dw) + dir * Math.Min(along, 12 * nm));
             if (along > -6 * nm) pts.Add(thr + left * (side * dw) + dir * Math.Min(along, 2 * nm));   // on the downwind
             pts.Add(thr + left * (side * dw) - dir * (baseNm * nm));                        // turn base
         }
         else
         {
             // Beyond the base turn but off to the side: a base from about where it is.
-            pts.Add(thr + left * (side * Math.Clamp(Math.Abs(off), 3 * nm, 8 * nm)) - dir * (Math.Min(-along, 16 * nm)));
+            pts.Add(thr + left * (side * Math.Clamp(Math.Abs(off), (endOfBaseNm + baseRoom) * nm, 8 * nm)) - dir * (Math.Min(-along, 16 * nm)));
         }
         pts.Add(thr + left * (side * endOfBaseNm * nm) - dir * (baseNm * nm));             // end of base: intercept heading
         pts.Add(join);
@@ -5731,7 +5758,9 @@ public sealed partial class TrafficWorld
         // A second break-off soon after another on the same side goes wider and further out, not to the same spot.
         var wide = Time - _lastBreakoffAt < 120 && _lastBreakoffSide == side;
         _lastBreakoffAt = Time; _lastBreakoffSide = side;
-        var outPt = p + left * (side * (wide ? 7 : 4) * nm) - rwy.Dir * ((wide ? 8 : 4) * nm);
+        // Out at about right angles to the final (a controller's "turn right heading 360" off a 270 final), not back
+        // the way it came: the way round to the final again is then one circuit, about 360° in all.
+        var outPt = p + left * (side * (wide ? 7 : 4) * nm) - rwy.Dir * ((wide ? 3 : 1) * nm);
         var heading = (outPt - p).Bearing;
         _breakoffs++; f.BreakOffs++; f.Mgr = "vectored around"; f.Frozen = false; f.Rejoin = true;   // re-sequenced behind those nearer in
         Log($"{f.Callsign}: breaking off the approach for spacing ({why}): turn {(V2.Cross(V2.FromBearing(dir), outPt - p) > 0 ? "left" : "right")} heading {heading:000}, vectors back around");
@@ -6391,6 +6420,14 @@ public sealed partial class TrafficWorld
             if (Math.Atan2(d, L / 2) * 180 / Math.PI > 70) continue;
             var m = p + (rj - p) * 0.5 + axis.Perp * (right ? 1 : -1) * d;
             if (Math.Abs(Geo2.Diff((m - p).Bearing, dir)) > 60) continue;
+            // Flyable: the turn back at the dogleg's corner, and the turn onto its route again, each fit their legs at
+            // the speed it flies (25° of bank) — not a turn squeezed tighter (28 Nov: DAL509 41° in 5 s at 210 kt).
+            var vt = Wind.Tas(Math.Max(f.Ias, 230), f.AltFt) * Kt;
+            var rt = vt * vt / (G * Math.Tan(25 * Math.PI / 180));
+            var thMid = Math.Abs(Geo2.Diff((m - p).Bearing, (rj - m).Bearing)) * Math.PI / 180;
+            var nextPt = j + 1 < path.Points.Count ? path.Points[j + 1] : rj + (rj - m);
+            var thRj = Math.Abs(Geo2.Diff((rj - m).Bearing, (nextPt - rj).Bearing)) * Math.PI / 180;
+            if (rt * Math.Tan(thMid / 2) > 0.45 * Math.Min((m - p).Length, (rj - m).Length) || rt * Math.Tan(thMid / 2) + rt * Math.Tan(thRj / 2) > 0.9 * (rj - m).Length) continue;
             mid = m; ok = true; break;
         }
         if (!ok) return false;
@@ -7674,7 +7711,7 @@ public sealed partial class TrafficWorld
         if (agl <= 2500 && f.Pos.Length < 4 * Geo2.MPerNm && Airspace.Has200KnotArea(Apt.Icao)) targetIas = Math.Min(targetIas, 200);
         // The SID's published speed limits.
         targetIas = Math.Max(f.P.V2 + 10, Math.Min(targetIas, ProcedureLimit(f, true)));
-        f.Ias += Math.Clamp(targetIas - f.Ias, -1.0 * dt, 1.6 * dt);
+        f.Ias += targetIas > f.Ias ? Math.Max(0, Math.Min(Math.Min(targetIas, CurveCapIas(f)) - f.Ias, 1.6 * dt)) : Math.Max(targetIas - f.Ias, -1.0 * dt);
         var targetVs = agl < 1500 ? f.P.ClimbFpm : f.P.ClimbFpm * (f.Ias < targetIas - 5 ? 0.7 : 0.9);
         // The SID's "at or below" restrictions ahead: level off at them until the fix is passed.
         var cap = f.AltLimits.Where(c => c.Max > 0 && c.S > f.S - 0.2 * Geo2.MPerNm).Select(c => c.Max).DefaultIfEmpty(double.MaxValue).Min();
@@ -8252,7 +8289,7 @@ public sealed partial class TrafficWorld
             if (f.Phase == "flare") target = f.P.Vapp - 5;
             // Energy: it slows only as fast as its configuration and descent allow (descend OR slow, not both).
             if (target < f.Ias) f.Ias -= Math.Min(f.Ias - target, DecelRate(f, target, agl) * dt);
-            else f.Ias += Math.Min(target - f.Ias, 1.5 * dt);
+            else f.Ias += Math.Max(0, Math.Min(Math.Min(target, CurveCapIas(f)) - f.Ias, 1.5 * dt));
             if (dth < 6.5 || agl < 2200) f.Gear = true;
 
             double vsTarget;
