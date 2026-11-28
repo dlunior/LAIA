@@ -35,7 +35,7 @@ public sealed class LearningService(ILogger<LearningService> log, AirportStore a
     private static string Root => Path.Combine(Paths.DataDir, "data", "learning");
     private static string DataDir => Path.Combine(Root, "dataset");
     private static string ScoreDir => Path.Combine(Root, "scores");
-    private static readonly JsonSerializerOptions Json = new() { WriteIndented = false };
+    private static readonly JsonSerializerOptions Json = new() { WriteIndented = false, NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.AllowNamedFloatingPointLiterals };
 
     public string Status { get; private set; } = "starting";
     /// <summary>Hubs whose layout hasn't been read from the simulator yet (LAIA Sim is asked for a few at a time).</summary>
@@ -115,22 +115,21 @@ public sealed class LearningService(ILogger<LearningService> log, AirportStore a
         try { await UpgradeDays(have, ct); }
         catch (Exception ex) when (!ct.IsCancellationRequested) { log.LogInformation("Learning: days not read again ({msg})", ex.Message); }
 
-        // 2. The learned ways in: the examples, then training on the graphics card when there's more to learn from.
-        try { await ExportExamples(have, ct); await TrainIfNeeded(ct); }
-        catch (Exception ex) when (!ct.IsCancellationRequested) { log.LogInformation("Learning: the ways in weren't trained this round ({msg})", ex.Message); }
+        // 2. (0.1.333) No learned ways in: no flight flies a copied route (user, 28 Nov). The techniques are learned
+        // instead — first the pattern's shape, across the hubs, below; then sequencing, spacing and speed control.
 
         // 3. The scoreboard for this version — the rules, and the learned ways in when there's a model — and which
         // airports the model is used at: only where it beats the rules on the held-back days.
         var ver = typeof(LearningService).Assembly.GetName().Version?.ToString(3) ?? "?";
         var results = new List<ScoreRec>();
-        var model = _model;
+        RouteModel? model = null;
         var variants = new List<(string name, RouteModel? m)> { ("rules", null) };
         if (model is not null) variants.Add(($"model {model.Id}", model));
         foreach (var icao in have)
         {
             ct.ThrowIfCancellationRequested();
             var file = Path.Combine(ScoreDir, icao + ".json");
-            var past = File.Exists(file) ? JsonSerializer.Deserialize<List<ScoreRec>>(await File.ReadAllTextAsync(file, ct)) ?? new() : new();
+            var past = File.Exists(file) ? JsonSerializer.Deserialize<List<ScoreRec>>(await File.ReadAllTextAsync(file, ct), Json) ?? new() : new();
             foreach (var r in past) if (r.Variant.Length == 0) r.Variant = "rules";
             foreach (var (vname, vm) in variants)
             {
@@ -156,7 +155,7 @@ public sealed class LearningService(ILogger<LearningService> log, AirportStore a
         if (results.Count > 0)
         {
             var allPast = Directory.Exists(ScoreDir)
-                ? Directory.GetFiles(ScoreDir, "*.json").SelectMany(f => { try { return JsonSerializer.Deserialize<List<ScoreRec>>(File.ReadAllText(f)) ?? new List<ScoreRec>(); } catch { return new List<ScoreRec>(); } }).ToList()
+                ? Directory.GetFiles(ScoreDir, "*.json").SelectMany(f => { try { return JsonSerializer.Deserialize<List<ScoreRec>>(File.ReadAllText(f), Json) ?? new List<ScoreRec>(); } catch { return new List<ScoreRec>(); } }).ToList()
                 : new();
             var prevVer = allPast.Where(r => r.Version != ver).GroupBy(r => r.Version).OrderByDescending(g => g.Max(r => r.At)).FirstOrDefault()?.ToList();
             log.LogInformation("Scoreboard {v}, all hubs ({n} airport-hours): {sum}{cmp}", ver, results.Count, Summary(results),
@@ -293,7 +292,48 @@ public sealed class LearningService(ILogger<LearningService> log, AirportStore a
         }
     }
 
-    // ------------------------------------------------------------------ the learned ways in
+    // ------------------------------------------------------------------ the pattern learned across the hubs
+
+    /// <summary>One runway's pattern as real controllers flew it (from the training days only), and how many arrivals.</summary>
+    public sealed record ShapeRec(string Runway, int Count, double JoinNm, double BaseNm, double DownwindNm, double InterceptDeg);
+
+    /// <summary>
+    /// Keeps each hub's learned patterns (where real controllers join the final, turn base, how far out the downwind is,
+    /// the intercept angle) and works out the pattern across all the hubs — each runway weighted by its arrivals — that
+    /// LAIA flies at airports with no real traffic of their own learned (user, 28 Nov: "learn the techniques from those
+    /// busy airports and apply that to all airports").
+    /// </summary>
+    private void SaveShapes(string icao, AirportProfile prof)
+    {
+        try
+        {
+            var dir = Path.Combine(ModelDir, "shapes");
+            Directory.CreateDirectory(dir);
+            var recs = prof.Arrivals.Where(kv => kv.Value.Count >= 20 && !double.IsNaN(kv.Value.JoinP50))
+                .Select(kv => new ShapeRec(kv.Key, kv.Value.Count, kv.Value.JoinP50, kv.Value.BaseNm, kv.Value.DownwindNm, kv.Value.InterceptDeg)).ToList();
+            File.WriteAllText(Path.Combine(dir, icao + ".json"), JsonSerializer.Serialize(recs, Json));
+            var all = Directory.GetFiles(dir, "*.json").SelectMany(f => { try { return JsonSerializer.Deserialize<List<ShapeRec>>(File.ReadAllText(f), Json) ?? new List<ShapeRec>(); } catch { return new List<ShapeRec>(); } }).ToList();
+            if (all.Count < 5) return;
+            double W(Func<ShapeRec, double> f)
+            {
+                var l = all.Where(r => !double.IsNaN(f(r))).OrderBy(f).ToList();
+                if (l.Count == 0) return double.NaN;
+                var half = l.Sum(r => r.Count) / 2.0; double acc = 0;
+                foreach (var r in l) { acc += r.Count; if (acc >= half) return f(r); }
+                return f(l[^1]);
+            }
+            var g = new VectorShape(Math.Round(W(r => r.JoinNm), 1), Math.Round(W(r => r.BaseNm), 1), Math.Round(W(r => r.DownwindNm), 1), Math.Round(W(r => r.InterceptDeg)));
+            if (double.IsNaN(g.JoinNm) || double.IsNaN(g.BaseNm)) return;
+            var changed = TrafficWorld.GeneralShape != g;
+            TrafficWorld.GeneralShape = g;
+            File.WriteAllText(Path.Combine(ModelDir, "general-shape.json"), JsonSerializer.Serialize(g, Json));
+            if (changed) log.LogInformation("Pattern learned across {n} hub runways: final joined {j:0.0} nm out, base {b:0.0} nm out, downwind {d:0.0} nm off the final, {i:0}° intercept — flown at airports with no real traffic of their own learned",
+                all.Count, g.JoinNm, g.BaseNm, g.DownwindNm, g.InterceptDeg);
+        }
+        catch (Exception ex) { log.LogInformation("Pattern across the hubs not worked out ({msg})", ex.Message); }
+    }
+
+    // ------------------------------------------------------------------ the learned ways in (0.1.331–0.1.332; not used since)
 
     private static string TrainDir => Path.Combine(Root, "train");
     private static string ModelDir => Path.Combine(Root, "models");
@@ -303,26 +343,20 @@ public sealed class LearningService(ILogger<LearningService> log, AirportStore a
     private static readonly object _mgate = new();
 
     /// <summary>The learned ways in for this airport, when the model beat the rules on its scoreboard; null otherwise.</summary>
-    public static RouteModel? ModelFor(string icao)
-    {
-        lock (_mgate) return _model is not null && _approved.TryGetValue(icao, out var a) && a.ok ? _model : null;
-    }
+    public static RouteModel? ModelFor(string icao) => null;   // 0.1.333: ways in are built, never copied (user, 28 Nov)
 
     public override Task StartAsync(CancellationToken ct)
     {
         try
         {
-            var m = RouteModel.Load(Path.Combine(ModelDir, "routes.json"));
-            var ap = Path.Combine(ModelDir, "approved.json");
-            var appr = File.Exists(ap) ? JsonSerializer.Deserialize<Dictionary<string, Approval>>(File.ReadAllText(ap)) ?? new() : new();
-            lock (_mgate)
+            var gs = Path.Combine(ModelDir, "general-shape.json");
+            if (File.Exists(gs) && JsonSerializer.Deserialize<VectorShape>(File.ReadAllText(gs), Json) is { } shape)
             {
-                _model = m;
-                _approved = appr.Where(kv => m is not null && kv.Value.Model == m.Id).ToDictionary(kv => kv.Key, kv => (kv.Value.Ok, kv.Value.Why), StringComparer.OrdinalIgnoreCase);
+                TrafficWorld.GeneralShape = shape;
+                log.LogInformation("Pattern learned across the hubs: final joined {j:0.0} nm out, base {b:0.0} nm out, downwind {d:0.0} nm off the final, {i:0}° intercept", shape.JoinNm, shape.BaseNm, shape.DownwindNm, shape.InterceptDeg);
             }
-            if (m is not null) log.LogInformation("Learned ways in {id} (trained {t}): used at {n} airport(s)", m.Id, m.Trained, _approved.Count(kv => kv.Value.ok));
         }
-        catch (Exception ex) { log.LogInformation("Learned ways in not loaded ({msg})", ex.Message); }
+        catch (Exception ex) { log.LogInformation("General pattern not loaded ({msg})", ex.Message); }
         return base.StartAsync(ct);
     }
 
@@ -561,6 +595,7 @@ public sealed class LearningService(ILogger<LearningService> log, AirportStore a
         try { prof = TrackLearner.Learn(icao, apt.Map, apt.ElevationFt, apt.Ends, tracks, "LAIA Collector (training days)", $"{trainDays[^1]}–{trainDays[0]}"); }
         catch (Exception ex) { log.LogInformation("Scoreboard: {icao} not learned ({msg})", icao, ex.Message); }
         tracks.Clear();
+        if (prof is not null) SaveShapes(icao, prof);
         var res = new List<ScoreRec>();
         foreach (var day in testDays)
         {
