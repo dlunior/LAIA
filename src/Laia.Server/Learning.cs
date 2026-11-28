@@ -638,7 +638,8 @@ public sealed partial class LearningService(ILogger<LearningService> log, Airpor
             {
                 Version = ver, Variant = variant, Airport = icao, Day = day, Window = score.Window, Scored = score.Scored, Landed = score.Landed, Order = score.OrderSame,
                 TimeErr = score.TimeErr, TimeBias = score.TimeBias, Miles = score.MilesDiff, PathNm = score.PathNm, Per10 = score.Per10, SpeedErr = score.SpeedErr,
-                Line = score.Line() + $" (wind {wind.FromDeg:000}/{wind.Kt:0}; {sw.Elapsed.TotalSeconds:0} s to run)" + (score.Worst.Count > 0 ? "; furthest out: " + string.Join("; ", score.Worst) : ""),
+                Line = score.Line() + $" (wind {wind.FromDeg:000}/{wind.Kt:0}; {sw.Elapsed.TotalSeconds:0} s to run)" + (score.Worst.Count > 0 ? "; furthest out: " + string.Join("; ", score.Worst) : "")
+                       + (score.UnrealisticLines.Count > 0 ? "; UNREALISTIC: " + string.Join(" | ", score.UnrealisticLines) : ""),
                 At = DateTime.UtcNow,
             };
             res.Add(rec);
@@ -655,7 +656,7 @@ public sealed partial class LearningService(ILogger<LearningService> log, Airpor
     private static string Summary(List<ScoreRec> rs) =>
         $"landing order as real {100 * Med(rs.Select(r => r.Order)):0}%, landing time ±{Med(rs.Select(r => r.TimeErr)):0} s, track miles {RealReplay.Score.Sg(Med(rs.Select(r => r.Miles)), "0.0")} nm, " +
         $"path {Med(rs.Select(r => r.PathNm)):0.0} nm from the real one, speeds ±{Med(rs.Select(r => r.SpeedErr)):0} kt at 30/20/10 nm, flown to the runway {100.0 * rs.Sum(r => r.Landed) / Math.Max(1, rs.Sum(r => r.Scored)):0}%; per 10 landings " +
-        string.Join(", ", new[] { "go-arounds", "break-offs", "vectors", "routes refused", "separation warnings" }.Select(k => $"{k} {Med(rs.Select(r => r.Per10.GetValueOrDefault(k, double.NaN))):0.0}"));
+        string.Join(", ", new[] { "loops and unrealistic turns", "go-arounds", "break-offs", "vectors", "routes refused", "separation warnings" }.Select(k => $"{k} {Med(rs.Select(r => r.Per10.GetValueOrDefault(k, double.NaN))):0.0}"));
 
     private static string Compare(List<ScoreRec> before, List<ScoreRec> now)
     {

@@ -132,6 +132,9 @@ public static class RealReplay
         public double RealMin = double.NaN, LaiaMin = double.NaN;
         /// <summary>LAIA's ground speed against the real one at 30, 20 and 10 nm from the threshold (median size and sign, kt).</summary>
         public double SpeedErr = double.NaN, SpeedBias = double.NaN;
+        /// <summary>Loops and unrealistic turns flown (the goal is none), and the first few.</summary>
+        public int Unrealistic;
+        public List<string> UnrealisticLines = new();
         /// <summary>Why the route check refused ways in, and how many arrivals each time (one count per arrival and reason).</summary>
         public Dictionary<string, int> Refused = new();
 
@@ -266,6 +269,11 @@ public static class RealReplay
             score.Refused[kind] = score.Refused.GetValueOrDefault(kind) + 1;
         }
         score.Per10["separation warnings"] = C("SEPARATION") / per;
+        // The goal is none (user, 28 Nov: "Even one loop or unrealistic turn is a failure").
+        var bad = lines.Where(l => l.Contains("UNREALISTIC")).ToList();
+        score.Per10["loops and unrealistic turns"] = bad.Count / per;
+        score.Unrealistic = bad.Count;
+        score.UnrealisticLines.AddRange(bad.Take(5).Select(l => l.Trim()));
         return score;
     }
 

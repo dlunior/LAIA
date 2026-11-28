@@ -215,6 +215,8 @@ public sealed partial class LearningService
         var why = new List<string>();
         if (!double.IsNaN(oR) && !double.IsNaN(oA) && oA < oR - 0.02) why.Add($"landing order {100 * oA:0}% against {100 * oR:0}%");
         if (tA > tR * 1.05 + 5) why.Add($"landing times ±{tA:0} s against ±{tR:0}");
+        double Bad(List<ScoreRec> l) => l.Sum(r => r.Per10.GetValueOrDefault("loops and unrealistic turns") * Math.Max(1, r.Landed) / 10.0);
+        if (Bad(atc) > Bad(rules)) why.Add($"{Bad(atc):0} loops or unrealistic turns against {Bad(rules):0}");
         if (Ev(atc) > Ev(rules) + 0.5) why.Add($"go-arounds and break-offs {Ev(atc):0.0} per 10 against {Ev(rules):0.0}");
         var better = (oA >= oR + 0.02) || tA < tR * 0.95 || (!double.IsNaN(sA) && !double.IsNaN(sR) && sA < sR - 3);
         if (why.Count == 0 && !better) why.Add("no better than the rules");

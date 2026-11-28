@@ -3370,6 +3370,17 @@ Console.WriteLine("== STAR chart \"expect\" restrictions (BITHO7, FQM3; d-TPP 26
     Check(TrafficWorld.ExpectApplies("dir:S", "17R", 172) && !TrafficWorld.ExpectApplies("dir:S", "35L", 352), "a landing-south expect applies to 17R, not 35L");
 }
 
+Console.WriteLine("== Loops and unrealistic turns, in everything flown above (user, 28 Nov: \"Even one loop or unrealistic turn is a failure\")");
+{
+    var all = TrafficWorld.AllUnrealistic.ToList();
+    foreach (var g in all.GroupBy(l => System.Text.RegularExpressions.Regex.Match(l, @"UNREALISTIC — (a loop|crossed its own track|turned \d+° in|joined its final|turned off its final)").Groups[1].Value))
+    {
+        Console.WriteLine($"  {(g.Key.Length > 0 ? g.Key : "other")}: {g.Count()}");
+        foreach (var l in g.Take(8)) Console.WriteLine("    " + l);
+    }
+    Check(all.Count == 0, $"no loops or unrealistic turns flown ({all.Count})");
+}
+
 Console.WriteLine(failures.Count == 0 ? "TRAFFIC CHECKS PASSED" : $"TRAFFIC CHECKS FAILED: {failures.Count}");
 return failures.Count == 0 ? 0 : 1;
 

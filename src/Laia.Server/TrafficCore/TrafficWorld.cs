@@ -211,6 +211,12 @@ public sealed class Flight
     /// <summary>The learned controller's speed reduction by distance to go (Release 4b): how much of <see cref="SlowDv"/>
     /// it takes at each nm from 20 to 45 out (1 = all of it), worked out for the delay it was last asked to lose.</summary>
     public double[]? AtcSlowShape;
+    /// <summary>The flown-path watch (user, 28 Nov: "Even one loop or unrealistic turn is a failure"): headings and
+    /// positions every 5 s since the last go-around or break-off, what's been found (once per kind), and whether it's
+    /// been established on its final.</summary>
+    public readonly List<(double t, V2 p, double hdg, double alt)> Flown = new();
+    public readonly HashSet<string> FlownFaults = new();
+    public bool FlownOnFinal;
     public double AtcSlowShapeFor = double.NaN;
     public bool Frozen;
     /// <summary>In the landing sequence: within 40 nm of its runway's approach end and at or below 8,000 ft above the
@@ -1019,7 +1025,7 @@ public sealed partial class TrafficWorld
         foreach (var f in Flights.ToList())
         {
             if (f.Done) continue;
-            try { Advance(f, dt); RecordTrail(f); if (!f.OnGround && f.Checks.Count > 0) CheckRestrictions(f); if (!f.OnGround && f.Fixes.Count > 0) CheckFixes(f); }
+            try { Advance(f, dt); RecordTrail(f); WatchFlown(f); if (!f.OnGround && f.Checks.Count > 0) CheckRestrictions(f); if (!f.OnGround && f.Fixes.Count > 0) CheckFixes(f); }
             catch (Exception ex) { Log($"{f.Callsign}: {ex.Message}; removed"); f.Done = true; }
         }
         foreach (var f in Flights.Where(f => f.Done && f.Spot is not null)) f.Spot = null;
@@ -2083,6 +2089,88 @@ public sealed partial class TrafficWorld
     }
 
     /// <summary>Breadcrumbs of where each flight has been: every 2 s on the ground, every 5 s in the air, the last ~40 minutes.</summary>
+    /// <summary>Every loop or unrealistic turn flown in this process (all airports) — for the tests and the scoreboard.</summary>
+    public static readonly System.Collections.Concurrent.ConcurrentQueue<string> AllUnrealistic = new();
+    /// <summary>Loops and unrealistic turns flown at this airport.</summary>
+    public int UnrealisticCount { get; private set; }
+
+    /// <summary>
+    /// The flown-path watch (user, 28 Nov: "Even one loop or unrealistic turn is a failure. That's the goal."). Every AI
+    /// aircraft in the air, from what it actually flew (not the route it was given), every 5 s:
+    /// - a loop: turning through 330° or more the same way within 15 minutes (no holds are ever given, and no real way
+    ///   in — downwind, base, final — turns more than about 270° one way);
+    /// - crossing its own track within 2,000 ft of the height it was at before;
+    /// - a turn sharper than an airliner flies: more than half again the rate of a 30° bank at its speed;
+    /// - an intercept onto its final steeper than 45° (7110.65 5-9-2: 30°, 20° near the approach gate);
+    /// - turning off its final once established on it (other than a go-around or a break-off).
+    /// Each is logged once per flight as "UNREALISTIC" with where it was. A go-around or a break-off starts the watch
+    /// afresh (a circuit back round is what it is: those are counted on their own).
+    /// </summary>
+    private void WatchFlown(Flight f)
+    {
+        if (f.OnGround || f.Done || f.Kind is not ("arrival" or "departure") || f.AglFt(Apt.ElevationFt) < 300) { if (f.OnGround) { f.Flown.Clear(); f.FlownOnFinal = false; } return; }
+        if (f.Flown.Count > 0 && Time - f.Flown[^1].t < 5) return;
+        if (f.Flown.Count > 0 && (f.WentAround && f.FlownFaults.Add("_reset_ga") || f.BreakOffs > 0 && f.FlownFaults.Add($"_reset_bo{f.BreakOffs}")))
+        { f.Flown.Clear(); f.FlownOnFinal = false; }
+        var nm = Geo2.MPerNm;
+        var cur = (t: Time, p: f.Pos, hdg: f.Heading, alt: f.AltFt);
+        var where = (f.Rwy is { } wr ? $"{(f.Pos - wr.Threshold).Length / nm:0} nm from {wr.Ident}" : $"{f.Pos.Length / nm:0} nm from {Apt.Icao}") + $" at {f.AltFt:N0} ft";
+        void Fault(string kind, string what)
+        {
+            if (!f.FlownFaults.Add(kind)) return;
+            UnrealisticCount++;
+            var line = $"{f.Callsign}: UNREALISTIC — {what} ({where})";
+            Log(line);
+            AllUnrealistic.Enqueue($"{Apt.Icao} {line}");
+        }
+        if (f.Flown.Count > 0)
+        {
+            var last = f.Flown[^1];
+            var dh = Geo2.Diff(last.hdg, cur.hdg);
+            var dt = cur.t - last.t;
+            // Too sharp for an airliner: half again a 30° bank's rate at its true airspeed.
+            var v = Math.Max(60, Wind.Tas(Math.Max(f.Ias, 120), f.AltFt)) * Kt;
+            var maxRate = G * Math.Tan(30 * Math.PI / 180) / v * 180 / Math.PI;
+            if (Math.Abs(dh) > 10 && Math.Abs(dh) / dt > 1.5 * maxRate)
+                Fault("sharp", $"turned {Math.Abs(dh):0}° in {dt:0} s at {f.Ias:0} kt — {Math.Abs(dh) / dt:0.0}°/s, an airliner turns about {maxRate:0.0}°/s");
+            // A loop: 330° the same way within 15 minutes.
+            double sum = 0;
+            for (var i = f.Flown.Count - 1; i > 0 && cur.t - f.Flown[i].t < 900; i--) sum += Geo2.Diff(f.Flown[i - 1].hdg, f.Flown[i].hdg);
+            sum += dh;
+            if (Math.Abs(sum) >= 330) Fault("loop", $"a loop: turned {Math.Abs(sum):0}° {(sum > 0 ? "right" : "left")} within 15 minutes");
+            // Crossing its own track (segments a minute or more old, within 2,000 ft).
+            for (var i = 1; i < f.Flown.Count - 12; i++)
+            {
+                var a = f.Flown[i - 1]; var b = f.Flown[i];
+                if (Math.Abs(b.alt - cur.alt) > 2000) continue;
+                if (SegmentsCross(a.p, b.p, last.p, cur.p)) { Fault("crosses", $"crossed its own track from {(cur.t - b.t) / 60:0} minutes before, {Math.Abs(b.alt - cur.alt):0} ft from the height it was at then"); break; }
+            }
+            if (f.Kind == "arrival" && f.Rwy is { } r)
+            {
+                var along = r.Along(f.Pos) / nm; var off = Math.Abs(r.Offset(f.Pos)) / nm;
+                var hd = Math.Abs(Geo2.Diff(r.Heading, f.Heading));
+                if (!f.FlownOnFinal && along is > -20 and < -0.5 && off < 0.3 && hd < 20)
+                {
+                    f.FlownOnFinal = true;
+                    // The heading it came onto the final with: the largest difference in the last 40 s.
+                    var cut = f.Flown.Where(q => cur.t - q.t <= 40).Select(q => Math.Abs(Geo2.Diff(r.Heading, q.hdg))).DefaultIfEmpty(0).Max();
+                    if (cut > 45 && cut < 135) Fault("intercept", $"joined its final at {cut:0}° ({-along:0.0} nm out) — controllers give 30° at most");
+                }
+                else if (f.FlownOnFinal && along < -0.3 && hd > 45 && !f.WentAround)
+                    Fault("offfinal", $"turned off its final once established ({hd:0}° off the runway heading, {-along:0.0} nm out)");
+            }
+        }
+        f.Flown.Add(cur);
+        if (f.Flown.Count > 400) f.Flown.RemoveRange(0, f.Flown.Count - 400);
+    }
+
+    private static bool SegmentsCross(V2 a, V2 b, V2 c, V2 d)
+    {
+        double O(V2 p, V2 q, V2 r) => V2.Cross(q - p, r - p);
+        var d1 = O(c, d, a); var d2 = O(c, d, b); var d3 = O(a, b, c); var d4 = O(a, b, d);
+        return (d1 > 0) != (d2 > 0) && (d3 > 0) != (d4 > 0) && Math.Abs(d1) > 1e-6 && Math.Abs(d3) > 1e-6;
+    }
+
     private void RecordTrail(Flight f)
     {
         if (f.Phase is "parked" or "boarding") return;
