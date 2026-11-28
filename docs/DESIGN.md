@@ -492,25 +492,31 @@ around. Airliners can't do that on a taxiway, and a real ground controller never
 **Handoffs**
 - Every AI flight is handed from sector to sector at real boundaries and altitudes. The user's handoffs give the frequency of whichever sector is actually open.
 
-### Step 6: Learned airport profiles (GPU training)
-- **Sources:** adsb.lol daily history dumps (main source) and the user's OpenSky account for live recording (OAuth2 client `credentials.json`, to be added to LAIA Sim settings).
-- **Learned per airport:**
-  - Runway configurations used in each wind.
-  - Which approach is used with which neighbouring-airport configuration (e.g. LGA RNAV X vs Y 31 against JFK's flow).
-  - Real approach paths and vector patterns.
-  - **Radar-vector procedures, researched ahead of time.** Many SIDs are "fly runway heading, expect vectors" (LaGuardia's LGA departure, for example), and many STARs end in vectors with no joining point to an approach. For those, LAIA learns from real previous flights (ADS-B tracks) where they actually go:
-    - **Departures:** the headings, turn points and climb at each altitude after takeoff, per runway and per departure fix or direction, until they join their route.
-    - **Arrivals:** the downwind, base and intercept paths from the STAR's end to final, per runway configuration. This includes how far out they're turned in at busy and quiet times, and where traffic is extended or turned short.
-    - **Stored per airport and runway configuration,** as typical paths plus their normal spread, so not every flight flies exactly the same line.
-    - **Used by:** the AI traffic (vectors that look like the real airport's), the sequencer (its vector and extension options are the ones real controllers use there) and, in ATC mode, the controller's instructions to the user.
-    - **Until an airport has been learned,** the current generic vectors (downwind, base, intercept about 8 nm out) are used.
-  - Arrival corridors (used to check and adjust the STAR groups and sector limits).
-  - The speeds actually flown.
-  - Typical delays.
-- **Researched ahead of time, tied to flight planning:**
-  - When a SimBrief plan is loaded, LAIA researches the departure and arrival airports and their neighbours in the background, so the learned data is ready before the user gets there.
-  - Airports already learned are refreshed now and then, for example when the procedures change or the profile is a few months old.
-- **Training** runs on the 2080 Ti overnight. Learned data is shareable with other users, all in the background with no user action.
+### Step 6: Learning from real traffic on the GPU (plan rewritten 27 Nov 2026 — for the user's review, nothing built yet)
+
+**Why (user, 27 Nov, after KPIT–KSFO on 0.1.327):** "The whole point of running LAIA on this other PC is to utilize the GPU... so it can learn. It's not learning anything, we give rules, and more rules and more rules with, to my opinion, zero improvement." He's right: the LAIA PC's graphics card shows 0% busy all evening, and what LAIA calls "learned" today is averages from real tracks (final joined at 14.4 nm, downwind 12.4 nm out) feeding hand-written rules. Each flight finds a case the rules don't cover (tonight: UAL436 put behind the user while 30 nm ahead of them on DYAMD5, slowed 40 kt for half an hour, then a full circle at 2,000 ft by the 28R final that also sent an Oakland arrival around), a rule is added, and the next flight finds the next case. "We have the ADS-B data... there are 86 hubs / focus cities it can pre-learn that we identified in routegen."
+
+**The principle: learned behaviour proposes, rules dispose.**
+- *Learned* (from real traffic): how traffic flows at each airport — the ways in from each direction to each runway, when and where real controllers turn traffic onto base and final, who they put first, how they absorb delay (speed, a longer downwind, vectors), how long it all takes.
+- *Kept as rules* (the regulations — never learned): separation (3 nm / 1,000 ft, wake, same-runway, crossing runways, close parallels), published restrictions, no holds, the user never directed, and a final check that every route is flyable (no loop, no crossing itself, not past the runway before its final, not far too long). Anything a model proposes that fails a rule is refused, and the standard way in is used instead — logged with the reason.
+
+**The data (inventory of the LAIA Collector, 27 Nov):** 26 days stored (1–26 Nov; it keeps 90), 582 US/Canadian airports with tracks, 12.8 GB. Each track is one passenger jet within 45 nm and below 18,000 ft of an airport: points about every 5 s of time, position, altitude and track. Callsign, type and route aren't in the tracks; they're in the Collector's flight list (callsign, type, registration, from, to, take-off and landing time), so the two are matched by time. Of routegen's 86 hubs and focus cities (`WIKI_HUBS`), 20 are overseas cargo hubs (Collector watches the US and Canada only); of the 66 North American ones, 61 have 26 days of tracks — 784,000 tracks and 473,000 landings — from Chicago O'Hare (30,000 landings), Atlanta (25,000), Dallas–Fort Worth (24,000) and Denver (21,000) down to Halifax (100), Hamilton (120) and Rockford (79). No data: Fort Worth Alliance (cargo, no scheduled service), Kona, Lihue, Maui (not watched — to check) and San Juan (Puerto Rico isn't "US" in the airport list the Collector uses — to add). Not in the tracks: the wind and the ATIS at the time — the runways in use are read from the landings themselves, and the wind from the Open-Meteo archive for that hour.
+
+**What gets learned, in order (each its own release, each scored before it replaces anything):**
+1. *A scoreboard first — of today's rule-based LAIA.* Before any model: for each hub, a few real days held back; LAIA is fed the same traffic (where each real arrival was 45 nm out, and when) and flies it; its routes, landing order, landing times and track miles are compared with what really happened. That's the baseline every learned piece must beat, and it answers "is it improving?" with numbers in the log and on the control page, per airport.
+2. *Ways in (the routes).* A model trained on all 61 hubs' arrivals, then tuned per airport, that gives the path from where an arrival is to its runway — lateral path, altitude and speed along it — for the runway configuration, the direction it comes from, the wind and how busy it is. Every route looks like one a real aircraft flew, instead of LAIA stitching pieces of real tracks or bending its own downwind (the source of the loops). An airport without enough data uses the general model, which already knows how airline traffic flows.
+3. *Controller decisions.* From the same days, what real controllers did with the traffic in front of them: the landing order (against the order 40 nm out), who was slowed, who was extended on the downwind or given vectors, and by how much. A second model learns those choices; LAIA's sequencer uses its choice and the rules check it. (Tonight, UAL436 would have stayed number 1: real controllers don't pass an aircraft 30 nm ahead on the same arrival.)
+4. *Timing.* Predicted time to the runway from any point, learned from real flights (it replaces the hand-made speed schedule in the estimates; the user's prediction stays as it is, from their own flying).
+5. *Later:* departures (climb-out paths and turns per runway and exit direction), then en route merging into the arrivals (the Collector's flight list goes beyond 45 nm).
+
+**How it runs on the LAIA PC:**
+- *Training* with PyTorch on the 2080 Ti (11 GB is plenty for these models), in the background: overnight, at low priority, and paused whenever someone else is using the PC. New Collector days are picked up as they arrive; the models retrain weekly. The first full training of all hubs is expected to take a few nights.
+- *Running* inside LAIA Server with ONNX Runtime (no Python needed while flying), on the GPU, falling back to the processor.
+- *Installing:* the training part (Python and PyTorch with CUDA, about 3 GB) is installed and kept up to date by the LAIA Server installer, nothing to do by hand.
+- *Models are files* per airport plus the general one, kept with the learned data — shareable with other users later.
+- *Tests:* the CI tests keep every rule (separation, the route check) exactly as now and run the models on fixed scenarios; the scores come from the LAIA PC, where the data and the GPU are.
+
+**To decide before building (the user's call):** the 3 GB training install on the LAIA PC; what "someone else is using the PC" means (signed-in user active, or a game running); whether the five missing hubs (Kona, Lihue, Maui, San Juan; Alliance is cargo-only) should be added to the Collector now.
 
 ### Step 7: The radio
 - **The language model** (on the GPU) understands the user's readbacks and produces the controller's responses in 7110.65 phraseology.
