@@ -256,7 +256,15 @@ public sealed partial class TrafficWorld
     public AirportModel Apt { get; }
     public IFlightSource Source { get; }
     public Random Rng { get; }
-    public Action<string> Log { get; set; } = _ => { };
+    public Action<string> Log
+    {
+        get => _logWrap ??= l => { _recentLog.Enqueue($"{Time,6:0} {l}"); while (_recentLog.Count > 600) _recentLog.TryDequeue(out _); _log(l); };
+        set { _log = value ?? (_ => { }); _logWrap = null; }
+    }
+    private Action<string> _log = _ => { };
+    private Action<string>? _logWrap;
+    /// <summary>The last few hundred lines logged (for what led up to an unrealistic turn).</summary>
+    private readonly System.Collections.Concurrent.ConcurrentQueue<string> _recentLog = new();
     public List<Flight> Flights { get; } = new();
     public double Time { get; private set; }
     /// <summary>The surface wind (the METAR): it picks the runways and is used on the ground.</summary>
@@ -2121,7 +2129,8 @@ public sealed partial class TrafficWorld
             UnrealisticCount++;
             var line = $"{f.Callsign}: UNREALISTIC — {what} ({where})";
             Log(line);
-            AllUnrealistic.Enqueue($"{Apt.Icao} {line}");
+            var before = _recentLog.Where(l => l.Contains(f.Callsign + ":") && !l.Contains("UNREALISTIC")).TakeLast(6);
+            AllUnrealistic.Enqueue($"{Apt.Icao} {Time,6:0} {line}\n        route: {f.Route}\n        " + string.Join("\n        ", before));
         }
         if (f.Flown.Count > 0)
         {

@@ -6,6 +6,9 @@ using Laia.Common.Airports;
 using Laia.Server.TrafficCore;
 
 var failures = new List<string>();
+// Which test section each loop or unrealistic turn was flown in.
+var sectionOut = new SectionWriter(Console.Out);
+Console.SetOut(sectionOut);
 void Check(bool ok, string what) { Console.WriteLine((ok ? "  ok   " : "  FAIL ") + what); if (!ok) failures.Add(what); }
 
 Console.WriteLine("== Path geometry");
@@ -3372,11 +3375,16 @@ Console.WriteLine("== STAR chart \"expect\" restrictions (BITHO7, FQM3; d-TPP 26
 
 Console.WriteLine("== Loops and unrealistic turns, in everything flown above (user, 28 Nov: \"Even one loop or unrealistic turn is a failure\")");
 {
-    var all = TrafficWorld.AllUnrealistic.ToList();
-    foreach (var g in all.GroupBy(l => System.Text.RegularExpressions.Regex.Match(l, @"UNREALISTIC — (a loop|crossed its own track|turned \d+° in|joined its final|turned off its final)").Groups[1].Value))
+    sectionOut.Drain();
+    var all = sectionOut.Tagged;
+    foreach (var g in all.GroupBy(l => l.section))
     {
-        Console.WriteLine($"  {(g.Key.Length > 0 ? g.Key : "other")}: {g.Count()}");
-        foreach (var l in g.Take(8)) Console.WriteLine("    " + l);
+        Console.WriteLine($"  {g.Key}: {g.Count()}");
+        foreach (var k in g.GroupBy(l => System.Text.RegularExpressions.Regex.Match(l.line, @"UNREALISTIC — (a loop|crossed its own track|turned|joined its final|turned off its final)").Groups[1].Value))
+        {
+            Console.WriteLine($"    {k.Key}: {k.Count()}");
+            foreach (var l in k.Take(3)) Console.WriteLine("      " + l.line);
+        }
     }
     Check(all.Count == 0, $"no loops or unrealistic turns flown ({all.Count})");
 }
@@ -3486,4 +3494,20 @@ static class TestAirport
         }
         return d;
     }
+}
+
+/// <summary>Console output that notes the test section ("== …") each loop or unrealistic turn was flown in.</summary>
+sealed class SectionWriter(TextWriter inner) : TextWriter
+{
+    private string _section = "(start)";
+    public readonly List<(string section, string line)> Tagged = new();
+    public override System.Text.Encoding Encoding => inner.Encoding;
+    public void Drain() { while (TrafficWorld.AllUnrealistic.TryDequeue(out var l)) Tagged.Add((_section, l)); }
+    public override void WriteLine(string? value)
+    {
+        if (value is not null && value.StartsWith("== ")) { Drain(); _section = value.Length > 90 ? value[..90] : value; }
+        inner.WriteLine(value);
+    }
+    public override void Write(char value) => inner.Write(value);
+    public override void Write(string? value) => inner.Write(value);
 }
