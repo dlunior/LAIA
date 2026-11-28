@@ -112,6 +112,9 @@ public sealed class LearningService(ILogger<LearningService> log, AirportStore a
         }
         if (built > 0) log.LogInformation("Learning: training data — {n} airport-days added ({dir})", built, DataDir);
 
+        try { await UpgradeDays(have, ct); }
+        catch (Exception ex) when (!ct.IsCancellationRequested) { log.LogInformation("Learning: days not read again ({msg})", ex.Message); }
+
         // 2. The learned ways in: the examples, then training on the graphics card when there's more to learn from.
         try { await ExportExamples(have, ct); await TrainIfNeeded(ct); }
         catch (Exception ex) when (!ct.IsCancellationRequested) { log.LogInformation("Learning: the ways in weren't trained this round ({msg})", ex.Message); }
@@ -179,6 +182,8 @@ public sealed class LearningService(ILogger<LearningService> log, AirportStore a
     {
         public string Icao { get; set; } = "";
         public string Day { get; set; } = "";
+        /// <summary>2 from 0.1.332: arrivals read per visit (a track split where the aircraft wasn't seen for 5 minutes).</summary>
+        public int Format { get; set; }
         public bool HeldBack { get; set; }
         /// <summary>Surface wind each hour: [Unix hour start, from°, kt].</summary>
         public List<double[]> Wind { get; set; } = new();
@@ -204,7 +209,7 @@ public sealed class LearningService(ILogger<LearningService> log, AirportStore a
 
     private static async Task WriteDay(string icao, string day, List<IReadOnlyList<TrackPoint>> tracks, List<RealArrival> arr, List<double[]> wind, CancellationToken ct)
     {
-        var d = new DayData { Icao = icao, Day = day, HeldBack = HeldBack(day), Wind = wind };
+        var d = new DayData { Icao = icao, Day = day, Format = DayFormat, HeldBack = HeldBack(day), Wind = wind };
         foreach (var a in arr)
             d.Arrivals.Add(new ArrRec { Cs = a.Callsign, Type = a.Type, Rwy = a.Runway, EntryT = a.EntryT, ThrT = Math.Round(a.ThrT, 1), Nm = Math.Round(a.TrackNm, 2), Pts = a.Pts.Select(P).ToList() });
         foreach (var t in tracks)
@@ -219,6 +224,35 @@ public sealed class LearningService(ILogger<LearningService> log, AirportStore a
         await using (var gz = new GZipStream(fs, CompressionLevel.Optimal))
             await JsonSerializer.SerializeAsync(gz, d, Json, ct);
         File.Move(path + ".tmp", path, true);
+    }
+
+    private const int DayFormat = 2;
+
+    /// <summary>
+    /// Day files written before the arrivals were read per visit (0.1.330–0.1.331): the arrivals read again from the
+    /// tracks kept in them — callsigns and types kept from the old reading where the threshold time matches.
+    /// </summary>
+    private async Task UpgradeDays(List<string> hubs, CancellationToken ct)
+    {
+        var n = 0;
+        foreach (var icao in hubs)
+        {
+            if (airports.Data(icao) is not { } data || !Directory.Exists(Path.Combine(DataDir, icao))) continue;
+            AirportModel? apt = null;
+            foreach (var f in Directory.GetFiles(Path.Combine(DataDir, icao), "*.json.gz"))
+            {
+                ct.ThrowIfCancellationRequested();
+                var day = Path.GetFileName(f)[..^".json.gz".Length];
+                if (ReadDay(icao, day) is not { } dd || dd.Format >= DayFormat) continue;
+                apt ??= new AirportModel(data);
+                var tracks = dd.Tracks.Select(t => (IReadOnlyList<TrackPoint>)t.Select(Tp).ToList()).ToList();
+                var legs = dd.Arrivals.Where(a => a.Cs.Length > 0).Select(a => new RealLeg(a.Cs, a.Type, "", icao, null, a.ThrT)).ToList();
+                var arr = RealReplay.Arrivals(apt, tracks, legs);
+                await WriteDay(icao, day, tracks, arr, dd.Wind, ct);
+                n++;
+            }
+        }
+        if (n > 0) log.LogInformation("Learning: {n} airport-days read again (arrivals per visit, types from final-approach speed where there was no flight list)", n);
     }
 
     private static DayData? ReadDay(string icao, string day)
