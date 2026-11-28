@@ -388,6 +388,41 @@ Console.WriteLine("== Crossing runways at Busy for an hour: land 27, depart 36 a
     Check(vecs * 10.0 / landings <= 2, "and at most 2 vectors for spacing per 10 landings");
 }
 
+Console.WriteLine("== The learned ways in: a model trained by learning/train_routes.py, run by LAIA (Step 6, part 2)");
+if (Environment.GetEnvironmentVariable("LAIA_TEST_MODEL") is { } mpath && RouteModel.Load(mpath) is { } rm)
+{
+    var nm = Geo2.MPerNm;
+    var apt = new AirportModel(TestAirport.Build(false));
+    var e27 = apt.Ends.First(e => e.Ident == "27");
+    var calm = new Wind(0, 0);
+    // Straight in from the east: the way it gives stays on the centreline.
+    var eastAt = RouteModel.FromFrame(e27, 40, 0);
+    var east = rm.Predict("TEST", e27, RouteModel.Features(e27, eastAt, 12000, e27.Heading, calm, 4, 8))[0];
+    var eastOff = east.Points.Max(q => Math.Abs(e27.Offset(q))) / nm;
+    var eastEnd = -e27.Along(east.Points[^1]) / nm;
+    Console.WriteLine($"  from the east, 40 nm out: {rm.K} ways, the likeliest {100 * east.Prob:0}%, at most {eastOff:0.0} nm off the centreline, ending {eastEnd:0.0} nm out");
+    Check(eastOff < 2.5 && Math.Abs(eastEnd) < 2, "straight in from the east, it stays on the centreline to the runway");
+    // From the west, beyond the field: round the downwind (4 nm left) and base at about 12 nm.
+    var westAt = RouteModel.FromFrame(e27, -30, 5);
+    var west = rm.Predict("TEST", e27, RouteModel.Features(e27, westAt, 12000, e27.Heading + 180, calm, 4, 8))[0];
+    var downwind = west.Points.Any(q => -e27.Along(q) / nm is > 6 and < 15 && e27.Offset(q) / nm > 2);
+    Console.WriteLine($"  from the west, 30 nm beyond the field: the likeliest {100 * west.Prob:0}%, downwind and base {(downwind ? "flown" : "missing")}, ending {-e27.Along(west.Points[^1]) / nm:0.0} nm out");
+    Check(downwind, "from the west, it flies the downwind and base the examples did");
+    // Flown by LAIA: the way in from the model, through the route check, to the runway.
+    var w = new TrafficWorld(apt, new TestSource(), seed: 5) { Automatic = false, Wind = calm, LearnedRoutes = rm };
+    var wlog = new List<string>(); w.Log = l => wlog.Add(l);
+    w.SelectRunways(true);
+    var fw = w.SpawnArrival(0, false, null, (e27, null), entry: (westAt, 12000, 12000));
+    var fe = w.SpawnArrival(0, false, null, (e27, null), entry: (eastAt, 12000, 12000));
+    Console.WriteLine($"  {fw?.Callsign}: {fw?.Route}");
+    Console.WriteLine($"  {fe?.Callsign}: {fe?.Route}");
+    Check(fw?.Route.Contains("learned way in") == true && fe?.Route.Contains("learned way in") == true, "LAIA flies the learned way in");
+    for (var t = 0.0; t < 2400 && !(fw!.OnGround && fe!.OnGround); t += 0.5) w.Step(0.5);
+    Check(fw!.OnGround && fe!.OnGround, $"both reach the runway ({(fw.OnGround ? "west landed" : "west didn't land")}, {(fe.OnGround ? "east landed" : "east didn't land")})");
+    foreach (var l in wlog.Where(l => l.Contains("refused") || l.Contains("going around") || l.Contains("breaking off")).Take(4)) Console.WriteLine("    " + l);
+}
+else Console.WriteLine("  (no trained test model — LAIA_TEST_MODEL not set; skipped)");
+
 Console.WriteLine("== The scoreboard: real arrivals read from their tracks and flown again by LAIA (Step 6)");
 {
     var nm = Geo2.MPerNm;

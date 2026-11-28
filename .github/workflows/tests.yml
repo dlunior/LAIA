@@ -33,6 +33,16 @@ jobs:
           if ($LASTEXITCODE) { throw "LAIA Sim build failed" }
           dotnet build src/Laia.Collector -c Release -v q
           if ($LASTEXITCODE) { throw "LAIA Collector build failed" }
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Train a small route model (the training script end to end, on the processor)
+        shell: pwsh
+        run: |
+          python -m pip install --quiet --disable-pip-version-check numpy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+          python learning/test_train_routes.py --out "$env:RUNNER_TEMP\laia-test-model.json"
+          if ($LASTEXITCODE) { throw "route model training failed" }
+          "LAIA_TEST_MODEL=$env:RUNNER_TEMP\laia-test-model.json" >> $env:GITHUB_ENV
       - name: Check traffic logic (offline simulation)
         shell: pwsh
         run: |
