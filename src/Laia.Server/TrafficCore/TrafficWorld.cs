@@ -2130,7 +2130,12 @@ public sealed partial class TrafficWorld
             var line = $"{f.Callsign}: UNREALISTIC — {what} ({where})";
             Log(line);
             var before = _recentLog.Where(l => l.Contains(f.Callsign + ":") && !l.Contains("UNREALISTIC")).TakeLast(6);
-            AllUnrealistic.Enqueue($"{Apt.Icao} {Time,6:0} {line}\n        route: {f.Route}\n        " + string.Join("\n        ", before));
+            // The geometry, in the runway's frame (nm out along the final, nm left + / right −): the planned path's
+            // points, and the last two minutes flown with headings.
+            string Fr(V2 q) => f.Rwy is { } fr ? $"{-fr.Along(q) / nm:0.0}/{fr.Offset(q) / nm:+0.0;-0.0}" : $"{q.X / nm:0.0},{q.Y / nm:0.0}";
+            var planned = f.Path is { } pp ? string.Join(" ", pp.Points.Take(40).Select(Fr)) : "";
+            var flown = string.Join(" ", f.Flown.TakeLast(24).Select(q => $"{Fr(q.p)}@{q.hdg:000}"));
+            AllUnrealistic.Enqueue($"{Apt.Icao} {Time,6:0} {line}\n        route: {f.Route} (rwy {f.Rwy?.Ident} {f.Rwy?.Heading:000})\n        planned: {planned}\n        flown: {flown}\n        " + string.Join("\n        ", before));
         }
         if (f.Flown.Count > 0)
         {
