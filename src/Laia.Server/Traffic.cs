@@ -489,6 +489,7 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
             s.Routes = w.Routes; s.NavData = w.NavData; s.Learned = w.Learned; s.Locate = w.Locate; s.Wind = w.Wind; s.Aloft = w.Aloft;
             s.LowWeather = w.LowWeather; s.SafetyLogic = w.SafetyLogic; s.LiveLanding = w.LiveLanding; s.LiveDeparting = w.LiveDeparting;
             s.WeekMinute = w.WeekMinute;
+            s.LearnedRoutes = w.LearnedRoutes;
             s.Level = TrafficLevel.Peak;
             _shadowStartWeek = w.WeekMinute; _shadowStartedAt = DateTime.UtcNow.Ticks;
             _shadow = s;
@@ -1517,6 +1518,8 @@ public sealed class TrafficEngine(RunwayDb runways, FrequencyDb freqs, AirportSt
                     foreach (var w in Worlds().ToList())
                     {
                         partSw.Restart();
+                        // The learned ways in, where the model beat the rules on this airport's scoreboard (Step 6).
+                        w.LearnedRoutes = LearningService.ModelFor(w.Apt.Icao);
                         if (live)
                         {
                             // The airport's METAR is the source of truth for its wind (user rule). Only with no METAR is

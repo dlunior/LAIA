@@ -113,7 +113,7 @@ public static class RealReplay
     /// the real ones.
     /// </summary>
     public static Score Replay(AirportModel apt, AirportProfile? learned, Wind wind, IReadOnlyList<RealArrival> real, double winStart, double winEnd,
-        IFlightSource source, Action<string>? log = null, Func<bool>? keepGoing = null)
+        IFlightSource source, Action<string>? log = null, Func<bool>? keepGoing = null, RouteModel? model = null)
     {
         var score = new Score { Airport = apt.Icao, Window = $"{DateTimeOffset.FromUnixTimeSeconds((long)winStart):yyyy.MM.dd HH}Z" };
         var bring = real.Where(a => a.ThrT >= winStart - 1200 && a.ThrT < winEnd + 1200 && apt.Ends.Any(e => e.Ident == a.Runway)).OrderBy(a => a.EntryT).ToList();
@@ -123,7 +123,7 @@ public static class RealReplay
         TrafficWorld? w = null;
         w = new TrafficWorld(apt, source, seed: 11)
         {
-            Automatic = false, GenericTraffic = false, HoldRunways = false, Wind = wind, Learned = learned,
+            Automatic = false, GenericTraffic = false, HoldRunways = false, Wind = wind, Learned = learned, LearnedRoutes = model,
             Log = l => { if (lines.Count < 50000) lines.Add($"{w!.Time,6:0} {l}"); log?.Invoke(l); },
         };
         var rwys = bring.Select(a => a.Runway).Distinct().ToList();

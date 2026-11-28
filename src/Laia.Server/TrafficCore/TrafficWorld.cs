@@ -777,6 +777,10 @@ public sealed partial class TrafficWorld
 
     /// <summary>Ways in refused by <see cref="RouteProblem"/> (and logged), for the self-test.</summary>
     private int _routesRefused;
+    /// <summary>The learned ways in (Step 6), when the model has beaten the rules on this airport's scoreboard; null otherwise.</summary>
+    public RouteModel? LearnedRoutes { get; set; }
+    /// <summary>Which of the model's candidate ways in <see cref="BuildArrivalPath"/> tries (the next after a refusal).</summary>
+    private int _routeModelTry;
     /// <summary>While set, <see cref="BuildArrivalPath"/> uses no real-track way in (the standard one).</summary>
     private bool _noRealWay;
     /// <summary>Set when the last <see cref="BuildArrivalPath"/> had to drop its real-track way in.</summary>
@@ -4020,6 +4024,7 @@ public sealed partial class TrafficWorld
         var speeds = new List<double>();
         var names = new List<string>();
         int starIdx0 = -1, starIdx1 = -1;
+        var usedModel = false; var modelNote = "";
         if (from is { } start)
         {
             route.Add(start);
@@ -4157,6 +4162,67 @@ public sealed partial class TrafficWorld
                 }
             }
             if (f.Fan is null) f.FanKey = null;
+            // The learned way in (Step 6, part 2): from where the arrival comes within 45 nm of the runway — the STAR
+            // up to there, or where it is when it's already inside — the way the model says real traffic flies to this
+            // runway from there, in this wind and this busy. It replaces the real-track pieces above; the final, the
+            // route check (with the next candidate, then the standard way in, if it's refused) and the spacing tools
+            // all work on it as on any way in.
+            if (LearnedRoutes is { } model && !_noRealWay && f != UserArr && _routeModelTry < model.K)
+            {
+                var nm45 = 45 * Geo2.MPerNm;
+                V2 mAt; double mTrack; var keepStar = -1;
+                if (entry is { } enm && (enm - rwy.Threshold).Length <= nm45)
+                {
+                    mAt = enm;
+                    var nxt = via.Count > 0 ? via[0] : starPts.Count > 0 ? starPts[0].P : rwy.Threshold;
+                    mTrack = (nxt - enm).Length > 100 ? (nxt - enm).Bearing : f.Heading;
+                }
+                else
+                {
+                    var k = starPts.FindIndex(q => (q.P - rwy.Threshold).Length <= nm45);
+                    if (k < 0 && starPts.Count > 0) k = starPts.Count - 1;
+                    if (k < 0) { mAt = default; mTrack = double.NaN; }
+                    else
+                    {
+                        mAt = starPts[k].P; keepStar = k - 1;
+                        var prev = k > 0 ? starPts[k - 1].P : entry ?? starPts[k].P - V2.FromBearing(f.Heading, 1000);
+                        mTrack = (mAt - prev).Length > 100 ? (mAt - prev).Bearing : f.Heading;
+                    }
+                }
+                if (!double.IsNaN(mTrack))
+                {
+                    var distNm = (mAt - rwy.Threshold).Length / Geo2.MPerNm;
+                    var altEst = rwy.ElevationFt + Math.Min(16000, 330 * distNm);
+                    var myEta = Time + distNm * 3600 / 250;
+                    var arrs = Flights.Where(o => o != f && !o.Done && o.Kind == "arrival" && !o.OnGround && !double.IsNaN(o.EtaNominal) && Math.Abs(o.EtaNominal - myEta) < 1800).ToList();
+                    var feats = RouteModel.Features(rwy, mAt, altEst, mTrack, Wind, arrs.Count(o => o.Rwy?.Runway == rwy.Runway), arrs.Count);
+                    var ways = model.Predict(Apt.Icao, rwy, feats);
+                    if (_routeModelTry < ways.Count)
+                    {
+                        var way = ways[_routeModelTry];
+                        // Up to where it's lined up on the final (inside 12 nm, within 0.3 nm of the centreline, going the
+                        // runway's way): the approach takes over from there.
+                        // (Starting at the entry itself: the route already begins there.)
+                        var mp = keepStar < 0 && entry is not null ? new List<V2>() : new List<V2> { mAt };
+                        for (var i = 0; i < way.Points.Count; i++)
+                        {
+                            var q = way.Points[i];
+                            var outNm = -rwy.Along(q) / Geo2.MPerNm;
+                            if (outNm < 2.5) break;
+                            mp.Add(q);
+                            var lined = i > 0 && Math.Abs(rwy.Offset(q)) < 0.3 * Geo2.MPerNm && outNm < 12
+                                && Math.Abs(Geo2.Diff((q - way.Points[i - 1]).Bearing, rwy.Heading)) < 20;
+                            if (lined) break;
+                        }
+                        if (mp.Count == 0 && keepStar < 0) mp.Add(mAt + (rwy.Threshold - mAt).Unit * 100);
+                        realVec = (keepStar, mp);
+                        if (keepStar < 0) via.Clear();
+                        f.Fan = null; f.FanKey = null;
+                        usedModel = true;
+                        modelNote = $"the learned way in (LAIA's model, {100 * way.Prob:0}% likely{(_routeModelTry > 0 ? $", choice {_routeModelTry + 1}" : "")})";
+                    }
+                }
+            }
             var starOnly = starPts.Count;
             if (realVec is { } rv)
             {
@@ -4189,6 +4255,7 @@ public sealed partial class TrafficWorld
             altFixes.AddRange(starPts.Where(p => p.AltMinFt > 0 || p.AltMaxFt > 0 || p.SpeedKt is >= 100 and < 400));
             named.AddRange(starPts.Where(p => p.Fix.Length > 0));
             var (appName, appPts) = realVec is not null ? FinalFrom(rwy, starPts[^1].P) : ApproachPoints(rwy, starPts);
+            if (usedModel) appName = appName.Replace("vectors as real traffic flies them (adsb.lol)", modelNote);
             if (appName.Length > 0) names.Add(appName);
             if (entry is { } en1)
             {
@@ -4226,6 +4293,13 @@ public sealed partial class TrafficWorld
         if (from is null && !_noRealWay && RouteProblem(route, thrIndex, rwy) is { } why)
         {
             _routesRefused++;
+            if (usedModel && LearnedRoutes is { } lm && _routeModelTry + 1 < lm.K)
+            {
+                Log($"{f.Callsign}: route refused — {why}; the learned way's next choice instead");
+                _routeModelTry++;
+                try { BuildArrivalPath(f, from, entry); } finally { _routeModelTry = 0; }
+                return;
+            }
             Log($"{f.Callsign}: route refused — {why}; flies the standard way in instead");
             _noRealWay = true;
             try { BuildArrivalPath(f, from, entry); } finally { _noRealWay = false; }

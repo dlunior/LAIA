@@ -112,25 +112,43 @@ public sealed class LearningService(ILogger<LearningService> log, AirportStore a
         }
         if (built > 0) log.LogInformation("Learning: training data — {n} airport-days added ({dir})", built, DataDir);
 
-        // 2. The scoreboard for this version.
+        // 2. The learned ways in: the examples, then training on the graphics card when there's more to learn from.
+        try { await ExportExamples(have, ct); await TrainIfNeeded(ct); }
+        catch (Exception ex) when (!ct.IsCancellationRequested) { log.LogInformation("Learning: the ways in weren't trained this round ({msg})", ex.Message); }
+
+        // 3. The scoreboard for this version — the rules, and the learned ways in when there's a model — and which
+        // airports the model is used at: only where it beats the rules on the held-back days.
         var ver = typeof(LearningService).Assembly.GetName().Version?.ToString(3) ?? "?";
         var results = new List<ScoreRec>();
+        var model = _model;
+        var variants = new List<(string name, RouteModel? m)> { ("rules", null) };
+        if (model is not null) variants.Add(($"model {model.Id}", model));
         foreach (var icao in have)
         {
             ct.ThrowIfCancellationRequested();
             var file = Path.Combine(ScoreDir, icao + ".json");
             var past = File.Exists(file) ? JsonSerializer.Deserialize<List<ScoreRec>>(await File.ReadAllTextAsync(file, ct)) ?? new() : new();
-            if (past.Any(r => r.Version == ver)) { results.AddRange(past.Where(r => r.Version == ver)); continue; }
-            var mine = await ScoreAirport(icao, ver, ct);
-            if (mine.Count == 0) continue;
-            past.AddRange(mine);
-            Directory.CreateDirectory(ScoreDir);
-            await File.WriteAllTextAsync(file, JsonSerializer.Serialize(past, Json), ct);
-            results.AddRange(mine);
-            var before = past.Where(r => r.Version != ver).GroupBy(r => r.Version).OrderByDescending(g => g.Max(r => r.At)).FirstOrDefault()?.ToList();
-            foreach (var r in mine) log.LogInformation("Scoreboard {v}: {line}", ver, r.Line);
-            if (before is { Count: > 0 })
-                log.LogInformation("Scoreboard {v}: {icao} against {old}: {cmp}", ver, icao, before[0].Version, Compare(before, mine));
+            foreach (var r in past) if (r.Variant.Length == 0) r.Variant = "rules";
+            foreach (var (vname, vm) in variants)
+            {
+                if (past.Any(r => r.Version == ver && r.Variant == vname)) { if (vname == "rules") results.AddRange(past.Where(r => r.Version == ver && r.Variant == vname)); continue; }
+                var mine = await ScoreAirport(icao, ver, vname, vm, ct);
+                if (mine.Count == 0) continue;
+                past.AddRange(mine);
+                Directory.CreateDirectory(ScoreDir);
+                await File.WriteAllTextAsync(file, JsonSerializer.Serialize(past, Json), ct);
+                if (vname == "rules") results.AddRange(mine);
+                foreach (var r in mine) log.LogInformation("Scoreboard {v} ({variant}): {line}", ver, vname, r.Line);
+                var before = past.Where(r => r.Variant == "rules" && r.Version != ver).GroupBy(r => r.Version).OrderByDescending(g => g.Max(r => r.At)).FirstOrDefault()?.ToList();
+                if (vname == "rules" && before is { Count: > 0 })
+                    log.LogInformation("Scoreboard {v}: {icao} against {old}: {cmp}", ver, icao, before[0].Version, Compare(before, mine));
+            }
+            if (model is not null) Decide(icao, past.Where(r => r.Version == ver && r.Variant == "rules").ToList(), past.Where(r => r.Version == ver && r.Variant == $"model {model.Id}").ToList(), model);
+        }
+        if (model is not null)
+        {
+            var use = _approved.Where(kv => kv.Value.ok).Select(kv => kv.Key).OrderBy(x => x).ToList();
+            log.LogInformation("Learned ways in ({id}): used at {n} airport(s) where they beat the rules{list}", model.Id, use.Count, use.Count > 0 ? ": " + string.Join(" ", use) : "");
         }
         if (results.Count > 0)
         {
@@ -241,11 +259,215 @@ public sealed class LearningService(ILogger<LearningService> log, AirportStore a
         }
     }
 
+    // ------------------------------------------------------------------ the learned ways in
+
+    private static string TrainDir => Path.Combine(Root, "train");
+    private static string ModelDir => Path.Combine(Root, "models");
+    private static string PyLib => Path.Combine(Root, "pylib");
+    private static RouteModel? _model;
+    private static Dictionary<string, (bool ok, string why)> _approved = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly object _mgate = new();
+
+    /// <summary>The learned ways in for this airport, when the model beat the rules on its scoreboard; null otherwise.</summary>
+    public static RouteModel? ModelFor(string icao)
+    {
+        lock (_mgate) return _model is not null && _approved.TryGetValue(icao, out var a) && a.ok ? _model : null;
+    }
+
+    public override Task StartAsync(CancellationToken ct)
+    {
+        try
+        {
+            var m = RouteModel.Load(Path.Combine(ModelDir, "routes.json"));
+            var ap = Path.Combine(ModelDir, "approved.json");
+            var appr = File.Exists(ap) ? JsonSerializer.Deserialize<Dictionary<string, Approval>>(File.ReadAllText(ap)) ?? new() : new();
+            lock (_mgate)
+            {
+                _model = m;
+                _approved = appr.Where(kv => m is not null && kv.Value.Model == m.Id).ToDictionary(kv => kv.Key, kv => (kv.Value.Ok, kv.Value.Why), StringComparer.OrdinalIgnoreCase);
+            }
+            if (m is not null) log.LogInformation("Learned ways in {id} (trained {t}): used at {n} airport(s)", m.Id, m.Trained, _approved.Count(kv => kv.Value.ok));
+        }
+        catch (Exception ex) { log.LogInformation("Learned ways in not loaded ({msg})", ex.Message); }
+        return base.StartAsync(ct);
+    }
+
+    public sealed class Approval { public bool Ok { get; set; } public string Why { get; set; } = ""; public string Model { get; set; } = ""; }
+
+    /// <summary>
+    /// The model is used at an airport only where it beats the rules on the same held-back hours: its paths nearer the
+    /// real ones, landing times no worse (10 % or 5 s), landing order no worse (5 points), and no more go-arounds and
+    /// break-offs (half a one per 10 landings).
+    /// </summary>
+    private void Decide(string icao, List<ScoreRec> rules, List<ScoreRec> mod, RouteModel model)
+    {
+        if (rules.Count == 0 || mod.Count == 0) return;
+        double M(List<ScoreRec> l, Func<ScoreRec, double> f) => Med(l.Select(f));
+        double Ev(List<ScoreRec> l) => M(l, r => r.Per10.GetValueOrDefault("go-arounds") + r.Per10.GetValueOrDefault("break-offs"));
+        var why = new List<string>();
+        var pr = M(rules, r => r.PathNm); var pm = M(mod, r => r.PathNm);
+        var tr = M(rules, r => r.TimeErr); var tm = M(mod, r => r.TimeErr);
+        var oR = M(rules, r => r.Order); var oM = M(mod, r => r.Order);
+        if (!(pm < pr)) why.Add($"paths {pm:0.0} nm from the real ones against {pr:0.0}");
+        if (tm > tr * 1.1 + 5) why.Add($"landing times ±{tm:0} s against ±{tr:0}");
+        if (!double.IsNaN(oR) && !double.IsNaN(oM) && oM < oR - 0.05) why.Add($"landing order {100 * oM:0}% against {100 * oR:0}%");
+        if (Ev(mod) > Ev(rules) + 0.5) why.Add($"go-arounds and break-offs {Ev(mod):0.0} per 10 against {Ev(rules):0.0}");
+        var ok = why.Count == 0;
+        var text = ok ? $"paths {pm:0.0} nm from the real ones against {pr:0.0} by the rules, landing times ±{tm:0} s against ±{tr:0}" : string.Join("; ", why);
+        lock (_mgate) _approved[icao] = (ok, text);
+        log.LogInformation("Learned ways in at {icao}: {verdict} — {why}", icao, ok ? "used (better than the rules)" : "not used", text);
+        try
+        {
+            Directory.CreateDirectory(ModelDir);
+            Dictionary<string, Approval> all;
+            lock (_mgate) all = _approved.ToDictionary(kv => kv.Key, kv => new Approval { Ok = kv.Value.ok, Why = kv.Value.why, Model = model.Id });
+            File.WriteAllText(Path.Combine(ModelDir, "approved.json"), JsonSerializer.Serialize(all, new JsonSerializerOptions { WriteIndented = true }));
+        }
+        catch { }
+    }
+
+    /// <summary>
+    /// The examples the model learns from: every real arrival in the training data with where it came in, the wind, how
+    /// busy it was, and the way it flew — as rows of numbers (examples.bin) with what they mean (meta.json). Written
+    /// again only when there are new days.
+    /// </summary>
+    private async Task ExportExamples(List<string> hubs, CancellationToken ct)
+    {
+        var files = hubs.SelectMany(h => Directory.Exists(Path.Combine(DataDir, h)) ? Directory.GetFiles(Path.Combine(DataDir, h), "*.json.gz") : Array.Empty<string>()).ToList();
+        var sig = $"{files.Count}:{files.Sum(f => new FileInfo(f).Length)}";
+        var metaPath = Path.Combine(TrainDir, "meta.json");
+        if (File.Exists(metaPath))
+        {
+            using var md = JsonDocument.Parse(await File.ReadAllTextAsync(metaPath, ct));
+            if (md.RootElement.TryGetProperty("signature", out var sg) && sg.GetString() == sig) return;
+        }
+        Status = "learned ways in: writing the examples";
+        Directory.CreateDirectory(TrainDir);
+        var airportsIdx = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        for (var i = 0; i < Hubs.Length; i++) airportsIdx[Hubs[i]] = i + 1;
+        var runways = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        long rows = 0, heldRows = 0;
+        var bin = Path.Combine(TrainDir, "examples.bin");
+        await using (var fs = File.Create(bin + ".tmp"))
+        await using (var bw = new BinaryWriter(fs))
+        {
+            foreach (var icao in hubs)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (airports.Data(icao) is not { } data || !Directory.Exists(Path.Combine(DataDir, icao))) continue;
+                var apt = new AirportModel(data);
+                foreach (var f in Directory.GetFiles(Path.Combine(DataDir, icao), "*.json.gz"))
+                {
+                    var day = Path.GetFileName(f)[..^".json.gz".Length];
+                    if (ReadDay(icao, day) is not { } dd) continue;
+                    foreach (var a in dd.Arrivals)
+                    {
+                        var rwy = apt.Ends.FirstOrDefault(e => e.Ident == a.Rwy);
+                        if (rwy is null || a.Pts.Count < 3 || a.Pts[0][3] <= -9000) continue;
+                        var pts = a.Pts.Select(q => (apt.Map.ToXY(q[1], q[2]), q[3] <= -9000 ? double.NaN : q[3])).ToList();
+                        for (var i = 0; i < pts.Count; i++) if (double.IsNaN(pts[i].Item2)) pts[i] = (pts[i].Item1, i > 0 ? pts[i - 1].Item2 : a.Pts[0][3]);
+                        pts.Add((rwy.Threshold, rwy.ElevationFt));
+                        if (RouteModel.Target(rwy, pts) is not { } target) continue;
+                        var w = dd.Wind.Where(x => x[0] <= a.EntryT).OrderByDescending(x => x[0]).FirstOrDefault() ?? dd.Wind.FirstOrDefault();
+                        var wind = w is null ? new Wind(0, 0) : new Wind(w[1], w[2]);
+                        var loadR = dd.Arrivals.Count(o => o != a && o.Rwy == a.Rwy && Math.Abs(o.ThrT - a.ThrT) < 1800);
+                        var loadA = dd.Arrivals.Count(o => o != a && Math.Abs(o.ThrT - a.ThrT) < 1800);
+                        var feats = RouteModel.Features(rwy, pts[0].Item1, a.Pts[0][3], a.Pts[0][4], wind, loadR, loadA);
+                        var key = $"{icao}/{a.Rwy}";
+                        if (!runways.TryGetValue(key, out var ri)) runways[key] = ri = runways.Count + 1;
+                        bw.Write((float)airportsIdx.GetValueOrDefault(icao, 0)); bw.Write((float)ri); bw.Write(dd.HeldBack ? 1f : 0f);
+                        foreach (var v in feats) bw.Write(v);
+                        foreach (var v in target) bw.Write(v);
+                        rows++; if (dd.HeldBack) heldRows++;
+                    }
+                }
+            }
+        }
+        File.Move(bin + ".tmp", bin, true);
+        var meta = new Dictionary<string, object>
+        {
+            ["f"] = RouteModel.F, ["p"] = RouteModel.P, ["rows"] = rows, ["held_back"] = heldRows, ["signature"] = sig,
+            ["airports"] = airportsIdx, ["runways"] = runways, ["written"] = DateTime.UtcNow.ToString("u"),
+        };
+        await File.WriteAllTextAsync(metaPath, JsonSerializer.Serialize(meta), ct);
+        log.LogInformation("Learned ways in: {rows} real arrivals at {n} hubs written for training ({held} on held-back days)", rows, hubs.Count, heldRows);
+    }
+
+    /// <summary>Trains the model on the graphics card when the examples are newer than it (installing the training
+    /// software the first time). The new model replaces the old one; the scoreboard then decides where it's used.</summary>
+    private async Task TrainIfNeeded(CancellationToken ct)
+    {
+        var meta = Path.Combine(TrainDir, "meta.json");
+        var outPath = Path.Combine(ModelDir, "routes.json");
+        if (!File.Exists(meta)) return;
+        if (File.Exists(outPath) && File.GetLastWriteTimeUtc(outPath) > File.GetLastWriteTimeUtc(meta)) return;
+        var script = Path.Combine(Paths.InstallDir, "learning", "train_routes.py");
+        if (!File.Exists(Paths.Python) || !File.Exists(script)) { log.LogInformation("Learned ways in: Python or the training script isn't installed ({py})", Paths.Python); return; }
+        if (!await EnsureTorch(ct)) return;
+        Status = "learned ways in: training on the graphics card";
+        Directory.CreateDirectory(ModelDir);
+        var tmpOut = Path.Combine(ModelDir, "routes-new.json");
+        log.LogInformation("Learned ways in: training started");
+        var (code, last) = await RunPython($"-u \"{script}\" --data \"{TrainDir}\" --out \"{tmpOut}\" --pylib \"{PyLib}\"",
+            line => { if (line.StartsWith("learning from") || line.Contains("held-back days") || line.StartsWith("written") || line.StartsWith("only") || line.Contains("Error")) log.LogInformation("Learned ways in: {line}", line); },
+            TimeSpan.FromHours(8), ct);
+        if (code != 0 || RouteModel.Load(tmpOut) is not { } m) { log.LogInformation("Learned ways in: training didn't finish (code {code}: {last})", code, last); return; }
+        File.Move(tmpOut, outPath, true);
+        lock (_mgate) { _model = m; _approved.Clear(); }
+        log.LogInformation("Learned ways in: model {id} ready; the scoreboard decides where it's used", m.Id);
+    }
+
+    /// <summary>PyTorch with NVIDIA's CUDA libraries, in LAIA's data folder (about 3 GB, once).</summary>
+    private async Task<bool> EnsureTorch(CancellationToken ct)
+    {
+        var marker = Path.Combine(PyLib, "laia-torch.txt");
+        if (File.Exists(marker)) return true;
+        log.LogInformation("Learned ways in: installing the training software (PyTorch with CUDA, about 3 GB, once) in {dir}", PyLib);
+        Status = "learned ways in: installing the training software";
+        Directory.CreateDirectory(PyLib);
+        var (code, last) = await RunPython($"-m pip install --no-warn-script-location --disable-pip-version-check --progress-bar off --upgrade --target \"{PyLib}\" " +
+            "torch --index-url https://download.pytorch.org/whl/cu124 --extra-index-url https://pypi.org/simple",
+            line => { if (line.StartsWith("Successfully") || line.StartsWith("ERROR")) log.LogInformation("Learned ways in: {line}", line); },
+            TimeSpan.FromHours(2), ct);
+        if (code != 0) { log.LogInformation("Learned ways in: the training software didn't install (code {code}: {last})", code, last); return false; }
+        var (c2, ver) = await RunPython($"-c \"import sys; sys.path.insert(0, r'{PyLib}'); import torch; print(torch.__version__, 'cuda' if torch.cuda.is_available() else 'cpu')\"", _ => { }, TimeSpan.FromMinutes(5), ct);
+        if (c2 != 0) { log.LogInformation("Learned ways in: the training software doesn't start ({last})", ver); return false; }
+        await File.WriteAllTextAsync(marker, ver, ct);
+        log.LogInformation("Learned ways in: training software ready (PyTorch {v})", ver);
+        return true;
+    }
+
+    private static async Task<(int code, string last)> RunPython(string args, Action<string> onLine, TimeSpan timeout, CancellationToken ct)
+    {
+        var psi = new System.Diagnostics.ProcessStartInfo(Paths.Python, args)
+        {
+            RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true,
+            WorkingDirectory = Root,
+        };
+        psi.Environment["PYTHONIOENCODING"] = "utf-8";
+        psi.Environment["PIP_CACHE_DIR"] = Path.Combine(Path.GetTempPath(), "laia-pip-cache");
+        using var p = new System.Diagnostics.Process { StartInfo = psi };
+        var last = "";
+        void Line(string? l) { if (string.IsNullOrWhiteSpace(l)) return; last = l.Trim(); try { onLine(last); } catch { } }
+        p.OutputDataReceived += (_, e) => Line(e.Data);
+        p.ErrorDataReceived += (_, e) => Line(e.Data);
+        p.Start();
+        try { p.PriorityClass = System.Diagnostics.ProcessPriorityClass.BelowNormal; } catch { }
+        p.BeginOutputReadLine(); p.BeginErrorReadLine();
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(timeout);
+        try { await p.WaitForExitAsync(cts.Token); }
+        catch (OperationCanceledException) { try { p.Kill(true); } catch { } return (-1, "stopped: " + (ct.IsCancellationRequested ? "LAIA closing" : "took too long")); }
+        return (p.ExitCode, last);
+    }
+
     // ------------------------------------------------------------------ the scoreboard
 
     public sealed class ScoreRec
     {
         public string Version { get; set; } = "";
+        /// <summary>"rules", or "model &lt;id&gt;" for the learned ways in.</summary>
+        public string Variant { get; set; } = "";
         public string Airport { get; set; } = "";
         public string Day { get; set; } = "";
         public string Window { get; set; } = "";
@@ -261,7 +483,7 @@ public sealed class LearningService(ILogger<LearningService> log, AirportStore a
         public DateTime At { get; set; }
     }
 
-    private async Task<List<ScoreRec>> ScoreAirport(string icao, string ver, CancellationToken ct)
+    private async Task<List<ScoreRec>> ScoreAirport(string icao, string ver, string variant, RouteModel? model, CancellationToken ct)
     {
         var dayFiles = Directory.Exists(Path.Combine(DataDir, icao))
             ? Directory.GetFiles(Path.Combine(DataDir, icao), "*.json.gz").Select(f => Path.GetFileName(f)[..^".json.gz".Length]).OrderByDescending(d => d, StringComparer.Ordinal).ToList()
@@ -292,17 +514,17 @@ public sealed class LearningService(ILogger<LearningService> log, AirportStore a
             if (count < 6) continue;
             var w = dd.Wind.Where(x => x[0] <= start + 1800).OrderByDescending(x => x[0]).FirstOrDefault();
             var wind = w is null ? new Wind(0, 0) : new Wind(w[1], w[2]);
-            var model = new AirportModel(data);
+            var apt2 = new AirportModel(data);
             var sw = System.Diagnostics.Stopwatch.StartNew();
             var score = await Task.Run(() =>
             {
                 Thread.CurrentThread.Priority = ThreadPriority.Lowest;
-                return RealReplay.Replay(model, prof, wind, arr, start, start + 3600, new ReplaySource(), keepGoing: () => !ct.IsCancellationRequested);
+                return RealReplay.Replay(apt2, prof, wind, arr, start, start + 3600, new ReplaySource(), keepGoing: () => !ct.IsCancellationRequested, model: model);
             }, ct);
             ct.ThrowIfCancellationRequested();
             var rec = new ScoreRec
             {
-                Version = ver, Airport = icao, Day = day, Window = score.Window, Scored = score.Scored, Landed = score.Landed, Order = score.OrderSame,
+                Version = ver, Variant = variant, Airport = icao, Day = day, Window = score.Window, Scored = score.Scored, Landed = score.Landed, Order = score.OrderSame,
                 TimeErr = score.TimeErr, TimeBias = score.TimeBias, Miles = score.MilesDiff, PathNm = score.PathNm, Per10 = score.Per10,
                 Line = score.Line() + $" (wind {wind.FromDeg:000}/{wind.Kt:0}; {sw.Elapsed.TotalSeconds:0} s to run)" + (score.Worst.Count > 0 ? "; furthest out: " + string.Join("; ", score.Worst) : ""),
                 At = DateTime.UtcNow,

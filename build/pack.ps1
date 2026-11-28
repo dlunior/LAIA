@@ -25,6 +25,8 @@ Publish "src\Laia.Setup.Sim\Laia.Setup.Sim.csproj" "$out\setup-sim" @()
 # Speech engine scripts + private Python
 New-Item -ItemType Directory -Force "$out\server-payload\speech", "$out\server-payload\redist" | Out-Null
 Copy-Item "speech\*.py", "speech\requirements.txt" "$out\server-payload\speech\"
+New-Item -ItemType Directory -Force "$out\server-payload\learning" | Out-Null
+Copy-Item "learning\*.py" "$out\server-payload\learning\"
 if ($PythonDir) { Copy-Item $PythonDir "$out\server-payload\python" -Recurse }
 Invoke-WebRequest "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile "$out\server-payload\redist\vc_redist.x64.exe"
 
