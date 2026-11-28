@@ -93,6 +93,8 @@ public sealed class Flight
     public string? LeaderCs;
     /// <summary>The last arrival on a crossing runway or close parallel its landing slot was moved behind (logged once).</summary>
     public string? DepNote;
+    /// <summary>The last kind of change the route check refused for it (logged once per kind).</summary>
+    public string? RefusedNote;
     public double GoFirstAt = -1, JhCheckAt = -1e9, JunctionHeldSince = -1e9, JunctionFreeUntil = -1e9;
     public (string name, Flight ahead)? JhLast;
     public string ExitNote = "";
@@ -759,7 +761,7 @@ public sealed partial class TrafficWorld
         for (var i = 0; i < n; i++) len += (pts[i + 1] - pts[i]).Length;
         len += (rwy.Threshold - pts[n]).Length;
         var straight = (rwy.Threshold - pts[0]).Length;
-        if (len > 2 * straight + 40 * nm) return $"{len / nm:0} nm to fly from {straight / nm:0} nm out";
+        if (len > 2 * straight + 40 * nm) return $"too long: {len / nm:0} nm to fly from {straight / nm:0} nm out";
         return null;
     }
 
@@ -6179,7 +6181,7 @@ public sealed partial class TrafficWorld
         if (RouteProblem(pts, thrIndex, f.Rwy!) is { } bad)
         {
             _routesRefused++;
-            Log($"{f.Callsign}: route refused — vectors for spacing: {bad}; keeps its way in");
+            if (f.RefusedNote != "vectors") { f.RefusedNote = "vectors"; Log($"{f.Callsign}: route refused — vectors for spacing: {bad}; keeps its way in"); }
             f.LastVector = Time;
             return false;
         }
@@ -6279,7 +6281,8 @@ public sealed partial class TrafficWorld
         if (RouteProblem(pts, thrIndex, rwy) is { } bad)
         {
             _routesRefused++;
-            Log($"{f.Callsign}: route refused — base turn at {newNm:0.0} nm: {bad}; keeps its way in");
+            // Once per arrival (the next look at its downwind comes 8 s later and would say the same).
+            if (f.RefusedNote != "base") { f.RefusedNote = "base"; Log($"{f.Callsign}: route refused — base turn at {newNm:0.0} nm: {bad}; keeps its way in"); }
             f.LastTrombone = Time;
             return double.NaN;
         }

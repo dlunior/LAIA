@@ -112,6 +112,9 @@ public sealed class LearningService(ILogger<LearningService> log, AirportStore a
         }
         if (built > 0) log.LogInformation("Learning: training data — {n} airport-days added ({dir})", built, DataDir);
 
+        try { await UpgradeDays(have, ct); }
+        catch (Exception ex) when (!ct.IsCancellationRequested) { log.LogInformation("Learning: days not read again ({msg})", ex.Message); }
+
         // 2. The learned ways in: the examples, then training on the graphics card when there's more to learn from.
         try { await ExportExamples(have, ct); await TrainIfNeeded(ct); }
         catch (Exception ex) when (!ct.IsCancellationRequested) { log.LogInformation("Learning: the ways in weren't trained this round ({msg})", ex.Message); }
@@ -179,6 +182,8 @@ public sealed class LearningService(ILogger<LearningService> log, AirportStore a
     {
         public string Icao { get; set; } = "";
         public string Day { get; set; } = "";
+        /// <summary>2 from 0.1.332: arrivals read per visit (a track split where the aircraft wasn't seen for 5 minutes).</summary>
+        public int Format { get; set; }
         public bool HeldBack { get; set; }
         /// <summary>Surface wind each hour: [Unix hour start, from°, kt].</summary>
         public List<double[]> Wind { get; set; } = new();
@@ -204,7 +209,7 @@ public sealed class LearningService(ILogger<LearningService> log, AirportStore a
 
     private static async Task WriteDay(string icao, string day, List<IReadOnlyList<TrackPoint>> tracks, List<RealArrival> arr, List<double[]> wind, CancellationToken ct)
     {
-        var d = new DayData { Icao = icao, Day = day, HeldBack = HeldBack(day), Wind = wind };
+        var d = new DayData { Icao = icao, Day = day, Format = DayFormat, HeldBack = HeldBack(day), Wind = wind };
         foreach (var a in arr)
             d.Arrivals.Add(new ArrRec { Cs = a.Callsign, Type = a.Type, Rwy = a.Runway, EntryT = a.EntryT, ThrT = Math.Round(a.ThrT, 1), Nm = Math.Round(a.TrackNm, 2), Pts = a.Pts.Select(P).ToList() });
         foreach (var t in tracks)
@@ -219,6 +224,35 @@ public sealed class LearningService(ILogger<LearningService> log, AirportStore a
         await using (var gz = new GZipStream(fs, CompressionLevel.Optimal))
             await JsonSerializer.SerializeAsync(gz, d, Json, ct);
         File.Move(path + ".tmp", path, true);
+    }
+
+    private const int DayFormat = 2;
+
+    /// <summary>
+    /// Day files written before the arrivals were read per visit (0.1.330–0.1.331): the arrivals read again from the
+    /// tracks kept in them — callsigns and types kept from the old reading where the threshold time matches.
+    /// </summary>
+    private async Task UpgradeDays(List<string> hubs, CancellationToken ct)
+    {
+        var n = 0;
+        foreach (var icao in hubs)
+        {
+            if (airports.Data(icao) is not { } data || !Directory.Exists(Path.Combine(DataDir, icao))) continue;
+            AirportModel? apt = null;
+            foreach (var f in Directory.GetFiles(Path.Combine(DataDir, icao), "*.json.gz"))
+            {
+                ct.ThrowIfCancellationRequested();
+                var day = Path.GetFileName(f)[..^".json.gz".Length];
+                if (ReadDay(icao, day) is not { } dd || dd.Format >= DayFormat) continue;
+                apt ??= new AirportModel(data);
+                var tracks = dd.Tracks.Select(t => (IReadOnlyList<TrackPoint>)t.Select(Tp).ToList()).ToList();
+                var legs = dd.Arrivals.Where(a => a.Cs.Length > 0).Select(a => new RealLeg(a.Cs, a.Type, "", icao, null, a.ThrT)).ToList();
+                var arr = RealReplay.Arrivals(apt, tracks, legs);
+                await WriteDay(icao, day, tracks, arr, dd.Wind, ct);
+                n++;
+            }
+        }
+        if (n > 0) log.LogInformation("Learning: {n} airport-days read again (arrivals per visit, types from final-approach speed where there was no flight list)", n);
     }
 
     private static DayData? ReadDay(string icao, string day)
@@ -417,25 +451,49 @@ public sealed class LearningService(ILogger<LearningService> log, AirportStore a
         log.LogInformation("Learned ways in: model {id} ready; the scoreboard decides where it's used", m.Id);
     }
 
-    /// <summary>PyTorch with NVIDIA's CUDA libraries, in LAIA's data folder (about 3 GB, once).</summary>
+    /// <summary>
+    /// PyTorch with NVIDIA's CUDA libraries, in LAIA's data folder (about 3 GB, once). The first install (0.1.331) took
+    /// PyTorch's processor-only build from the general package index (torch 2.15.0+cpu — trained on the processor, not
+    /// the 2080 Ti): the CUDA builds come only from PyTorch's own index, newest CUDA first, each checked by asking it for
+    /// the graphics card. A processor-only install is tried again for the card once a day.
+    /// </summary>
     private async Task<bool> EnsureTorch(CancellationToken ct)
     {
         var marker = Path.Combine(PyLib, "laia-torch.txt");
-        if (File.Exists(marker)) return true;
-        log.LogInformation("Learned ways in: installing the training software (PyTorch with CUDA, about 3 GB, once) in {dir}", PyLib);
-        Status = "learned ways in: installing the training software";
+        var have = File.Exists(marker) ? (await File.ReadAllTextAsync(marker, ct)).Trim() : "";
+        if (have.EndsWith(" cuda")) return true;
+        if (have == "cpu" && DateTime.UtcNow - File.GetLastWriteTimeUtc(marker) < TimeSpan.FromDays(1)) return true;
+        Status = "learned ways in: installing the training software for the graphics card";
+        foreach (var cu in new[] { "cu130", "cu128", "cu126", "cu124" })
+        {
+            log.LogInformation("Learned ways in: installing PyTorch for the graphics card (CUDA build {cu}, about 3 GB) in {dir}", cu, PyLib);
+            DeleteDir(PyLib);
+            Directory.CreateDirectory(PyLib);
+            var (code, last) = await RunPython($"-m pip install --no-warn-script-location --disable-pip-version-check --progress-bar off --target \"{PyLib}\" " +
+                $"torch --index-url https://download.pytorch.org/whl/{cu}",
+                line => { if (line.StartsWith("Successfully") || line.StartsWith("ERROR")) log.LogInformation("Learned ways in: {line}", line); },
+                TimeSpan.FromHours(2), ct);
+            if (code != 0) { log.LogInformation("Learned ways in: {cu} didn't install ({last})", cu, last); continue; }
+            var (c2, ver) = await RunPython($"-c \"import sys; sys.path.insert(0, r'{PyLib}'); import torch; ok = torch.cuda.is_available(); print(torch.__version__, torch.cuda.get_device_name(0) if ok else '', 'cuda' if ok else 'cpu')\"", _ => { }, TimeSpan.FromMinutes(5), ct);
+            if (c2 == 0 && ver.EndsWith(" cuda"))
+            {
+                await File.WriteAllTextAsync(marker, ver, ct);
+                log.LogInformation("Learned ways in: training software ready for the graphics card (PyTorch {v})", ver);
+                return true;
+            }
+            log.LogInformation("Learned ways in: {cu} installed but doesn't see the graphics card ({ver})", cu, ver);
+        }
+        // No CUDA build works here: the processor-only build (training still runs, slower).
+        DeleteDir(PyLib);
         Directory.CreateDirectory(PyLib);
-        var (code, last) = await RunPython($"-m pip install --no-warn-script-location --disable-pip-version-check --progress-bar off --upgrade --target \"{PyLib}\" " +
-            "torch --index-url https://download.pytorch.org/whl/cu124 --extra-index-url https://pypi.org/simple",
-            line => { if (line.StartsWith("Successfully") || line.StartsWith("ERROR")) log.LogInformation("Learned ways in: {line}", line); },
-            TimeSpan.FromHours(2), ct);
-        if (code != 0) { log.LogInformation("Learned ways in: the training software didn't install (code {code}: {last})", code, last); return false; }
-        var (c2, ver) = await RunPython($"-c \"import sys; sys.path.insert(0, r'{PyLib}'); import torch; print(torch.__version__, 'cuda' if torch.cuda.is_available() else 'cpu')\"", _ => { }, TimeSpan.FromMinutes(5), ct);
-        if (c2 != 0) { log.LogInformation("Learned ways in: the training software doesn't start ({last})", ver); return false; }
-        await File.WriteAllTextAsync(marker, ver, ct);
-        log.LogInformation("Learned ways in: training software ready (PyTorch {v})", ver);
+        var (c3, l3) = await RunPython($"-m pip install --no-warn-script-location --disable-pip-version-check --progress-bar off --target \"{PyLib}\" torch --index-url https://download.pytorch.org/whl/cpu", _ => { }, TimeSpan.FromHours(1), ct);
+        if (c3 != 0) { log.LogInformation("Learned ways in: the training software didn't install ({last})", l3); return false; }
+        await File.WriteAllTextAsync(marker, "cpu", ct);
+        log.LogInformation("Learned ways in: training on the processor (no CUDA build of PyTorch sees the graphics card)");
         return true;
     }
+
+    private static void DeleteDir(string d) { try { if (Directory.Exists(d)) Directory.Delete(d, true); } catch { } }
 
     private static async Task<(int code, string last)> RunPython(string args, Action<string> onLine, TimeSpan timeout, CancellationToken ct)
     {

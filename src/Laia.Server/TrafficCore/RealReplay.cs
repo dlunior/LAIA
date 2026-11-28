@@ -28,7 +28,20 @@ public static class RealReplay
         var res = new List<RealArrival>();
         var ends = apt.Ends.Where(e => e.LengthM >= 1500).ToList();
         var landing = legs?.Where(l => l.Landing is not null && string.Equals(l.To, apt.Icao, StringComparison.OrdinalIgnoreCase)).ToList();
-        foreach (var tr in tracks)
+        // One aircraft's day near the airport can hold several visits (it departs in the morning and comes back in the
+        // evening): split where it wasn't seen for 5 minutes, so an arrival starts where it really came in.
+        var pieces = new List<IReadOnlyList<TrackPoint>>();
+        foreach (var t0 in tracks)
+        {
+            var cur = new List<TrackPoint>();
+            for (var i = 0; i < t0.Count; i++)
+            {
+                if (i > 0 && t0[i].T - t0[i - 1].T > 300) { if (cur.Count > 0) pieces.Add(cur); cur = new List<TrackPoint>(); }
+                cur.Add(t0[i]);
+            }
+            if (cur.Count > 0) pieces.Add(cur);
+        }
+        foreach (var tr in pieces)
         {
             if (tr.Count < 10) continue;
             var xy = tr.Select(p => apt.Map.ToXY(p.Lat, p.Lon)).ToList();
@@ -62,15 +75,34 @@ public static class RealReplay
             var lastT = double.NegativeInfinity;
             for (var k = 0; k <= bestK; k++)
                 if (tr[k].T - lastT >= 9.5) { pts.Add(tr[k]); lastT = tr[k].T; }
-            var (cs, type) = ("", "B738");
+            var (cs, type) = ("", "");
             if (landing is { Count: > 0 })
             {
                 var m = landing.Where(l => Math.Abs(l.Landing!.Value - bestT) < 900).OrderBy(l => Math.Abs(l.Landing!.Value - bestT)).FirstOrDefault();
-                if (m is not null) { cs = m.Callsign; if (m.Type.Length > 0) type = m.Type; }
+                if (m is not null) { cs = m.Callsign; type = m.Type; }
             }
+            // No flight list that day (the Collector began keeping them in mid-November): the type from how fast it
+            // flew the last 6 to 2 nm of its final — a heavy, an airliner or a regional jet.
+            if (type.Length == 0) type = TypeBySpeed(tr, xy, bestE, bestT);
             res.Add(new RealArrival(cs, type, bestE.Ident, entry.T, entry.Lat, entry.Lon, entryAlt, bestT, len / Geo2.MPerNm, pts));
         }
         return res.OrderBy(a => a.ThrT).ToList();
+    }
+
+    /// <summary>A type for a track with no flight list: its ground speed over 6 to 2 nm out on final — 150 kt or more a
+    /// heavy (B77W), under 128 kt a regional jet (E75L), otherwise a narrowbody (B738).</summary>
+    public static string TypeBySpeed(IReadOnlyList<TrackPoint> tr, IReadOnlyList<V2> xy, RunwayEnd rwy, double thrT)
+    {
+        var nm = Geo2.MPerNm;
+        int a = -1, b = -1;
+        for (var k = 0; k < tr.Count && tr[k].T <= thrT; k++)
+        {
+            var o = -rwy.Along(xy[k]) / nm;
+            if (o <= 6 && o >= 2 && Math.Abs(rwy.Offset(xy[k])) < 0.5 * nm) { if (a < 0) a = k; b = k; }
+        }
+        if (a < 0 || b <= a || tr[b].T - tr[a].T < 20) return "B738";
+        var kt = (xy[b] - xy[a]).Length / (tr[b].T - tr[a].T) / 0.5144;
+        return kt >= 150 ? "B77W" : kt < 128 ? "E75L" : "B738";
     }
 
     private static double? Lerp(double? a, double? b, double f) => a is { } x && b is { } y ? x + (y - x) * f : a ?? b;
@@ -96,11 +128,17 @@ public static class RealReplay
         public double PathNm = double.NaN;
         public Dictionary<string, double> Per10 = new();
         public List<string> Worst = new();
+        /// <summary>Minutes from coming in to the threshold: the real arrivals' (median) and LAIA's.</summary>
+        public double RealMin = double.NaN, LaiaMin = double.NaN;
+        /// <summary>Why the route check refused ways in, and how many arrivals each time (one count per arrival and reason).</summary>
+        public Dictionary<string, int> Refused = new();
 
         public string Line() =>
             $"{Airport} {Window}: {Landed} of {Scored} real arrivals flown to the runway (of {Spawned} brought in) — landing order as real {Pct(OrderSame)}, " +
             $"landing time ±{TimeErr:0} s ({Sg(TimeBias, "0")} s on average), track miles {Sg(MilesDiff, "0.0")} nm against the real ones, path {PathNm:0.0} nm from the real one; " +
-            $"per 10 landings — {string.Join(", ", Per10.Select(kv => $"{kv.Key} {kv.Value:0.0}"))}";
+            $"{RealMin:0} min from coming in to landing against LAIA's {LaiaMin:0}; " +
+            $"per 10 landings — {string.Join(", ", Per10.Select(kv => $"{kv.Key} {kv.Value:0.0}"))}" +
+            (Refused.Count > 0 ? $"; routes refused for: {string.Join(", ", Refused.OrderByDescending(kv => kv.Value).Take(4).Select(kv => $"{kv.Key} ({kv.Value})"))}" : "");
         private static string Pct(double x) => double.IsNaN(x) ? "–" : $"{100 * x:0}%";
         public static string Sg(double x, string fmt) => double.IsNaN(x) ? "–" : (Math.Round(x, fmt.Length > 1 ? 1 : 0) > 0 ? "+" : Math.Round(x, fmt.Length > 1 ? 1 : 0) < 0 ? "-" : "") + Math.Abs(x).ToString(fmt);
     }
@@ -190,6 +228,8 @@ public static class RealReplay
                     if (Math.Sign(ra.ThrT - rb.ThrT) == Math.Sign(cross[fa] - cross[fb])) same++;
                 }
             if (pairs > 0) score.OrderSame = (double)same / pairs;
+            score.RealMin = Median(landed.Select(kv => (kv.Value.ThrT - kv.Value.EntryT) / 60));
+            score.LaiaMin = Median(landed.Select(kv => (cross[kv.Key] + t0 - kv.Value.EntryT) / 60));
             foreach (var kv in landed.OrderByDescending(kv => Math.Abs(cross[kv.Key] + t0 - kv.Value.ThrT)).Take(3))
                 score.Worst.Add($"{kv.Key.Callsign} on {kv.Value.Runway}: {Score.Sg(cross[kv.Key] + t0 - kv.Value.ThrT, "0")} s against its real landing, {Score.Sg(Len(path[kv.Key]) / Geo2.MPerNm - kv.Value.TrackNm, "0.0")} nm");
         }
@@ -198,7 +238,16 @@ public static class RealReplay
         score.Per10["go-arounds"] = C("going around") / per;
         score.Per10["break-offs"] = C("breaking off") / per;
         score.Per10["vectors"] = lines.Count(l => l.Contains("vectors for spacing (")) / per;
-        score.Per10["routes refused"] = C("route refused") / per;
+        var refusals = lines.Where(l => l.Contains("route refused")).ToList();
+        score.Per10["routes refused"] = refusals.Select(l => l.Split(':')[0]).Distinct().Count() / per;
+        foreach (var l in refusals)
+        {
+            var why = System.Text.RegularExpressions.Regex.Match(l, @"route refused — (?:(base turn|vectors)[^:]*: )?(.*?)(?: \d|;| \(|$)");
+            var kind = (why.Groups[1].Success && why.Groups[1].Value.Length > 0 ? why.Groups[1].Value + ": " : "way in: ") + why.Groups[2].Value
+                .Replace("it crosses its own track", "crosses itself").Replace("it leaves its final", "leaves its final").Replace("it turns through", "turns");
+            kind = System.Text.RegularExpressions.Regex.Replace(kind, @"[\d.,]+°?", "").Trim();
+            score.Refused[kind] = score.Refused.GetValueOrDefault(kind) + 1;
+        }
         score.Per10["separation warnings"] = C("SEPARATION") / per;
         return score;
     }
