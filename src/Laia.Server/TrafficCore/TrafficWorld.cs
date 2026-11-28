@@ -3995,13 +3995,13 @@ public sealed partial class TrafficWorld
     /// <summary>An air route with corners sized for the speed flown there (25° bank).</summary>
     /// <param name="from">The aircraft it's for, when it's already flying: the new path begins with the turn it can
     /// fly from the way it's going now, at its speed (25° of bank) — never a swing round on the spot.</param>
-    private static PathGeom AirPath(List<V2> pts, Func<int, double> plannedIas, double altFt, Flight? from = null, Func<int, double>? altAt = null)
+    private static PathGeom AirPath(List<V2> pts, Func<int, double> plannedIas, double altFt, Flight? from = null, Func<int, double>? altAt = null, double? fromDir = null)
     {
         double? startDir = null; double startR = 0;
         if (from is { OnGround: false, Path: { } old } && pts.Count > 0 && (pts[0] - from.Pos).Length < 100)
         {
-            var d = old.At(Math.Clamp(from.S, 0, old.Length)).dir;
-            startDir = from.Reverse ? Geo2.Norm(d + 180) : d;
+            var d = fromDir ?? old.At(Math.Clamp(from.S, 0, old.Length)).dir;
+            startDir = from.Reverse && fromDir is null ? Geo2.Norm(d + 180) : d;
             var v0 = Wind.Tas(Math.Max(from.Ias, 140), from.AltFt) * Kt;
             startR = Math.Max(600, v0 * v0 / (G * Math.Tan(25 * Math.PI / 180)));
         }
@@ -5809,12 +5809,13 @@ public sealed partial class TrafficWorld
             climbOut = p + rwy.Dir * (0.5 * Geo2.MPerNm) + V2.FromBearing(hdg) * (3.5 * Geo2.MPerNm);
             Log($"{f.Callsign}: go-around turns {(turn > 0 ? "right" : "left")} heading {hdg:000} away from {dep.Callsign} departing");
         }
+        var dirNow = f.Path!.At(Math.Clamp(f.S, 0, f.Path.Length)).dir;   // before the path is built again
         BuildArrivalPath(f, climbOut);
         // Prepend the current position so the path starts where the aircraft is.
         var pts = new List<V2> { p };
         pts.AddRange(f.Path!.Points);
         var thrIndex = pts.Count - 2;
-        f.Path = AirPath(pts, i => i >= thrIndex ? 1 : 180, 3000, from: f);
+        f.Path = AirPath(pts, i => i >= thrIndex ? 1 : 180, 3000, from: f, fromDir: dirNow);
         f.ThrS = f.Path.PointS[thrIndex];
         f.S = 0;
         f.LandingChecked = false;
