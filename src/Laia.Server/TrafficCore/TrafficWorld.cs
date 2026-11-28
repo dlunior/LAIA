@@ -2127,7 +2127,7 @@ public sealed partial class TrafficWorld
     /// - a loop: turning through 330° or more the same way within 15 minutes (no holds are ever given, and no real way
     ///   in — downwind, base, final — turns more than about 270° one way);
     /// - crossing its own track within 2,000 ft of the height it was at before;
-    /// - a turn sharper than an airliner flies: more than half again the rate of a 30° bank at its speed;
+    /// - a turn sharper than an airliner flies: over a quarter more than the rate of a 30° bank at its speed (about 35° of bank);
     /// - an intercept onto its final steeper than 45° (7110.65 5-9-2: 30°, 20° near the approach gate);
     /// - turning off its final once established on it (other than a go-around or a break-off).
     /// Each is logged once per flight as "UNREALISTIC" with where it was. A go-around or a break-off starts the watch
@@ -2161,10 +2161,10 @@ public sealed partial class TrafficWorld
             var last = f.Flown[^1];
             var dh = Geo2.Diff(last.hdg, cur.hdg);
             var dt = cur.t - last.t;
-            // Too sharp for an airliner: half again a 30° bank's rate at its true airspeed.
+            // Too sharp for an airliner: more than a quarter over a 30° bank's rate at its true airspeed (about 35° of bank).
             var v = Math.Max(60, Wind.Tas(Math.Max(f.Ias, 120), f.AltFt)) * Kt;
             var maxRate = G * Math.Tan(30 * Math.PI / 180) / v * 180 / Math.PI;
-            if (Math.Abs(dh) > 10 && Math.Abs(dh) / dt > 1.5 * maxRate)
+            if (Math.Abs(dh) > 8 && Math.Abs(dh) / dt > 1.25 * maxRate)
                 Fault("sharp", $"turned {Math.Abs(dh):0}° in {dt:0} s at {f.Ias:0} kt — {Math.Abs(dh) / dt:0.0}°/s, an airliner turns about {maxRate:0.0}°/s");
             // A loop: 330° the same way within 15 minutes.
             double sum = 0;
