@@ -2164,13 +2164,6 @@ public sealed partial class TrafficWorld
         if (f.Flown.Count > 400) f.Flown.RemoveRange(0, f.Flown.Count - 400);
     }
 
-    private static bool SegmentsCross(V2 a, V2 b, V2 c, V2 d)
-    {
-        double O(V2 p, V2 q, V2 r) => V2.Cross(q - p, r - p);
-        var d1 = O(c, d, a); var d2 = O(c, d, b); var d3 = O(a, b, c); var d4 = O(a, b, d);
-        return (d1 > 0) != (d2 > 0) && (d3 > 0) != (d4 > 0) && Math.Abs(d1) > 1e-6 && Math.Abs(d3) > 1e-6;
-    }
-
     private void RecordTrail(Flight f)
     {
         if (f.Phase is "parked" or "boarding") return;
