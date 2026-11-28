@@ -1416,6 +1416,9 @@ Console.WriteLine("== An ILS fix coded 'at or above' the intercept altitude, wit
     Check(Math.Abs(offAt1000) < 300, "on the glidepath at 1,000 ft above the field");
 }
 
+// The old behaviour (real tracks stitched into ways in), kept behind a switch since 0.1.333 (user, 28 Nov: "no flight
+// should have a hard coded route") — tested with the switch on.
+TrafficWorld.CopyRealTracks = true;
 Console.WriteLine("== Vectors off the STAR where real traffic is turned off it (KORD, 15 Nov: arrivals from the NW 'blindly following the STAR')");
 {
     var nm = Geo2.MPerNm;
@@ -1553,6 +1556,45 @@ Console.WriteLine("== Real tracks chosen for the need: an empty sky gets the sho
     Check(TrafficWorld.Simplify(zig, 0.25 * nm).Count == 2, "a wiggling line within a quarter mile simplifies to a straight leg");
     var loop = new List<V2>(); for (var a = 0; a <= 380; a += 20) loop.Add(V2.FromBearing(a, 3 * nm) + new V2(0, 0));
     Check(TrafficWorld.TotalTurn(loop, 25 * nm) > 300, "a loop is measured as one");
+}
+
+TrafficWorld.CopyRealTracks = false;
+Console.WriteLine("== No copied routes (user, 28 Nov): with real tracks learned, the way in is LAIA's own downwind, base and final, shaped as real controllers fly it");
+{
+    var nm = Geo2.MPerNm;
+    var data = TestAirport.Build(false);
+    var map = new LocalMap(data.Lat, data.Lon);
+    double[] P(double x, double y) { var (la, lo) = map.ToLatLon(new V2(x * nm, y * nm)); return new[] { la, lo, 6000 }; }
+    var prof = new AirportProfile { Icao = "TEST", Source = "test", Day = "test" };
+    prof.Arrivals["27"] = new AirportProfile.RunwayArrivals { Count = 40, JoinP25 = 13, JoinP50 = 14, JoinP75 = 15, BaseNm = 17, DownwindNm = 5, InterceptDeg = 25 };
+    for (var k = 0; k < 6; k++)
+    {
+        var pts = new List<double[]>();
+        for (var x = -20.0; x <= 6; x += 1) pts.Add(P(x, 9));
+        for (var x = 7.0; x <= 12; x += 1) pts.Add(P(x, 5));
+        for (var x = 11.0; x >= 1.5; x -= 1) pts.Add(P(x, 0));
+        prof.Samples.Add(new AirportProfile.SampleTrack { Kind = "arrival", Runway = "27", Points = pts });
+    }
+    var world = new TrafficWorld(new AirportModel(data), new TestSource(), seed: 41) { Automatic = false, Wind = new Wind(270, 5), Learned = prof };
+    world.SelectRunways(true);
+    var f = world.SpawnArrival(45, true)!;
+    var e27 = world.Apt.Ends.First(e => e.Ident == "27");
+    // Where it's established on the final: the last point of its way in that's off the centreline.
+    double joinOut = double.NaN;
+    for (var d = f.Path!.Length; d > 0; d -= 200) { var q = f.Path.At(d).p; if (e27.Along(q) < 0 && Math.Abs(e27.Offset(q)) > 0.3 * nm) { joinOut = -e27.Along(q) / nm; break; } }
+    Console.WriteLine($"  {f.Route}; joins the final about {joinOut:0.0} nm out (real controllers here: 13–15)");
+    Check(!f.Route.Contains("real traffic"), "no copied real track in its way in");
+    Check(joinOut is > 10 and < 19, "its final is joined where real controllers here join it (the learned shape)");
+    var g0 = TrafficWorld.GeneralShape;
+    TrafficWorld.GeneralShape = new VectorShape(14, 18, 5, 25);
+    var w2 = new TrafficWorld(new AirportModel(TestAirport.Build(false)), new TestSource(), seed: 41) { Automatic = false, Wind = new Wind(270, 5) };
+    w2.SelectRunways(true);
+    var f2 = w2.SpawnArrival(45, true)!;
+    double join2 = double.NaN;
+    for (var d = f2.Path!.Length; d > 0; d -= 200) { var q = f2.Path.At(d).p; if (e27.Along(q) < 0 && Math.Abs(e27.Offset(q)) > 0.3 * nm) { join2 = -e27.Along(q) / nm; break; } }
+    TrafficWorld.GeneralShape = g0;
+    Console.WriteLine($"  an airport with nothing learned, the pattern learned across the hubs (final 14 nm): {f2.Route}; joins about {join2:0.0} nm out");
+    Check(join2 is > 10 and < 19, "an airport with nothing of its own learned flies the pattern learned across the hubs");
 }
 
 Console.WriteLine("== KATL's ATIS info I (21 Nov): three landing runways, and how old a broadcast is");
