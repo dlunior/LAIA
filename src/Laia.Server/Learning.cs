@@ -18,7 +18,7 @@ namespace Laia.Server;
 ///   break-offs, vectors, refused routes and separation warnings per 10 landings. Once per version, logged and kept, so
 ///   each new version (and later each learned model) is measured against the last.
 /// </summary>
-public sealed class LearningService(ILogger<LearningService> log, AirportStore airports, SettingsStore settings) : BackgroundService
+public sealed partial class LearningService(ILogger<LearningService> log, AirportStore airports, SettingsStore settings) : BackgroundService
 {
     /// <summary>
     /// routegen's hubs and focus cities (WIKI_HUBS, 86 airports) that the Collector watches — the US, Canada and Puerto
